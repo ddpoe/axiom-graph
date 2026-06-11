@@ -1,0 +1,92 @@
+[tool.poetry]
+name = "axiom-graph"
+version = "2.1.0"
+description = "Project knowledge indexer for AI agents — scans code, tracks documentation staleness, and serves a knowledge graph to AI agents via MCP"
+authors = ["ddpoe <dap182@pitt.edu>"]
+license = "MIT"
+readme = "README.md"
+keywords = ["indexer", "documentation", "staleness", "knowledge-graph", "mcp", "ai-agents"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Documentation",
+    "Topic :: Software Development :: Quality Assurance",
+]
+packages = [{include = "axiom_graph"}]
+include = [
+    "axiom_graph/viz/static/index.html",
+    "axiom_graph/viz/static/css/**/*",
+    "axiom_graph/viz/static/js/**/*",
+    "axiom_graph/ontology.yaml",
+]
+
+[tool.poetry.urls]
+Homepage = "https://github.com/ddpoe/axiom-graph"
+Documentation = "https://axiom-graph.readthedocs.io"
+Repository = "https://github.com/ddpoe/axiom-graph"
+Changelog = "https://github.com/ddpoe/axiom-graph/blob/master/CHANGELOG.md"
+
+[tool.poetry.dependencies]
+python = ">=3.10,<4.0"
+pyyaml = ">=6.0"
+markdown-it-py = ">=3.0"
+click = ">=8.0"
+mcp = {version = ">=1.0", extras = ["cli"]}
+tomli = {version = ">=2.0", python = "<3.11"}
+docstring-parser = ">=0.15"
+axiom-annotations = ">=0.1.0,<0.2.0"
+fastapi = {version = ">=0.100", optional = true}
+uvicorn = {version = ">=0.20", optional = true}
+sqlite-vec = {version = ">=0.1.1", optional = true}
+fastembed = {version = ">=0.3", optional = true, python = ">=3.10,<3.13"}
+onnxruntime = {version = ">=1.17,<1.20", optional = true, python = ">=3.10,<3.13"}
+sentence-transformers = {version = ">=2.0", optional = true}
+tree-sitter = {version = "^0.25.2", optional = true}
+tree-sitter-javascript = {version = "^0.25.0", optional = true}
+tree-sitter-typescript = {version = "^0.23.2", optional = true}
+
+[tool.poetry.extras]
+viz = ["fastapi", "uvicorn"]
+semantic = ["sqlite-vec", "fastembed", "onnxruntime"]
+semantic-torch = ["sqlite-vec", "sentence-transformers"]
+js = ["tree-sitter", "tree-sitter-javascript", "tree-sitter-typescript"]
+
+[tool.poetry.scripts]
+axiom-graph = "axiom_graph.cli:main"
+axiom-graph-mcp = "axiom_graph.mcp_server:run"
+
+[tool.poetry.group.docs.dependencies]
+sphinx = {version = "^9.1.0", python = ">=3.12"}
+myst-parser = {version = "^5.1.0", python = ">=3.12"}
+furo = {version = "^2025.12.19", python = ">=3.12"}
+sphinxcontrib-mermaid = {version = "^2.0.2", python = ">=3.12"}
+sphinx-click = {version = "^6.2.0", python = ">=3.12"}
+scanpydoc = {version = "^0.17.3", python = ">=3.12"}
+
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^9.0.2"
+ruff = "^0.15.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = [
+    "F841",  # unused variable — annotation step markers (口 = Step(...)) are intentionally assigned
+    "E402",  # module-level import not at top — Windows encoding fix runs before imports
+    "E501",  # line too long — handled by formatter
+    "E741",  # ambiguous variable name
+]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*" = ["F541"]  # f-string without placeholders OK in scripts
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

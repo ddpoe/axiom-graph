@@ -1,0 +1,107 @@
+{
+  "title": "Template: PEV Cycle Manifest",
+  "sections": [
+    {
+      "id": "purpose",
+      "heading": "Purpose",
+      "content": "This template is copied by the orchestrator when creating a new PEV cycle manifest at `docs/pev/cycles/{cycle-id}.json`. Each section contains instructions the agent replaces with real content. The orchestrator creates the doc from this template, fills `status` and `request`, then dispatches the Architect to fill `scope` and `architect`.\n\nCycle ID format: `pev-YYYY-MM-DD-{slugified-purpose}` (e.g., `pev-2026-03-21-add-history-filtering`). Slug: lowercase, hyphens, truncated to 40 chars. Orchestrator checks `docs/pev/cycles/` for collisions; appends `-2`, `-3` if needed."
+    },
+    {
+      "id": "status",
+      "heading": "Status",
+      "content": "**Filled by:** Orchestrator — created at start, updated at every phase transition.\n\n**Example:**\n```\nPhase: planning\nBaseline SHA: abc1234def5678\nStarted: 2026-03-21T14:30:00Z\nCycle ID: pev-2026-03-21-add-history-filtering\nEntry baseline: main 12 LINKED_STALE / worktree 12 — matched (env parity OK)\n\nPhase transitions:\n- planning: 2026-03-21T14:30:00Z — cycle created\n- builder: 2026-03-21T15:00:00Z — plan approved\n- auditor: 2026-03-21T16:30:00Z — code approved, merged\n- commit-ready: 2026-03-21T17:00:00Z — audit approved\n- completed: 2026-03-21T17:05:00Z — commit abc1234\n```\n\n**Instructions:** Update this section at every phase transition. Append each transition with timestamp. `baseline_sha` is main HEAD at cycle start — all diffs reference this. On completion, add commit SHA. On failure, set phase to `incomplete` with reason. The **entry baseline** (main vs worktree staleness after env-parity provisioning) is recorded here at cycle start as the left bracket; its closing right bracket — the Phase 6 **pre-merge check** verdict (`clean` / `unexplained-drift`) — is recorded in the `change-set` section, not here. Together they make the cycle's staleness a verified delta and (with a passing Reviewer verdict — `PASS`/`PASS_WITH_CONCERNS`) license the Auditor's code/test blanket-clean."
+    },
+    {
+      "id": "request",
+      "heading": "Request",
+      "content": "**Filled by:** Orchestrator — at cycle start.\n\n**Example:**\n```\nAdd a history endpoint that supports filtering by date range\n```\n\n**Instructions:** Paste the user's original `/pev-cycle` prompt verbatim. Do not summarize or rephrase."
+    },
+    {
+      "id": "scope",
+      "heading": "Scope",
+      "content": "**Filled by:** Architect — during planning phase.\n\n**Example:**\n```\nModules affected: history subsystem (axiom_graph.history), MCP server (axiom_graph.mcp_server).\n\nScope decision: Single-feature change targeting the history subsystem.\n```\n\n**Instructions:** Describe the scope as a coarse boundary — which modules and subsystems are involved. Do NOT list per-function changes. State the scope decision: single-feature (targets one feature tree) or cross-cutting (3+ features → reference or propose ADR). The Auditor uses `axiom_graph_check` and the Builder's change-set to determine review scope empirically, not this list."
+    },
+    {
+      "id": "architect",
+      "heading": "Architect Plan",
+      "content": "**Filled by:** Architect — when planning is complete. This is a Shape Up-style pitch: orientation and boundaries for the Builder, not a prescriptive implementation spec.\n\n**Sub-sections to create:**\n\n### Problem\nWhat is being solved and why. 2-3 sentences. Ground it in the actual codebase — reference specific current behavior that's insufficient.\n\n### User Stories\n3-5 coarse outcomes that define \"done\" for this cycle. Format: \"As a [role], I want [action], so that [value].\" These are the acceptance criteria — when these things work, the cycle is done. Not a fine-grained capabilities checklist.\n\n### Solution Sketch\nFat-marker description of the approach at module level. Enough to show feasibility and orient the Builder on roughly WHERE and WHAT, but not enough to dictate HOW. If you're specifying function signatures, parameter names, or code snippets — you've gone too far.\n\n### Constraints\nRabbit holes (don't go here), no-gos (explicitly out of scope), trade-offs accepted, test budget guidance (5-10 focused tests per subsystem change). This section sets boundaries the Builder must respect.\n\n### Affected Nodes\naxiom-graph node IDs and file paths that this cycle expects to touch. Used by the Auditor to distinguish expected vs collateral staleness.\n\n### Tasks\nOrdered implementation task list for the Builder. Each task names which axiom-graph node IDs to read/modify, which user story it satisfies, and a one-line hint. 3-8 tasks typical.\n\n### Required Artifacts\nConcrete deliverables this cycle must produce — what the Reviewer checks against the Builder's output.\n\n### Test Plan\nArchitect-proposed Tier 2 and Tier 3 tests linked to user stories. Table format: User Story | Tier | Scenario | Proves. Tier 1 tests are the Builder's domain. The Builder uses this as guidance (may deviate with justification). The Reviewer checks actual tests against this table.\n\n### Changelog Draft\nDraft changelog entry summarizing what changed from the user's perspective.\n\n### Source Documents\nList every ADR, PRD, design spec, prior cycle doc, or issue that informed this pitch. For each, include: (1) the axiom-graph doc ID or file path, (2) a one-line summary of what constraint or requirement it contributes. The Reviewer uses this list to cross-check the pitch against upstream intent. If no source documents exist (greenfield work), state \"None — greenfield.\"\n\n### Continuation Checkpoint\n**Only present if the Architect hit the context leash.** Written by the orchestrator from the Architect's return.\n\n**Example:**\n```\n### Continuation (incarnation 1)\nCompleted:\n- Scope decision: single-feature (history subsystem)\n- scope section written\n- architect.problem written\n- architect.user-stories written\n\nIn progress:\n- architect.solution-sketch — approach described, key decisions remaining\n\nRemaining:\n- architect.constraints\n\nKey decisions so far:\n- Filter applied as WHERE clause on recorded_at (already indexed)\n- No schema changes needed\n```",
+      "sections": [
+        {
+          "id": "problem",
+          "heading": "Problem",
+          "content": "(Architect replaces this with the problem statement)"
+        },
+        {
+          "id": "user-stories",
+          "heading": "User Stories",
+          "content": "(Architect replaces this with scoped user stories)"
+        },
+        {
+          "id": "solution-sketch",
+          "heading": "Solution Sketch",
+          "content": "(Architect replaces this with fat-marker solution sketch)"
+        },
+        {
+          "id": "constraints",
+          "heading": "Constraints",
+          "content": "(Architect replaces this with constraints and trade-offs)"
+        },
+        {
+          "id": "affected-nodes",
+          "heading": "Affected Nodes",
+          "content": "(Architect replaces this with affected node table)"
+        },
+        {
+          "id": "tasks",
+          "heading": "Tasks",
+          "content": "(Architect replaces this with ordered implementation task list)"
+        },
+        {
+          "id": "required-artifacts",
+          "heading": "Required Artifacts",
+          "content": "(Architect replaces this with concrete deliverables)"
+        },
+        {
+          "id": "test-plan",
+          "heading": "Test Plan",
+          "content": "(Architect replaces this with proposed Tier 2/3 tests linked to user stories)"
+        },
+        {
+          "id": "changelog-draft",
+          "heading": "Changelog Draft",
+          "content": "(Architect replaces this with draft changelog entry)"
+        },
+        {
+          "id": "source-documents",
+          "heading": "Source Documents",
+          "content": "(Architect replaces this with referenced ADRs, PRDs, design specs, and prior cycle docs that informed this pitch)"
+        }
+      ]
+    },
+    {
+      "id": "change-set",
+      "heading": "Change Set",
+      "content": "**Filled by:** Orchestrator — after Builder merge, before Auditor dispatch.\n\n**Example:**\n```\nPlanned nodes (from Architect scope):\n- axiom_graph::axiom_graph.history::get_history_since\n- axiom_graph::axiom_graph.mcp_server::axiom_graph_history\n\nActual files changed (from git diff {baseline_sha}..HEAD):\n- axiom_graph/history.py\n- axiom_graph/mcp_server.py\n- tests/test_history_filtering.py\n\nBuilder deviations:\n- None reported\n\nPre-merge check: clean (staleness explained by change-set)\n```\n\n**Instructions:** Orchestrator constructs this from: (1) Architect's `scope` section node IDs, (2) `git diff --name-only {baseline_sha}..HEAD`, (3) Builder's returned deviations, (4) the Phase 6 **pre-merge baseline check verdict** — `clean`, or `unexplained-drift` plus the offending node IDs. The Auditor reads this to categorize stale nodes as `expected` (in this set) vs `collateral` (not in this set), and its blanket-clean gate reads the pre-merge verdict: a `clean` verdict plus a passing Reviewer verdict (`PASS`/`PASS_WITH_CONCERNS`) lets the Auditor trust the Reviewer's validation instead of re-confirming code/test nodes by hand."
+    },
+    {
+      "id": "builder",
+      "heading": "Builder Manifest",
+      "content": "**Filled by:** Orchestrator — writes the Builder's returned manifest after implementation.\n\nThe Builder returns this as structured data in its subagent completion message. The orchestrator writes it here verbatim.\n\n**Example:**\n```json\n{\n  \"deviations\": [],\n  \"files_changed\": [\"axiom_graph/history.py\", \"axiom_graph/mcp_server.py\"],\n  \"tests_added\": [\"tests/test_history_filtering.py\"],\n  \"tests_passed\": true,\n  \"env_gaps\": []\n}\n```\n\n**Instructions:** If the Builder reports deviations, each has: `spec_requirement` (what was planned), `actual` (what was built), `reason` (why it changed), `affected_nodes` (axiom-graph node IDs). If tests failed, include failure details. `env_gaps` lists tests that couldn't run because a dependency main declares was missing from the worktree (distinct from failures) — the orchestrator restores parity before Phase 5.\n\n### Continuation Checkpoint\n**Only present if the Builder hit the context leash.** Written by the orchestrator from the Builder's return. The fresh incarnation is dispatched to the same worktree — code on disk is the state.\n\n**Example:**\n```\n### Continuation (incarnation 1)\nCompleted:\n- Capability 1: Date range filter — Done, tests pass (test_date_range_filter)\n- Capability 2: MCP tool params — Done, tests pass (test_mcp_date_params)\n\nIn progress:\n- Capability 3: CLI flags — test written (test_cli_date_flags), implementation started in cli.py\n\nRemaining:\n- (none — all capabilities addressed)\n\nDecisions:\n- Used stdlib datetime.fromisoformat, not dateutil — per constraints\n- Validation lives in get_history_since, not MCP layer — single validation point\n```"
+    },
+    {
+      "id": "auditor",
+      "heading": "Auditor Impact Report",
+      "content": "**Filled by:** Orchestrator — writes the Auditor's returned Impact Report after the audit, plus a machine-rendered changes summary at Phase 8.\n\nTwo sub-sections live here:\n\n- `auditor.impact-report` — the Auditor's narrative (`findings`, `needs_fix`, advisory `counts`, `skipped_nodes`, `summary`).\n- `auditor.changes-summary` — written by the orchestrator at Phase 8 from `axiom_graph_report(since_sha=baseline_sha)`. This is the authoritative, mechanically-derived list of every doc section update, `mark_clean`, link addition/removal, and `AGENT_VERIFIED` event during the audit. The Auditor does NOT write a hand-typed change ledger.\n\n**Example Impact Report:**\n```json\n{\n  \"status\": \"DONE\",\n  \"findings\": [\n    {\n      \"area\": \"History tool params\",\n      \"nodes\": [\"axiom_graph::axiom_graph.history::get_history_since\"],\n      \"disposition\": \"clean\",\n      \"narrative\": \"New params added per spec; capabilities table updated to Done.\"\n    }\n  ],\n  \"needs_fix\": [],\n  \"skipped_nodes\": [],\n  \"counts\": {\"nodes_reviewed\": 5, \"nodes_marked_clean\": 5, \"nodes_skipped\": 0},\n  \"summary\": \"5 stale nodes reviewed, all marked clean. PRD capabilities updated.\"\n}\n```\n\n**Instructions:** `counts` is advisory only — the authoritative record is `auditor.changes-summary`. `needs_fix` categories: `code_bug`, `needs_new_tests`.\n\n### Continuation Checkpoint\n**Only present if the Auditor hit the context leash.** The Auditor writes partial progress to its own `auditor` section (nodes reviewed, remaining work) when returning `CONTINUING`. Already-marked-clean nodes won't appear stale on the next `axiom_graph_check`, so the fresh incarnation naturally skips them.\n\n**Example:**\n```\n### Continuation (incarnation 1)\nReviewed (12 of 20 stale nodes):\n- marked_clean: [node_id_1, node_id_2, ..., node_id_9]\n- needs_fix: [{node_id_10, category: logging, reason: \"missing tool entry/exit timing\"}]\n\nRemaining stale nodes:\n- node_id_13 through node_id_20\n\nPost-implementation updates completed:\n- [x] Capabilities table updated\n- [x] Interface spec updated\n- [ ] Doc-to-code links (not started)\n```"
+    },
+    {
+      "id": "doc-review",
+      "heading": "Doc Review",
+      "content": "**Filled by:** Orchestrator — writes the Doc Reviewer's verdict after doc review.\n\nThe Doc Reviewer returns this as structured data in its subagent completion message. The orchestrator writes it here.\n\n**Example:**\n```json\n{\n  \"status\": \"PASS\",\n  \"prd_accuracy\": [{\"doc_id\": \"axiom_graph::docs.features.history.sub_features.filtering.prd\", \"verdict\": \"PASS\", \"note\": \"All capabilities correctly marked Done\"}],\n  \"interface_completeness\": [{\"doc_id\": \"axiom_graph::docs.features.history.interfaces.data-model\", \"verdict\": \"PASS\", \"note\": null, \"missing\": []}],\n  \"summary\": \"All doc changes verified against implementation and templates.\"\n}\n```\n\n**Instructions:** If the Doc Reviewer returns FAIL, the orchestrator redispatches the Auditor with targeted fix instructions. After the Auditor fixes, the Doc Reviewer is re-dispatched. Max 2 loops before escalating to user.\n\n### Continuation Checkpoint\n**Only present if the Doc Reviewer hit the context leash.** Written by the orchestrator from the Doc Reviewer's return."
+    },
+    {
+      "id": "friction-logs",
+      "heading": "Friction Logs",
+      "content": "**Filled by:** Each agent (and the orchestrator) as they work — append-as-you-go, not post-hoc summary.\n\nFriction sections live at:\n- `{cycle_doc_id}::architect.friction`\n- `{cycle_doc_id}::builder.friction`\n- `{cycle_doc_id}::reviewer.friction`\n- `{cycle_doc_id}::auditor.friction`\n- `{cycle_doc_id}::doc-review.friction`\n- `{cycle_doc_id}::orchestrator.friction`\n\nEach agent captures friction in its own section when something pinches — an instruction that didn't fit the situation, tool output that was awkward, role constraints that forced awkward workarounds, upstream inputs that required guessing, effort disproportionate to value. This is not the same as `builder.deviations` (plan-deviation) or `decisions` (what-was-chosen) — it's the phenomenological signal: what was hard or felt off, regardless of whether the agent deviated.\n\n**Entry format:**\n```\n- **{short tag}** — {one line: what felt off}\n  Context: {raw paste — tool call, output, instruction fragment, error}\n  Wish: {optional — what would've made this easier}\n```\n\nThe short tag is the searchable handle. Over many cycles, `axiom_graph_search` across friction sections surfaces recurring patterns (axiom-graph-staleness, instruction-ambiguity, role-pinch, etc.) that drive skill, tool, and process evolution.\n\n**Empty is fine.** Agents do not invent friction to look thorough — honest emptiness beats fabricated observations.\n\nSections are created lazily on first write via `axiom_graph_update_section` (same pattern as `reviewer.progress`, `builder.build-plan`, `auditor.changes-summary`). Agents read the existing section before each append to avoid overwriting prior entries."
+    }
+  ]
+}

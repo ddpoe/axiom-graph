@@ -1,0 +1,194 @@
+# Axiom-graph Ontology
+# Defines all valid node types and edge types.
+# Validated at build time — violations fail the build.
+# Based on PROV-O (W3C Provenance Ontology) principles, process-centric.
+
+# ----------------------------------------------------------------------------
+# NODE TYPES
+# ----------------------------------------------------------------------------
+# All code is a series of processes. The node type describes the process role,
+# not the language construct. A function, a module, and a pipeline step are all
+# Process — only granularity differs (atomic vs composite).
+
+node_types:
+
+  atomic_process:
+    description: >
+      A leaf-level transformation unit. Has no sub-processes.
+      The smallest meaningful unit of work in the codebase.
+    examples:
+      - "A Python function or method"
+      - "A dFlow @task function (at the function-body level)"
+      - "A Step(...) marker inside a decorated function"
+      - "An AutoStep(...) marker inside a decorated function"
+    subtypes:
+      - step              # Step(...) marker call site inside a decorated function (no staleness — view into enclosing function)
+      - autostep          # AutoStep(...) marker call site; emits `delegates_to` when followed by a @task call (no staleness)
+      - state             # xstate v5 simple state inside a state machine
+    can_contain: []
+    dflow_mapping: "@task-decorated function body, and Step/AutoStep marker call sites (Phase 3.1+)"
+
+  composite_process:
+    description: >
+      Orchestrates or contains other processes. Has sub-processes.
+      Scale-invariant: a module, package, pipeline, and @workflow are all
+      composite_process — they differ only in what they contain.
+    examples:
+      - "A Python module"
+      - "A Python package (__init__.py)"
+      - "A @workflow envelope node (paired with its atomic_process function)"
+      - "A @task envelope node (paired with its atomic_process function)"
+      - "A pipeline definition (Snakemake, Nextflow)"
+    subtypes:
+      - config            # Settings, skills, hooks — scanned from .claude/ and similar dirs
+      - workflow          # @workflow envelope; annotates its function; composes its step children
+      - task              # @task envelope; annotates its function; composes its step children
+      - state_machine     # xstate v5 createMachine envelope; composes its top-level states
+      - state             # xstate v5 compound state inside a state machine
+    can_contain:
+      - atomic_process
+      - composite_process
+    dflow_mapping: "Module/package (no suffix); @workflow envelope `{M}::{F}@workflow` (subtype=workflow); @task envelope `{M}::{F}@task` (subtype=task) — Phase 3.1+"
+
+  entity:
+    description: >
+      Something that is consumed or produced by a process.
+      Data artifacts, config artifacts, model artifacts.
+    subtypes:
+      - data_artifact      # DataFrame, AnnData, CSV, image, etc.
+      - config_artifact    # YAML config, param set, environment file
+      - model_artifact     # Trained model, serialized object
+      - external_package   # Third-party dependency (not in stdlib, not in project)
+    examples:
+      - "An AnnData object"
+      - "A config.yaml file"
+      - "A trained sklearn pipeline (model.pkl)"
+      - "A results CSV"
+    can_contain: []
+    dflow_mapping: "inputs=/outputs= values on @task/@workflow (best-effort)"
+
+
+
+# ----------------------------------------------------------------------------
+# EDGE TYPES
+# ----------------------------------------------------------------------------
+# Edge validation: 'from' and 'to' list valid node_type values.
+# Any edge not matching these rules fails at build time.
+
+edge_types:
+
+  # --- Data flow ---
+
+  consumes:
+    description: "Process takes entity as input."
+    from: [atomic_process, composite_process]
+    to: [entity]
+    example: "train_classifier --consumes--> X_train"
+
+  produces:
+    description: "Process creates entity as output."
+    from: [atomic_process, composite_process]
+    to: [entity]
+    example: "train_classifier --produces--> fitted_model"
+
+  # --- Structural ---
+
+  composes:
+    description: >
+      X structurally contains Y. Static membership.
+      Module composes its functions. Package composes its modules.
+      Workflow composes its steps. A function composes its nested functions.
+    from: [composite_process, atomic_process]
+    to: [atomic_process, composite_process]
+    example: "analysis_module --composes--> train_classifier"
+    dflow_mapping: "module → function from functions table; workflow → steps from steps table"
+
+  delegates_to:
+    description: >
+      X calls or orchestrates Y at runtime. Dynamic invocation.
+      Distinct from composes: a workflow delegates_to a task defined
+      in another module (cross-module call).  Step/AutoStep atomic_process
+      nodes are permitted as the source in Phase 3: AutoStep markers emit
+      delegates_to directly to the called function.
+    from: [atomic_process, composite_process]
+    to: [atomic_process, composite_process]
+    example: "run_pipeline --delegates_to--> load_adata"
+    dflow_mapping: "AutoStep call targets from workflow_entries + steps"
+
+  depends_on:
+    description: >
+      X requires Y to exist or execute before it can run.
+      Import-level or runtime dependency.
+    from: [atomic_process, composite_process]
+    to: [atomic_process, composite_process, entity]
+    example: "train_classifier --depends_on--> feature_engineering_module"
+
+  # --- Semantic ---
+
+  constrains:
+    description: "A constraint (schema, contract, spec) restricts the behavior of a process or entity."
+    from: [atomic_process]
+    to: [atomic_process, composite_process, entity]
+    example: "input_schema --constrains--> train_classifier"
+    dflow_mapping: "Manual — added via axiom-graph link"
+
+  validates:
+    description: >
+      A test function verifies the correctness of a process.
+      ``from`` includes ``atomic_process`` because test functions are scanned
+      as ``atomic_process`` nodes (not ``constraint``).  Both origins are
+      valid: a formal constraint spec can also validate a process.
+    from: [atomic_process]
+    to: [atomic_process, composite_process]
+    example: "test_get_engine --validates--> get_engine"
+    dflow_mapping: "Auto-generated by module_scanner AST walk — test-function call sites become validates edges"
+
+  documents:
+    description: "A document node describes another node."
+    from: [atomic_process, composite_process]
+    to: [atomic_process, composite_process, entity]
+    example: "analysis_split.md#implementation --documents--> train_classifier"
+    dflow_mapping: "Manual or inferred from cross-references in markdown"
+
+  annotates:
+    description: >
+      A composite_process envelope (e.g. a @workflow or @task) asserts that it
+      describes the code-truth contract of the annotated function.  Staleness
+      walks out-edges from the envelope: if the annotated target's code_hash
+      OR desc_hash drifts after the envelope was last updated, the envelope
+      flips link_status=LINKED_STALE.
+    from: [composite_process]
+    to: [atomic_process, composite_process]
+    example: "run_pipeline@workflow --annotates--> run_pipeline"
+    dflow_mapping: "Emitted by the AST scanner for every @workflow / @task decorator"
+
+  supersedes:
+    description: "X replaces or obsoletes Y."
+    from: [atomic_process, composite_process]
+    to: [atomic_process, composite_process]
+    example: "D5 --supersedes--> D3"
+
+
+
+# ----------------------------------------------------------------------------
+# VALIDATION RULES
+# (enforced by axiom_graph/index/builder.py at build time)
+# ----------------------------------------------------------------------------
+
+validation:
+  # Every node must have a node_type from the enum above
+  require_valid_node_type: true
+
+  # Every edge must have an edge_type from the enum above
+  require_valid_edge_type: true
+
+  # Every edge's from/to node types must match the edge_type's allowed types
+  require_valid_edge_endpoints: true
+
+  # Every composite_process must have at least one outgoing composes or delegates_to edge
+  # (warning only, not error — may be legitimately empty during incremental builds)
+  warn_empty_composite: true
+
+  # Every atomic_process with no inbound validates edge is flagged
+  # (informational — used to identify untested functions)
+  report_untested_atomic: true

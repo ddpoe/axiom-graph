@@ -1,0 +1,236 @@
+/* Custom styling for the Axiom-Graph docs (furo theme). */
+
+/* ------------------------------------------------------------------ *
+ * CLI reference: render each command as a visually separated card.
+ * sphinx-click wraps every command in <section id="axiom-graph-<cmd>">,
+ * so the id-prefix selector targets commands only (not the bare root).
+ * ------------------------------------------------------------------ */
+article[role="main"] section[id^="axiom-graph-"] {
+  border: 1px solid var(--color-background-border);
+  border-left: 4px solid var(--color-brand-primary);
+  border-radius: 6px;
+  background: var(--color-background-secondary);
+  padding: 0.25rem 1.25rem 1rem;
+  margin: 1.75rem 0;
+}
+
+article[role="main"] section[id^="axiom-graph-"] > h2,
+article[role="main"] section[id^="axiom-graph-"] > h3,
+article[role="main"] section[id^="axiom-graph-"] > h4 {
+  margin-top: 0.75rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--color-background-border);
+  font-family: var(--font-stack--monospace);
+  font-size: 1.2rem;
+  color: var(--color-brand-content);
+}
+
+/* Option / argument definition lists inside a command card. */
+article[role="main"] section[id^="axiom-graph-"] dl dt {
+  font-family: var(--font-stack--monospace);
+  font-weight: 600;
+}
+article[role="main"] section[id^="axiom-graph-"] dl dd {
+  margin-bottom: 0.6rem;
+}
+
+/* The "Usage:" literal block at the top of each command. */
+article[role="main"] section[id^="axiom-graph-"] pre {
+  background: var(--color-code-background);
+  border-radius: 4px;
+}
+
+/* On the grouped CLI pages, hide the redundant program wrapper's own title,
+   description and usage line -- the page heading already names the group, so
+   only the individual command cards should remain visible. */
+article[role="main"] section[id="axiom-graph"] > h2,
+article[role="main"] section[id="axiom-graph"] > p,
+article[role="main"] section[id="axiom-graph"] > dl,
+article[role="main"] section[id="axiom-graph"] > .highlight-shell {
+  display: none;
+}
+
+/* ------------------------------------------------------------------ *
+ * MCP tools: render each autodoc function as a separated card,
+ * matching the CLI command cards.
+ * ------------------------------------------------------------------ */
+article[role="main"] dl.py.function {
+  border: 1px solid var(--color-background-border);
+  border-left: 4px solid var(--color-brand-primary);
+  border-radius: 6px;
+  background: var(--color-background-secondary);
+  padding: 0.5rem 1.25rem 0.85rem;
+  margin: 1.75rem 0;
+}
+article[role="main"] dl.py.function > dt.sig {
+  font-family: var(--font-stack--monospace);
+  background: transparent;
+  color: var(--color-foreground-primary);
+  font-size: 0.95rem;
+  /* Neutralise furo's full-bleed signature (negative side margins + hanging
+     text-indent) so the signature sits cleanly inside the card. */
+  margin: 0 0 0.75rem 0;
+  padding: 0.3rem 0 0.6rem 0;
+  text-indent: 0;
+  border-bottom: 1px solid var(--color-background-border);
+}
+
+/* Hide the noisy "axiom_graph.mcp.server." module prefix before each tool. */
+article[role="main"] dl.py.function > dt.sig .sig-prename.descclassname {
+  display: none;
+}
+
+/* Tool name in the signature: full-contrast monospace. Each tool now lives on
+   its own page where the H1 title is hidden (see the per-tool page rule below),
+   so the signature is the page's visible heading and carries the tool name. */
+article[role="main"] dl.py.function > dt.sig .sig-name.descname {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--color-foreground-primary);
+}
+
+/* Parameter names in the signature: full-contrast, not muted grey. */
+article[role="main"] dl.py.function > dt.sig .sig-param .n .pre {
+  color: var(--color-foreground-primary);
+}
+
+/* Parameters / Returns field lists: clearer separation and spacing. */
+article[role="main"] dl.py.function dl.field-list > dt {
+  margin-top: 0.6rem;
+  color: var(--color-foreground-primary);
+  font-weight: 700;
+}
+article[role="main"] dl.py.function dl.field-list dd {
+  margin-bottom: 0.35rem;
+}
+
+/* ------------------------------------------------------------------ *
+ * Scanpy-style parameter blocks. scanpydoc's definition_list_typed_field
+ * renders each parameter as a <dt> (name + type classifier) followed by a
+ * <dd> (description). Give each a continuous left accent bar, highlight the
+ * name, and indent the description.
+ * ------------------------------------------------------------------ */
+
+/* Parameter name line. */
+article[role="main"] dl.field-list > dd > dl.simple > dt {
+  border-left: 3px solid var(--color-brand-primary);
+  padding: 0.1rem 0 0.1rem 0.7rem;
+  margin-top: 0.7rem;
+  font-weight: 400;
+}
+/* Highlighted parameter name. */
+article[role="main"] dl.field-list > dd > dl.simple > dt > strong {
+  font-family: var(--font-stack--monospace);
+  font-weight: 700;
+  color: var(--color-brand-content);
+}
+/* Type, shown muted/italic next to the name. */
+article[role="main"] dl.field-list > dd > dl.simple > dt .classifier {
+  color: var(--color-foreground-secondary);
+  font-style: italic;
+}
+/* Indented description, continuing the accent bar in a lighter shade. */
+article[role="main"] dl.field-list > dd > dl.simple > dd {
+  border-left: 3px solid var(--color-background-border);
+  padding: 0.1rem 0 0.2rem 0.7rem;
+  margin: 0 0 0.2rem 0;
+}
+
+/* ------------------------------------------------------------------ *
+ * General table polish (summary tables, MCP tables, etc.)
+ * ------------------------------------------------------------------ */
+article[role="main"] table.docutils {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0 1.5rem;
+}
+article[role="main"] table.docutils th {
+  background: var(--color-background-secondary);
+  text-align: left;
+}
+article[role="main"] table.docutils td,
+article[role="main"] table.docutils th {
+  padding: 0.45rem 0.8rem;
+  border: 1px solid var(--color-background-border);
+  vertical-align: top;
+}
+article[role="main"] table.docutils tr:nth-child(even) td {
+  background: var(--color-background-hover);
+}
+
+/* ------------------------------------------------------------------ *
+ * Per-tool reference pages (autosummary :toctree: stubs).
+ * Each stub renders the short-name title as an <h1> immediately followed
+ * by the autodoc signature, which repeats the same name. Hide the
+ * redundant <h1> (kept in the DOM so the nav link text and browser tab
+ * title still work); the signature line becomes the page's heading.
+ * The adjacent-sibling :has() match is unique to these pages -- group and
+ * landing pages place a table or prose after their <h1>, never dl.py.
+ * ------------------------------------------------------------------ */
+article[role="main"] h1:has(+ dl.py.function) {
+  display: none;
+}
+
+/* ------------------------------------------------------------------ *
+ * Wide-screen layout: pin both sidebars to the screen edges, make each
+ * 50% wider than furo's 15em default (-> 22.5em), and let the center
+ * content flex to fill the space between them. Furo's default centers a
+ * fixed 46em column and lets the nav hug it, leaving large empty gutters
+ * at the screen edges on wide displays.
+ * ------------------------------------------------------------------ */
+
+/* From furo's first multi-column breakpoint: flush + widen the left nav and
+   let the content column take all remaining width. */
+@media (min-width: 67em) {
+  .page {
+    justify-content: flex-start;
+  }
+  .sidebar-drawer {
+    width: 22.5em;
+    min-width: 22.5em;
+    justify-content: flex-start;  /* nav hugs the left edge, no empty gutter */
+  }
+  .sidebar-drawer .sidebar-container {
+    width: 22.5em;
+  }
+  .main {
+    flex: 1;
+    min-width: 0;
+  }
+  .content {
+    width: auto;
+    max-width: none;
+    flex: 1 1 auto;
+  }
+}
+
+/* The right-hand TOC only becomes a static column at furo's wide breakpoint;
+   widen it to match and let it sit flush against the right screen edge. */
+@media (min-width: 82em) {
+  .toc-drawer {
+    width: 22.5em;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Sidebar brand: lay the logo to the LEFT of the project title. Furo
+ * stacks them vertically and sizes the logo to the full sidebar width;
+ * make the brand a horizontal flex row and cap the mark to an inline icon.
+ * ------------------------------------------------------------------ */
+.sidebar-brand {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+}
+.sidebar-logo-container {
+  margin: 0;
+}
+.sidebar-logo {
+  max-width: 44px;
+  margin: 0;
+}
+.sidebar-brand-text {
+  margin: 0;
+}

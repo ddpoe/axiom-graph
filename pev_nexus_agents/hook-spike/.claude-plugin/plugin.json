@@ -1,0 +1,10 @@
+{
+  "name": "hook-spike",
+  "description": "Graduated plugin-hook test agents. Each agent fires one canary to /tmp when its hook runs; a driver skill dispatches all spikes and reports a pass/fail matrix. Used to debug hook resolution behavior without churning the real PEV plugin.",
+  "version": "1.0.0",
+  "author": {
+    "name": "ddpoe"
+  },
+  "repository": "https://github.com/ddpoe/axiom-graph",
+  "license": "MIT"
+}

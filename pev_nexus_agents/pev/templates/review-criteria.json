@@ -1,0 +1,51 @@
+{
+  "title": "Project Review Criteria",
+  "tags": ["pev", "pev-sop", "review-criteria"],
+  "sections": [
+    {
+      "id": "overview",
+      "heading": "Overview",
+      "content": "Project-specific emphasis areas for the Reviewer's Pass 4 (PEV-specific checks). Copy to `.pev/review-criteria.json` and customize. Optional — if absent, the Reviewer falls back to generic quality checks.\n\nThe right place to encode project conventions a generic code review would miss: logging styles, error handling patterns, feature-flag usage, performance-sensitive paths, anti-patterns specific to this codebase."
+    },
+    {
+      "id": "generic-checks",
+      "heading": "Generic Checks (Always Applied)",
+      "content": "The Reviewer always runs these regardless of this file:\n\n- **Spec compliance** — every change authorized by the pitch? Every user story implemented?\n- **Functionality preservation** — callers of modified functions still work? Behavioral changes documented?\n- **Code quality** — issues ranked critical / important / minor\n- **Source-doc cross-check** — pitch consistent with referenced ADRs / PRDs?"
+    },
+    {
+      "id": "check.logging",
+      "heading": "Check: Logging",
+      "content": "- **What to check**: every `log.error()` call has a correlation ID (either `request_id` or `trace_id`) in its structured fields\n- **Severity**: important (merge should be gated on fix)\n- **Rationale**: production debugging relies on threading IDs through logs; an error without one is ~useless\n\n```python\n# ✅ right\nlog.error(\"failed to persist record\", request_id=req.id, exc_info=True)\n\n# ❌ wrong — no correlation\nlog.error(\"failed to persist record\", exc_info=True)\n```"
+    },
+    {
+      "id": "check.error-handling",
+      "heading": "Check: Error Handling",
+      "content": "- **What to check**: new code raises typed exceptions (e.g., `ValidationError`, `NotFoundError`) instead of bare `ValueError` / `Exception`\n- **Severity**: minor unless at a public API boundary (then important)\n- **Rationale**: typed exceptions enable downstream handlers to react correctly; bare exceptions force callers to parse error messages"
+    },
+    {
+      "id": "check.test-annotation-tiers",
+      "heading": "Check: Test Annotation Tiers",
+      "content": "- **What to check**: tests Builder added correctly annotated per `.pev/test-policy.json` — tier matches what the Architect proposed in `architect.test-plan`\n- **Severity**: important (tier drift breaks axiom-graph indexing downstream)\n- **Cross-reference**: `.pev/test-policy.json`"
+    },
+    {
+      "id": "check.workflow-markers",
+      "heading": "Check: Workflow Markers (axiom-annotations)",
+      "content": "- **What to check**: new workflow functions have `@workflow` decorators with `purpose` strings; multi-step workflows have numbered `Step()` markers\n- **Severity**: important if the workflow is user-facing, minor if internal\n- **Cross-reference**: `.pev/test-policy.json` (annotation contract) if your project uses workflow markers in test code too"
+    },
+    {
+      "id": "anti-patterns",
+      "heading": "Anti-patterns",
+      "content": "Things easy to do but systematically wrong in this project. Patterns an agent might introduce without realizing they're problematic.\n\n- **Don't**: import from `internal/` modules outside the owning package\n- **Don't**: use `datetime.now()` without a timezone argument\n- **Don't**: rely on dict ordering for anything user-visible\n- **Don't**: catch `Exception` broadly — catch specific types"
+    },
+    {
+      "id": "severity-guide",
+      "heading": "Severity Guide",
+      "content": "Pass 4 findings use these levels:\n\n| Severity | Meaning | Effect on merge |\n|---|---|---|\n| `critical` | Breaks the feature, violates security/correctness, will cause production failures | Blocks merge |\n| `important` | Degrades quality meaningfully; should be fixed before merge | Gates merge (Builder loopback) |\n| `minor` | Style, naming, small improvements | Noted; does not block merge |"
+    },
+    {
+      "id": "project-specific",
+      "heading": "Project-specific",
+      "content": "Free-form. The Reviewer reads this for context but doesn't enforce structure."
+    }
+  ]
+}

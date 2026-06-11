@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cortex</title>
+
+  <!-- Cytoscape.js + dagre layout from CDN -->
+  <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+  <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+  <script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+
+  <!-- Monaco editor AMD loader -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.0/min/vs/loader.min.js"></script>
+
+  <!-- Mermaid diagram renderer -->
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: 'dark',
+      themeVariables: {
+        darkMode: true,
+        background: '#0d1117',
+        primaryColor: '#1f6feb',
+        primaryTextColor: '#c9d1d9',
+        primaryBorderColor: '#30363d',
+        lineColor: '#8b949e',
+        secondaryColor: '#161b22',
+        tertiaryColor: '#21262d',
+        fontFamily: '"Segoe UI", system-ui, -apple-system, sans-serif',
+        fontSize: '13px',
+      },
+      securityLevel: 'loose',
+      flowchart: { curve: 'basis', useMaxWidth: true },
+    });
+  </script>
+
+  <!-- Tiptap rich-text editor via import map -->
+  <script type="importmap">
+  {
+    "imports": {
+      "@tiptap/core": "https://esm.sh/@tiptap/core@2",
+      "@tiptap/starter-kit": "https://esm.sh/@tiptap/starter-kit@2",
+      "@tiptap/extension-table": "https://esm.sh/@tiptap/extension-table@2",
+      "@tiptap/extension-table-row": "https://esm.sh/@tiptap/extension-table-row@2",
+      "@tiptap/extension-table-cell": "https://esm.sh/@tiptap/extension-table-cell@2",
+      "@tiptap/extension-table-header": "https://esm.sh/@tiptap/extension-table-header@2",
+      "@tiptap/pm/state": "https://esm.sh/@tiptap/pm@2/state",
+      "@tiptap/pm/view": "https://esm.sh/@tiptap/pm@2/view",
+      "@tiptap/pm/model": "https://esm.sh/@tiptap/pm@2/model"
+    }
+  }
+  </script>
+  <script type="module">
+    import { Editor } from '@tiptap/core';
+    import StarterKit from '@tiptap/starter-kit';
+    import Table from '@tiptap/extension-table';
+    import TableRow from '@tiptap/extension-table-row';
+    import TableCell from '@tiptap/extension-table-cell';
+    import TableHeader from '@tiptap/extension-table-header';
+    window.TiptapEditor = Editor;
+    window.TiptapStarterKit = StarterKit;
+    window.TiptapTable = Table;
+    window.TiptapTableRow = TableRow;
+    window.TiptapTableCell = TableCell;
+    window.TiptapTableHeader = TableHeader;
+    window._tiptapReady = true;
+    console.log('[cortex] Tiptap loaded:', typeof Editor, typeof StarterKit, 'Table:', typeof Table);
+  </script>
+
+  <!-- Mukta Vaani font -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Mukta+Vaani:wght@400;600;700&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="/css/style.css?v=20260404a">
+</head>
+<body>
+
+  <!-- ====================================================================== -->
+  <!-- HEADER                                                                  -->
+  <!-- ====================================================================== -->
+  <header id="header">
+    <div id="project-switcher">
+      <button id="project-switcher-btn" title="Switch project">
+        <span id="project-name"></span>
+        <span class="switcher-caret">&#x25BC;</span>
+      </button>
+      <div id="project-dropdown" class="hidden">
+        <ul id="project-list"></ul>
+        <div id="project-add-row">
+          <input type="text" id="project-add-input" placeholder="Add project path..." spellcheck="false">
+          <button id="project-add-btn" title="Register project">+</button>
+        </div>
+        <div id="project-add-error" class="hidden"></div>
+      </div>
+    </div>
+
+    <div id="header-center">
+      <div class="view-toggle">
+        <button id="btn-graph-view" class="view-btn active" title="Graph view">&#x2B21; Graph</button>
+        <button id="btn-list-view"  class="view-btn"        title="List view" >&#x2630; List</button>
+        <button id="btn-workflow-view" class="view-btn"     title="Workflow view">&#x2699; Workflows</button>
+        <button id="btn-tests-view"    class="view-btn"     title="Tests view">&#x2713; Tests</button>
+        <button id="btn-docs-view"     class="view-btn"     title="Docs view">&#x1F4C4; Docs</button>
+      </div>
+      <div id="search-wrap">
+        <button id="search-mode-toggle" title="Search mode">
+          <span id="search-mode-label">Keyword</span>
+          <span class="search-mode-caret">&#x25BC;</span>
+        </button>
+        <div id="search-mode-dropdown" class="hidden">
+          <div class="search-mode-option" data-mode="keyword" title="Exact text matching (FTS)">Keyword<span class="search-mode-desc">Exact text matching</span></div>
+          <div class="search-mode-option" data-mode="semantic" title="Meaning-based similarity">Semantic<span class="search-mode-desc">Meaning-based similarity</span></div>
+        </div>
+        <input type="text" id="search-input" placeholder="Search nodes..." autocomplete="off">
+        <button id="search-btn" title="Search">&#x1F50D;</button>
+      </div>
+    </div>
+
+    <div id="header-right">
+      <button id="btn-check" title="Re-check staleness (read-only)">&#x2B21; Check</button>
+      <button id="btn-rescan" title="Rescan project">&#x21BB; Rescan</button>
+      <span id="status-bar"></span>
+    </div>
+  </header>
+
+  <!-- ====================================================================== -->
+  <!-- BODY  (sidebar + main + detail panel)                                  -->
+  <!-- ====================================================================== -->
+  <div id="body">
+
+    <aside id="sidebar">
+      <section class="filter-section list-only-section hidden" id="visibility-section">
+        <h4 class="filter-label">Visibility</h4>
+        <label class="filter-check">
+          <input type="checkbox" id="show-private-check">
+          <span>Show private (_) functions</span>
+        </label>
+        <label class="filter-check">
+          <input type="checkbox" id="show-tests-check">
+          <span>Show test files</span>
+        </label>
+      </section>
+
+      <section class="filter-section list-only-section hidden" id="group-by-section">
+        <h4 class="filter-label">Group By</h4>
+        <div id="group-by-options" class="group-by-radios">
+          <label class="status-radio"><input type="radio" name="group-by" value="node_type"><span>Type</span></label>
+          <label class="status-radio"><input type="radio" name="group-by" value="subtype"><span>Subtype</span></label>
+          <label class="status-radio"><input type="radio" name="group-by" value="location" checked><span>Module / File</span></label>
+          <label class="status-radio"><input type="radio" name="group-by" value="staleness"><span>Staleness</span></label>
+          <label class="status-radio"><input type="radio" name="group-by" value="tag"><span>Tag</span></label>
+        </div>
+      </section>
+
+      <section class="filter-section" id="since-section">
+        <h4 class="filter-label">Changed Since</h4>
+        <div class="since-presets">
+          <button class="since-preset-btn since-preset" data-since="checkpoint" title="Since last checkpoint">Last Checkpoint</button>
+          <button class="since-preset-btn since-preset" data-since="last-commit" title="Since last commit">Last Commit</button>
+          <button class="since-preset-btn since-preset" data-since="24h" title="Last 24 hours">24h</button>
+        </div>
+        <div class="since-browse-row">
+          <button id="btn-since-browse" class="since-browse-btn" title="Browse commits">Browse...</button>
+        </div>
+        <div id="since-summary" class="since-summary hidden"></div>
+        <button id="btn-since-clear" class="since-clear-btn hidden">Clear filter</button>
+        <div id="since-status" class="since-status"></div>
+      </section>
+
+      <!-- Commit picker modal (hidden by default) -->
+      <div id="since-modal-overlay" class="since-modal-overlay hidden">
+        <div class="since-modal">
+          <div class="since-modal-top-bar">
+            <input type="text" id="since-modal-search" class="since-modal-search" placeholder="Search commits..." spellcheck="false">
+            <input type="text" id="since-modal-date" class="since-modal-date" placeholder="Date..." spellcheck="false" title="Filter by date (YYYY-MM-DD)">
+          </div>
+          <div id="since-modal-range-bar" class="since-modal-range-bar hidden">
+            <span id="since-modal-range-label"></span>
+            <button id="since-modal-apply-range" class="since-modal-apply-range-btn">Apply range</button>
+          </div>
+          <div id="since-modal-commit-list" class="since-modal-commit-list"></div>
+          <div class="since-modal-hint">Click a row = filter since that commit. Check two = select a range. Esc to close.</div>
+        </div>
+      </div>
+
+      <section class="filter-section" id="staleness-section">
+        <h4 class="filter-label">Staleness</h4>
+        <div id="staleness-summary"></div>
+        <div id="staleness-filters"></div>
+      </section>
+
+      <section class="filter-section" id="tag-section">
+        <h4 class="filter-label">Tags</h4>
+        <div id="tag-filter-panel"></div>
+      </section>
+
+      <section class="filter-section list-only-section hidden" id="list-actions-section">
+        <h4 class="filter-label">Actions</h4>
+        <div class="list-action-buttons">
+          <button id="btn-list-check" class="list-action-btn" title="Recompute staleness">&#x2B21; Run Check</button>
+          <button id="btn-verify-selected" class="list-action-btn" disabled title="Verify selected nodes">&#x2713; Verify Selected</button>
+          <button id="btn-view-in-graph" class="list-action-btn" title="View in graph">&#x2B21; View in Graph &rarr;</button>
+        </div>
+      </section>
+
+      <section class="filter-section" id="subtype-section">
+        <h4 class="filter-label">Subtypes</h4>
+        <div id="subtype-filters"></div>
+      </section>
+
+      <section class="filter-section" id="node-type-section">
+        <h4 class="filter-label">Node Types</h4>
+        <div id="type-filters"></div>
+      </section>
+
+      <section class="filter-section" id="edge-filter-section">
+        <h4 class="filter-label">Edge Types</h4>
+        <div id="edge-filters"></div>
+        <label class="filter-check" id="hide-orphans-row" style="margin-top:6px;border-top:1px solid var(--border);padding-top:6px">
+          <input type="checkbox" id="hide-orphans-check" checked>
+          <span>Hide isolated nodes</span>
+        </label>
+      </section>
+
+      <section class="filter-section" id="layout-section">
+        <h4 class="filter-label">Layout</h4>
+        <div class="layout-toggle">
+          <button class="layout-btn active" data-layout="cose">Force</button>
+          <button class="layout-btn"        data-layout="dagre">Hierarchy</button>
+          <button class="layout-btn"        data-layout="breadthfirst">BFS</button>
+          <button class="layout-btn"        data-layout="grid">Grid</button>
+          <button class="layout-btn"        data-layout="concentric">Concentric</button>
+        </div>
+        <div class="depth-control">
+          <label>Neighborhood depth: <span id="depth-val">1</span></label>
+          <input type="range" id="depth-slider" min="1" max="4" value="1">
+        </div>
+      </section>
+
+      <section class="filter-section">
+        <h4 class="filter-label">Stats</h4>
+        <div id="sidebar-stats"></div>
+      </section>
+    </aside>
+
+    <main id="main">
+      <div id="graph-view">
+        <div id="cy"></div>
+        <div id="graph-notice" class="hidden"></div>
+      </div>
+      <div id="list-view" class="hidden">
+        <div id="list-toolbar">
+          <span id="list-count"></span>
+          <div id="list-toolbar-right">
+            <button id="btn-collapse-all" class="list-toolbar-btn" title="Collapse / expand all groups">Collapse All</button>
+            <div class="col-menu-wrap">
+              <button id="btn-col-menu" class="list-toolbar-btn" title="Show/hide columns">&#x2630; Columns</button>
+              <div id="col-menu" class="col-menu hidden">
+                <label><input type="checkbox" data-colkey="check"     checked> Select</label>
+                <label><input type="checkbox" data-colkey="title"     checked> Name</label>
+                <label><input type="checkbox" data-colkey="node_type" checked> Type</label>
+                <label><input type="checkbox" data-colkey="location"  checked> Location</label>
+                <label><input type="checkbox" data-colkey="staleness" checked> Staleness</label>
+                <label><input type="checkbox" data-colkey="tags"      checked> Tags</label>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div id="list-columns">
+          <div id="list-table-area">
+            <div id="list-scroll">
+              <table id="node-table">
+                <thead>
+                  <tr>
+                    <th class="check-col" data-colkey="check"><input type="checkbox" id="select-all-check" title="Select all"></th>
+                    <th data-col="title"     data-colkey="title"     class="sortable">Name     <span class="sort-icon">&UpDownArrow;</span></th>
+                    <th data-col="node_type" data-colkey="node_type" class="sortable">Type     <span class="sort-icon">&UpDownArrow;</span></th>
+                    <th data-col="location"  data-colkey="location"  class="sortable">Location <span class="sort-icon">&UpDownArrow;</span></th>
+                    <th data-col="staleness" data-colkey="staleness" class="sortable">Staleness <span class="sort-icon">&UpDownArrow;</span></th>
+                    <th data-colkey="tags">Tags</th>
+                  </tr>
+                </thead>
+                <tbody id="node-table-body"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="col-resize-handle" id="list-table-resize" data-resize-target="next"></div>
+          <div id="list-source-col" class="hidden">
+            <div id="list-source-header">
+              <span id="list-source-title">Source</span>
+              <div id="list-doc-breadcrumb" class="hidden"></div>
+              <div id="list-source-controls">
+                <button id="list-doc-nav-up" class="list-toolbar-btn hidden" title="Go to parent section">&uarr; Up</button>
+                <button id="list-doc-nav-down" class="list-toolbar-btn hidden" title="Go to first child section">&darr; Down</button>
+                <button id="list-source-focus-btn" class="list-toolbar-btn" title="Toggle focus">Focus</button>
+                <button id="list-source-diff-btn" class="list-toolbar-btn hidden" title="Toggle diff view">Diff</button>
+                <button id="list-source-open-docs" class="list-toolbar-btn hidden" title="Open in DocJSON viewer">Edit in Docs</button>
+                <button id="list-source-close" class="list-toolbar-btn" title="Close source panel">&times;</button>
+              </div>
+            </div>
+            <div id="list-monaco-wrap"></div>
+            <div id="list-doc-wrap" class="hidden"></div>
+          </div>
+        </div>
+      </div>
+      <div id="workflow-view" class="hidden"></div>
+      <div id="tests-view" class="hidden"></div>
+      <div id="docs-view" class="hidden"></div>
+    </main>
+
+    <aside id="detail-panel" class="hidden">
+      <div id="detail-header">
+        <span id="detail-title"></span>
+        <button id="detail-close" title="Close">&times;</button>
+      </div>
+      <div id="detail-actions"></div>
+      <div id="detail-tabs"></div>
+      <div id="detail-content"></div>
+    </aside>
+  </div>
+
+  <!-- jsdiff for doc diff viewer -->
+  <script>var __savedDefine = window.define; window.define = undefined;</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jsdiff/6.0.0/diff.min.js"></script>
+  <script>window.define = __savedDefine;</script>
+
+  <!-- Application entry point: ES module -->
+  <script type="module" src="/js/app.js"></script>
+
+</body>
+</html>

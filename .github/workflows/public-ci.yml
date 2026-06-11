@@ -1,0 +1,57 @@
+name: public CI
+
+# Runs against the SHIPPED public tree only (no docs/, no dev tooling), so it proves the
+# public mirror is self-contained. On the dev repo it fires when the orphan `public`
+# preview branch is pushed; on the public mirror it fires on contributor pull requests.
+# It deliberately does NOT trigger on dev `master` (the full `ci.yml` covers that).
+on:
+  push:
+    branches: [public]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check .
+      - run: ruff format --check .
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          - { os: windows-latest, python: "3.10" }
+          - { os: windows-latest, python: "3.13" }
+          - { os: macos-latest, python: "3.13" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "${{ matrix.python }}"
+      - name: Install dependencies
+        run: |
+          pip install poetry
+          poetry install --no-interaction --extras "viz js"
+      - name: Run tests
+        run: poetry run pytest -q
+
+  ts-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install TS dependencies
+        run: cd axiom_graph/viz/static/ts && npm install
+      - name: TypeScript compile check
+        run: cd axiom_graph/viz/static/ts && npm run build

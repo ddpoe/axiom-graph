@@ -1,0 +1,78 @@
+{
+  "concepts/annotations.md": {
+    "doc_id": "axiom_graph::docs.consumer.concepts.annotations",
+    "hash": "5ea76e475d1c"
+  },
+  "concepts/docjson.md": {
+    "doc_id": "axiom_graph::docs.consumer.concepts.docjson",
+    "hash": "35c65fb44be5"
+  },
+  "concepts/history.md": {
+    "doc_id": "axiom_graph::docs.consumer.concepts.history",
+    "hash": "b9a08e2b85e0"
+  },
+  "concepts/index.md": {
+    "doc_id": "axiom_graph::docs.consumer.concepts",
+    "hash": "23fb03c63e9f"
+  },
+  "concepts/ontology.md": {
+    "doc_id": "axiom_graph::docs.consumer.concepts.ontology",
+    "hash": "24dfde617563"
+  },
+  "concepts/staleness.md": {
+    "doc_id": "axiom_graph::docs.consumer.concepts.staleness",
+    "hash": "2c4153b28327"
+  },
+  "concepts/the-mesh.md": {
+    "doc_id": "axiom_graph::docs.consumer.concepts.the-mesh",
+    "hash": "95d0f753b7d7"
+  },
+  "examples/docs-honesty-loop.md": {
+    "doc_id": "axiom_graph::docs.consumer.examples.docs-honesty-loop",
+    "hash": "f10d512d9293"
+  },
+  "examples/index.md": {
+    "doc_id": "axiom_graph::docs.consumer.examples",
+    "hash": "e904d660e42d"
+  },
+  "examples/multi-target-rendering.md": {
+    "doc_id": "axiom_graph::docs.consumer.examples.multi-target-rendering",
+    "hash": "f6b9b220927f"
+  },
+  "examples/reporting-pipeline.md": {
+    "doc_id": "axiom_graph::docs.consumer.examples.reporting-pipeline",
+    "hash": "580da6d3e2ce"
+  },
+  "get-started/configuration.md": {
+    "doc_id": "axiom_graph::docs.consumer.get-started.configuration",
+    "hash": "79881838e8aa"
+  },
+  "get-started/connect-your-agent.md": {
+    "doc_id": "axiom_graph::docs.consumer.get-started.connect-your-agent",
+    "hash": "168300d7c649"
+  },
+  "get-started/index.md": {
+    "doc_id": "axiom_graph::docs.consumer.get-started",
+    "hash": "83fbe087a72d"
+  },
+  "get-started/use-the-cli.md": {
+    "doc_id": "axiom_graph::docs.consumer.get-started.use-the-cli",
+    "hash": "d8df31693484"
+  },
+  "index.md": {
+    "doc_id": "axiom_graph::docs.consumer.index",
+    "hash": "484b4c7773cc"
+  },
+  "pev/index.md": {
+    "doc_id": "axiom_graph::docs.consumer.pev",
+    "hash": "794564d6e266"
+  },
+  "pev/overview.md": {
+    "doc_id": "axiom_graph::docs.consumer.pev.overview",
+    "hash": "8f0afa68433a"
+  },
+  "viz.md": {
+    "doc_id": "axiom_graph::docs.consumer.viz",
+    "hash": "cb9dfc5de4ff"
+  }
+}

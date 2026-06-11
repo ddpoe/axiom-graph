@@ -1,0 +1,56 @@
+{
+  "title": "Project Test Policy",
+  "tags": ["pev", "pev-sop", "test-policy"],
+  "sections": [
+    {
+      "id": "overview",
+      "heading": "Overview",
+      "content": "How tests are organized, classified, annotated, and budgeted in this project. Read by three agents:\n\n- **Architect** — uses the tier / decision rule to produce `architect.test-plan` in the pitch\n- **Builder** — uses the annotation contract to mark tests correctly during implementation\n- **Reviewer** — cross-checks Builder's tests against this policy in Pass 4 (PEV-specific checks)\n\nCopy this file to `.pev/test-policy.json` in your project and customize. If absent, the plugin-shipped default (this file) is used. The default reflects the axiom-graph project's conventions — **edit or replace freely for your project.**"
+    },
+    {
+      "id": "tier-decision-rule",
+      "heading": "Tier Decision Rule",
+      "content": "**\"Would a non-developer stakeholder recognize this test as a product story?\"**\n\n- **Yes** → Tier 3 (full narrative annotation)\n- **No, but it exercises a meaningful subsystem boundary** → Tier 2 (purpose annotation)\n- **No, it's exercising internal logic, a helper, or a specific edge case** → Tier 1 (plain pytest)\n\nProjects with distinct test surfaces (e.g. backend + GUI, or data pipelines + provenance capture) may add more tiers or refactor these. The contract with the Architect is only that **every proposed test maps to a tier**, and the Builder and Reviewer must agree on what each tier means."
+    },
+    {
+      "id": "tier-1",
+      "heading": "Tier 1 — Plain pytest",
+      "content": "No decorator, no narrative markers. Good docstrings are sufficient.\n\nInternal helpers, edge cases, parameterized variants of a behavior that's already stakeholder-readable at a higher tier. Tier 1 tests change frequently as internals evolve — easy to rewrite without annotation overhead.\n\n```python\ndef test_validate_edge_empty_source():\n    assert validate_edge(src=\"\", dst=\"x\") is False\n```"
+    },
+    {
+      "id": "tier-2",
+      "heading": "Tier 2 — @workflow(purpose=...)",
+      "content": "Purpose string only — no `Step()` markers. Signals intent at a subsystem level without requiring a full narrative.\n\nIntegration tests, tests that exercise a full pipeline inside one module, subsystem contract tests.\n\n```python\n@workflow(purpose=\"Verify that scan_module emits validates edges for all direct calls in a test function\")\ndef test_validates_edges_from_direct_calls(tmp_path):\n    ...\n```"
+    },
+    {
+      "id": "tier-3",
+      "heading": "Tier 3 — @workflow(purpose=...) + Step()/AutoStep()",
+      "content": "Full narrative markers. A reader should understand the test from annotations alone, without opening the source.\n\nEnd-to-end flows, user-story-level scenarios, anything that proves an acceptance criterion from the Architect's pitch. `Step(critical=\"NOT IMPLEMENTED\")` is the right marker for skeleton steps — documents the roadmap without faking a green test.\n\n```python\n@workflow(\n    purpose=\"Verify that axiom-graph build auto-generates validates edges from test call graph with no manual annotation\",\n)\ndef test_ast_validates_edges_end_to_end(tmp_path):\n    口 = Step(step_num=1, name=\"Write production module\",\n              purpose=\"Create a .py file with an indexed function\")\n    ...\n    口 = Step(step_num=2, name=\"Write test file\",\n              purpose=\"Create a test_*.py that imports and calls the production function\")\n    ...\n    口 = Step(step_num=3, name=\"Run axiom-graph build\",\n              purpose=\"Scan both files and upsert nodes and edges\")\n    ...\n    口 = Step(step_num=4, name=\"Assert validates edge exists\",\n              purpose=\"Confirm the test function has a validates edge to the production function\")\n    ...\n```"
+    },
+    {
+      "id": "coverage",
+      "heading": "Coverage",
+      "content": "Projects differ on how coverage is tracked. The axiom-graph project uses the AST call graph: `validates` edges are auto-generated at build time from test function calls to indexed production functions. No manual `covers=[]` annotation.\n\nIf your project tracks coverage differently (pytest-cov thresholds, explicit test-to-story mapping, E2E smoke suites), document it here. The Reviewer reads this section when verifying the Builder's test coverage matches the Architect's test-plan."
+    },
+    {
+      "id": "annotation-contract",
+      "heading": "Annotation Contract",
+      "content": "For the default axiom-graph-style tiers above:\n\n| Tier | Decorator | Markers | Typical length |\n|---|---|---|---|\n| 1 | none | none | short (<30 lines) |\n| 2 | `@workflow(purpose=...)` | none | medium |\n| 3 | `@workflow(purpose=...)` | `Step()` / `AutoStep()` | longer (narrative-driven) |\n\nIf you replace the tier system, replace this table with the equivalent for your project. The Builder reads it verbatim."
+    },
+    {
+      "id": "budget",
+      "heading": "Test Budget",
+      "content": "**Guideline: 5-10 focused tests per subsystem change.** Past 15, you're likely testing implementation details rather than behavior — consolidate.\n\nGoal: tests that each cover a meaningful scenario. Three similar assertions about the same behavior belong in one test, not three. A test exercising a complete flow (write → read → verify) is worth more than five tests each checking one field.\n\n**Signs of over-testing:**\n- Multiple tests that differ only in the input value (parameterize instead)\n- Separate tests for setup, action, and assertion that could be one test\n- Tests duplicating assertions already covered at a higher level\n- Tests for internal helpers already exercised through a public API test\n\n**Signs of under-testing:**\n- Changed code nodes with no coverage signal\n- Edge cases mentioned in the pitch or design spec but not exercised\n- Error paths with no negative test"
+    },
+    {
+      "id": "auditor-enforcement",
+      "heading": "Auditor Enforcement",
+      "content": "The Auditor references the budget section during its post-merge test audit. Excessive test counts go in the Impact Report under `needs_fix` with category `test_budget`, along with specific consolidation recommendations. The Builder generates tests within budget; the Auditor catches overruns."
+    },
+    {
+      "id": "project-specific",
+      "heading": "Project-specific",
+      "content": "Use this section for project-specific testing rules — tooling, GUI conventions, provenance-tracking requirements, whatever. Each project can shape this freely. The three skills that read this file expect the sections above (tiers, coverage, annotation contract, budget) to exist; additions here are for humans and project-specific agent reasoning."
+    }
+  ]
+}

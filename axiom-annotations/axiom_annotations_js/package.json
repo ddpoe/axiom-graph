@@ -1,0 +1,46 @@
+{
+  "name": "axiom-annotations",
+  "version": "0.2.0",
+  "description": "Zero-dependency workflow/task/Step/AutoStep annotation markers for JS/TS — port of axiom-annotations (Python).",
+  "license": "MIT",
+  "author": "Dante Poe <dap182@pitt.edu>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ddpoe/axiom-graph.git",
+    "directory": "axiom-annotations/axiom_annotations_js"
+  },
+  "keywords": [
+    "annotations",
+    "decorators",
+    "workflow",
+    "documentation",
+    "markers",
+    "axiom-graph"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "build:test": "tsc -p tsconfig.test.json",
+    "test": "npm run build:test && node --test build-test/test/*.test.js",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.0.0"
+  }
+}

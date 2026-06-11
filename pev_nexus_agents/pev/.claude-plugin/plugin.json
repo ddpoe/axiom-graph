@@ -1,0 +1,22 @@
+{
+  "name": "pev",
+  "description": "PEV (Plan-Execute-Validate) agent workflow — orchestrates Architect, Builder, Reviewer, and Auditor subagents for structured code changes with axiom-graph integration",
+  "version": "1.2.0",
+  "author": {
+    "name": "ddpoe"
+  },
+  "repository": "https://github.com/ddpoe/axiom-graph",
+  "license": "MIT",
+  "agents": [
+    "./agents/pev-architect.md",
+    "./agents/pev-builder.md",
+    "./agents/pev-reviewer.md",
+    "./agents/pev-auditor.md",
+    "./agents/pev-doc-reviewer.md",
+    "./agents/pev-spike.md",
+    "./agents/pev-audit-dev-shard.md",
+    "./agents/pev-audit-annotations-fixer.md",
+    "./agents/pev-audit-consumer-discovery.md",
+    "./agents/pev-audit-consumer-verifier.md"
+  ]
+}

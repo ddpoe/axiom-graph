@@ -1,0 +1,60 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p /tmp/hook-spike && cat > /tmp/hook-spike/input-PreToolUse-Bash.json && echo '*** HOOK-SPIKE: PreToolUse(Bash) fired ***' >&2 && printf 'fired=true\\nevent=PreToolUse\\npwd=%s\\nCLAUDE_PLUGIN_ROOT=%s\\nCLAUDE_PROJECT_DIR=%s\\n' \"$PWD\" \"${CLAUDE_PLUGIN_ROOT:-<UNSET>}\" \"${CLAUDE_PROJECT_DIR:-<UNSET>}\" > /tmp/hook-spike/heartbeat-pre.fired",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p /tmp/hook-spike && cat > /tmp/hook-spike/input-PreToolUse-Read.json && env | sort > /tmp/hook-spike/hooksjson-control.env && printf 'fired=true\\npwd=%s\\nCLAUDE_PLUGIN_ROOT=%s\\nCLAUDE_PROJECT_DIR=%s\\n' \"$PWD\" \"${CLAUDE_PLUGIN_ROOT:-<UNSET>}\" \"${CLAUDE_PROJECT_DIR:-<UNSET>}\" > /tmp/hook-spike/hooksjson-control.fired",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p /tmp/hook-spike && cat > /tmp/hook-spike/input-PostToolUse-Bash.json && echo '*** HOOK-SPIKE: PostToolUse(Bash) fired ***' >&2 && printf 'fired=true\\nevent=PostToolUse\\npwd=%s\\nCLAUDE_PLUGIN_ROOT=%s\\nCLAUDE_PROJECT_DIR=%s\\n' \"$PWD\" \"${CLAUDE_PLUGIN_ROOT:-<UNSET>}\" \"${CLAUDE_PROJECT_DIR:-<UNSET>}\" > /tmp/hook-spike/heartbeat-post.fired",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p /tmp/hook-spike && cat > /tmp/hook-spike/input-SubagentStop.json && printf 'fired=true\\nevent=SubagentStop\\npwd=%s\\nCLAUDE_PLUGIN_ROOT=%s\\nCLAUDE_PROJECT_DIR=%s\\n' \"$PWD\" \"${CLAUDE_PLUGIN_ROOT:-<UNSET>}\" \"${CLAUDE_PROJECT_DIR:-<UNSET>}\" > /tmp/hook-spike/subagentstop-hooksjson.fired",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p /tmp/hook-spike && cat > /tmp/hook-spike/input-Stop.json && printf 'fired=true\\nevent=Stop\\npwd=%s\\nCLAUDE_PLUGIN_ROOT=%s\\nCLAUDE_PROJECT_DIR=%s\\n' \"$PWD\" \"${CLAUDE_PLUGIN_ROOT:-<UNSET>}\" \"${CLAUDE_PROJECT_DIR:-<UNSET>}\" > /tmp/hook-spike/stop-hooksjson.fired",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
