@@ -1,10 +1,19 @@
 # Read the Docs build config.
 #
 # autodoc (MCP tools) and sphinx-click (CLI) both import the axiom_graph
-# package, so we install the base package (`--with docs`) -- but WITHOUT any
-# optional extras. The heavy/deprecated extras (semantic, viz, tree-sitter)
-# live in [tool.poetry.extras] and are mocked via autodoc_mock_imports in
-# userdocs/conf.py, so the import never needs them.
+# package, so we install the base package + the `docs` dependency group via
+# Poetry -- but WITHOUT any optional extras. The heavy/deprecated extras
+# (semantic, viz, tree-sitter) live in [tool.poetry.extras] and are mocked via
+# autodoc_mock_imports in userdocs/conf.py, so the import never needs them.
+#
+# RTD + Poetry: install Poetry in `post_create_environment` so it lands in the
+# build venv, then run `poetry install` in `post_install` with VIRTUAL_ENV
+# pointed at RTD's venv ($READTHEDOCS_VIRTUALENV_PATH). That forces Poetry to
+# install sphinx + furo + the package INTO the same interpreter RTD later runs
+# `python -m sphinx` with. The previous `virtualenvs.create false` +
+# `jobs.install` approach installed to the wrong interpreter, so the build venv
+# had no sphinx ("No module named sphinx"). This is the canonical RTD recipe:
+# https://docs.readthedocs.io/en/stable/build-customization.html#install-dependencies-with-poetry
 version: 2
 
 build:
@@ -12,10 +21,10 @@ build:
   tools:
     python: "3.12"
   jobs:
-    install:
+    post_create_environment:
       - pip install poetry
-      - poetry config virtualenvs.create false
-      - poetry install --with docs
+    post_install:
+      - VIRTUAL_ENV=$READTHEDOCS_VIRTUALENV_PATH poetry install --with docs
 
 sphinx:
   configuration: userdocs/conf.py
