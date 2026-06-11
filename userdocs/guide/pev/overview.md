@@ -1,4 +1,4 @@
-<!-- generated from axiom_graph::docs.consumer.pev.overview @ 8f0afa68433a; do not edit -->
+<!-- generated from axiom_graph::docs.consumer.pev.overview @ a482f1d215df; do not edit -->
 
 # PEV Agent Nexus
 
@@ -40,19 +40,25 @@ A human gate sits after planning, after review, before merge, and after doc revi
 
 ## Two cycle shapes
 
-PEV exposes two user-invocable entry points so the ceremony matches the size of the work:
+PEV exposes two user-invocable entry points so the ceremony matches the size of the work.
+
+**`/pev-cycle`** is the full multi-agent workflow for a **cross-cutting change that fans out across several core systems at once** — e.g. a new config knob every layer has to honor, or a field threaded from ingestion through storage, the API, and the UI. It runs in an isolated git worktree, walks all five agents, and gates each phase.
+
+*Example — a real cycle:*
 
 ```
-/pev-cycle add a history endpoint that filters by date range
+/pev-cycle add configurable doc-scan dirs + a db-path key, plumbed through the builder, CLI, MCP, renderers, diff, and viz
 ```
 
-`/pev-cycle` is the full multi-agent workflow for non-trivial changes - new features, cross-cutting refactors, anything touching core mechanisms. It runs in an isolated git worktree, walks all five agents, and gates each phase.
+**`/pev-instance`** is the slim single-agent mode for a **localized change with a small blast radius** — one subsystem, a handful of files, but still a real change with doc impact (not a one-line typo or docstring; any agent can do those).
+
+*Example — a real instance:*
 
 ```
-/pev-instance fix typo in README install section
+/pev-instance auto-register a worktree as a viz project on checkout so it shows up in the project picker
 ```
 
-`/pev-instance` is a slim single-agent mode for small, well-scoped tasks - docstring fixes, single-file bug fixes, config tweaks. It runs in your working tree with no worktree isolation and no separate Reviewer: mini-pitch -> human gate -> implement -> structured self-review -> a searchable checkin doc. It shares the *spine* (user-story framing, human gate, self-review against your SOPs) but not the machinery, and it will proactively escalate to `/pev-cycle` if the task turns out bigger than scoped - for instance if it touches a function the project has declared a core mechanism via [workflow markers](../concepts/annotations.md).
+It runs in your working tree with no worktree isolation and no separate Reviewer: mini-pitch -> human gate -> implement -> structured self-review -> a searchable checkin doc. It plays Builder, Reviewer, *and Auditor* itself, so it still does the doc-honesty pass — updating the docs its change affects and recording an impact note — just without dispatching a separate Auditor. It shares the *spine* (user-story framing, human gate, self-review against your SOPs) but not the machinery, and it will proactively escalate to `/pev-cycle` if the task turns out bigger than scoped — e.g. if it touches a function the project has declared a core mechanism via [workflow markers](../concepts/annotations.md).
 
 When in doubt, start with `/pev-instance` and let it escalate. The full decision table lives in the plugin USER_GUIDE.
 

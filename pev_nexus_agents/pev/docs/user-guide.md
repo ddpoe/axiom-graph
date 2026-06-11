@@ -1,4 +1,4 @@
-<!-- generated from axiom_graph::docs.consumer.plugins.pev.user-guide @ 3b2aa84d3857; do not edit -->
+<!-- generated from axiom_graph::docs.consumer.plugins.pev.user-guide @ c861ddce32e2; do not edit -->
 
 # PEV User Guide
 
@@ -10,27 +10,31 @@ How to actually use the `pev` plugin. Covers the two cycle shapes, the human app
 
 ### `/pev-cycle` — full workflow
 
-For non-trivial changes. Five phases, five approval gates, isolated worktree, persistent cycle manifest.
+For a **cross-cutting change that fans out across several core systems at once** — e.g. a config knob every layer must honor, or a field threaded from ingestion through storage, the API, and the UI. Five phases, five approval gates, isolated worktree, persistent cycle manifest.
+
+*Example — a real cycle:*
 
 ```
-/pev-cycle add a history endpoint that filters by date range
+/pev-cycle add configurable doc-scan dirs + a db-path key, plumbed through the builder, CLI, MCP, renderers, diff, and viz
 ```
 
 Phases: Intake → Plan (Architect) → Build (Builder) → Review (Reviewer) → Merge → Audit (Auditor) → Doc Review (Doc Reviewer) → Complete. Each agent reads and writes the cycle manifest; human gates sit between the plan, review, merge, and doc-review phases.
 
 ### `/pev-instance` — slim mode
 
-For small, well-scoped tasks. One agent, no worktree, no sub-dispatches — it plays Builder, Reviewer, and Auditor itself, so it updates the documentation its change affects rather than handing that off.
+For a **localized change with a small blast radius** — one subsystem, a handful of files — that is still a real change with doc impact (not a one-line typo or docstring; any agent can do those). One agent, no worktree, no sub-dispatches — it plays Builder, Reviewer, and Auditor itself, so it runs its own doc-review/impact pass and updates the documentation its change affects rather than handing that off.
+
+*Example — a real instance:*
 
 ```
-/pev-instance fix typo in README install section
+/pev-instance auto-register a worktree as a viz project on checkout so it shows up in the project picker
 ```
 
-Flow: pre-flight checks (dirty-repo + clean-graph baseline via `axiom_graph_check`, both overridable) → read `.pev/` SOPs → scope check (escalates to `/pev-cycle` on 4+ files, public API change, new architecture, or core-mechanism touch) → mini-pitch + human gate → implement in working tree, single commit → update the docs the change affects (its own Auditor pass — no separate Auditor) → structured self-review → write a checkin doc.
+Flow: pre-flight checks (dirty-repo + clean-graph baseline via `axiom_graph_check`, both overridable) → read `.pev/` SOPs → scope check (escalates to `/pev-cycle` on 4+ files, public API change, new architecture, or core-mechanism touch) → mini-pitch + human gate → implement in working tree, single commit → update the docs the change affects + an impact note (its own Auditor pass — no separate Auditor) → structured self-review → write a checkin doc.
 
 ### When to use which
 
-Use `/pev-instance` for 1–2 files, no public-API/architecture change, and when you want the discipline surface (user story, self-review, searchable record). Use `/pev-cycle` for 3+ files, public API changes, architectural decisions, new features, or anything touching core mechanisms. When in doubt, start with `/pev-instance` and let it escalate.
+Use `/pev-instance` for 1–3 files, no public-API/architecture change, when you want the discipline surface (user story, self-review, doc updates, searchable record). Use `/pev-cycle` for changes that fan out across multiple systems, public API changes, architectural decisions, new features, or anything touching core mechanisms. When in doubt, start with `/pev-instance` and let it escalate.
 
 ## Human approval gates
 
