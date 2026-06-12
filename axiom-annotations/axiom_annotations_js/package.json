@@ -6,7 +6,7 @@
   "author": "Dante Poe <dap182@pitt.edu>",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ddpoe/axiom-graph.git",
+    "url": "git+https://github.com/ddpoe/axiom-graph.git",
     "directory": "axiom-annotations/axiom_annotations_js"
   },
   "keywords": [
