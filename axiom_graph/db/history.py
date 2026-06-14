@@ -157,8 +157,14 @@ def resolve_since_cutoff(
     2. *since_sha* → match any history row by git_sha prefix (picks up
        INITIAL, content events, etc. — works after ``axiom-graph init``).
     3. *since_timestamp* → use directly.
-    4. Fallback → most recent CHECKPOINT.
-    5. Fallback → most recent history row with a git_sha.
+    4. Fallback (only when no *since_sha* was given) → most recent CHECKPOINT.
+    5. Fallback (only when no *since_sha* was given) → most recent history row
+       with a git_sha.
+
+    An explicit *since_sha* that matches no history row returns
+    ``(None, None)`` — it fails loud rather than borrowing a different
+    baseline, so callers can report "not in index" instead of a count
+    against the wrong reference point.
 
     CHECKPOINTs are preferred when available (they represent explicit
     reference points), but any git SHA in history works as a cutoff.
@@ -226,6 +232,12 @@ def resolve_since_cutoff(
                 cutoff = batch_end["batch_end"] if batch_end else row["scanned_at"]
                 return cutoff, row["git_sha"]
 
+            # Explicit SHA requested but not found in node_history — fail loud.
+            # Do NOT fall through to the no-arg checkpoint/any-SHA fallback
+            # (steps 4-5): answering "changed since X" against a different
+            # baseline is the silent lie this guards against.
+            return None, None
+
         if since_timestamp:
             口 = Step(step_num=3, name="Use timestamp directly", purpose="Caller provided an explicit ISO-8601 cutoff")
             return since_timestamp, None
@@ -261,6 +273,38 @@ def resolve_since_cutoff(
             return row["scanned_at"], row["git_sha"]
 
         return None, None
+
+
+def get_index_head_sha(db_path: Path) -> str | None:
+    """Return the git SHA the index was most recently built at.
+
+    The ``git_sha`` on the most recent ``node_history`` row — i.e. the commit
+    the live index currently reflects.  Used to report how far the index lags
+    the working-tree HEAD.  ``None`` when no history row carries a SHA.
+    """
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT git_sha FROM node_history
+            WHERE git_sha IS NOT NULL
+            ORDER BY id DESC LIMIT 1
+            """,
+        ).fetchone()
+    return row["git_sha"] if row else None
+
+
+def get_indexed_shas(db_path: Path) -> set[str]:
+    """Return the set of distinct git SHAs present in ``node_history``.
+
+    A commit is a valid ``since`` reference point iff it appears here.  The
+    commit picker uses this to mark which commits can actually be resolved
+    (the rest are faded out).
+    """
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT git_sha FROM node_history WHERE git_sha IS NOT NULL",
+        ).fetchall()
+    return {r["git_sha"] for r in rows}
 
 
 def list_reference_points(db_path: Path) -> list[dict]:
@@ -428,6 +472,8 @@ __all__ = [
     "get_agent_verified_nodes",
     "get_history_since",
     "resolve_since_cutoff",
+    "get_index_head_sha",
+    "get_indexed_shas",
     "list_reference_points",
     "filter_history_rows",
     "build_node_types_map",

@@ -46,6 +46,7 @@ _BASE_SKIP_DIRS: frozenset[str] = frozenset(
         "dist",
         "build",
         ".pixi",
+        "worktrees",  # PEV per-cycle git worktrees live under .claude/worktrees/
     }
 )
 
@@ -361,6 +362,7 @@ def build(
                 project_id,
                 prefix=config_prefix,
                 stored_mtimes=stored_mtimes if discovery_only else None,
+                skip_dirs=skip_dirs,
             )
             all_nodes.extend(c_nodes)
             all_edges.extend(c_edges)

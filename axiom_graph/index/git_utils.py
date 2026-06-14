@@ -129,3 +129,22 @@ def get_old_body(
         return raw
     lines = raw.splitlines(keepends=True)
     return "".join(lines[max(start_line - 1, 0) : end_line])
+
+
+def count_commits_ahead(project_root: Path, base_sha: str) -> int | None:
+    """Return how many commits HEAD is ahead of *base_sha* (``base..HEAD``).
+
+    Used to surface how far the index lags the working tree (``index is N
+    commits behind HEAD``).  Best-effort hint only: returns ``None`` when git
+    is unavailable or *base_sha* is unknown to git (e.g. a different branch).
+    False-negatives are acceptable — the caller treats ``None`` as "unknown".
+    """
+    if not base_sha:
+        return None
+    raw = _run_git(["rev-list", "--count", f"{base_sha}..HEAD"], project_root)
+    if raw is None:
+        return None
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return None

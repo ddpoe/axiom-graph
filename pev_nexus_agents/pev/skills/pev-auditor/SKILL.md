@@ -90,14 +90,11 @@ For each `category.*` section in the topology:
 
 The topology's `Doc Reviewer check` field is NOT your concern — it's the Doc Reviewer's post-verification checklist. You perform the action; they verify.
 
-**Semantic sweep (after the category pass).** Categories and graph links only reach docs that declare their relationships. Docs that *mention* the changed behavior in prose without a `links` edge to the changed nodes are invisible to LINKED_STALE and `drift_query` — sweep them by search:
+**Link audit (after the category pass).** Run the change-scoped Link Audit — the shared procedure is in `${CLAUDE_PLUGIN_ROOT}/templates/link-audit-reference.md` (the three verbs add/repoint/drop, detection, the granularity rule, and term families). Read the project's `Scope` (which trees are living vs frozen) from `.pev/doc-topology.json` (`link-audit` section; a pre-1.3 topology may name it `semantic-sweep`).
 
-1. Read the topology's `semantic-sweep` section for the project's term families and living-vs-frozen scope (absent → derive terms from the cycle and skip frozen/historical trees: cycle manifests, instance checkins, devlogs, release notes).
-2. Derive 2–4 term families from the cycle's change (mechanism names from the pitch, status vocabulary, edge/event types, changed function/tool/command names) and `axiom_graph_search` each.
-3. Read every living-doc hit and judge it against the implemented behavior. Patch drifted prose per the category rules; fill genuine gaps (e.g. a lifecycle or spec subsection that should now mention the new behavior). Content fixes are yours to make directly.
-4. **Links from the sweep are proposed, never auto-added.** For each hit that describes a changed node without linking it, record an entry in the Impact Report under `proposed_links`: the section, the target node, the section's **existing** links (so redundancy is visible to the human), and a one-line rationale. The orchestrator surfaces the list at the Phase 8 proposed-links gate and applies only the links the human approves. Unreviewed bulk-linking bloats the graph and dilutes LINKED_STALE into noise — every edge should be a deliberate signal.
+**Disposition (Auditor):** patch drifted prose and fill gaps directly — content fixes are yours. For each **add / repoint / drop**, record a verb-tagged entry in the Impact Report's `proposed_links` (section, target node, `existing_links`, one-line rationale; `replaces` for a repoint) — the orchestrator applies approved ones at the Phase 8 gate. The sole exception: a link whose target the change *mechanically moved* is repointed directly, no gate.
 
-After completing the topology pass and the semantic sweep, continue with the graph-linked feature-doc updates below.
+After completing the topology pass and the link audit, continue with the graph-linked feature-doc updates below.
 
 #### 4a. Post-Implementation Updates (graph-linked feature docs)
 
@@ -197,15 +194,17 @@ axiom_graph_mark_clean(
 
 Also re-check any `AGENT_VERIFIED` events via `axiom_graph_report` — verify the agent's judgment was correct.
 
-#### 4c. Automated Audit Checks
+#### 4c. Whole-graph hygiene — delegated, not run here
 
-Run these in order after the staleness review:
+The per-cycle Auditor does **not** run whole-graph link-hygiene scans. A tree-wide census of unlinked public nodes or orphan/broken edges is change-independent maintenance — re-running it every cycle re-flags the same standing conditions and dilutes the signal. It lives in `/pev-audit-dev-docs` (drift inventory + `axiom_graph_list_undocumented` + ghost/backlog passes).
 
-1. **Unlinked public nodes** — `axiom_graph_list_undocumented`. Filter out `_`-prefixed, `test_`-prefixed, fixtures/helpers, external packages, entities. For each remaining node, find or create the doc section and `axiom_graph_add_link`.
-2. **Section length** — flag sections over ~1500 characters. Split if needed.
-3. **Orphan links** — `axiom_graph_graph(section_id, direction="out")` for doc sections with links. Remove links pointing to nonexistent node IDs.
-4. **Composite coverage** — `axiom_graph_list(parent_id=module_id)` to check children link coverage. Flag modules where <50% of public children have `documents` edges.
-5. **Link fan-out** — flag doc sections with >8 outbound `documents` edges. Split or remove orientation-only links.
+The change-scoped slices that matter *this* cycle are already covered — nothing extra to run here:
+
+- **New public surface** this cycle introduced → linked in §4a (post-implementation doc-to-code links).
+- **Edges this change broke** (renamed/deleted targets) → handled in §4b as `BROKEN_LINK` / `NOT_FOUND` staleness.
+- **Over-fanned or wrong-granularity edges** in the change's neighbourhood → the Link Audit's `repoint` / `drop` verbs in §4a.0.
+
+(The two metric checks this step used to apply — composite coverage <50% and fan-out >8 — are retired: arbitrary thresholds that proxy poorly for "is the contract documented" and pressure noise edges to hit a quota. The real signals are `list_undocumented` by identity and the Link Audit's kind-aware judgment.)
 
 ### Step 5: Final verification
 
@@ -262,16 +261,26 @@ AUDITOR {status}
   ],
   "proposed_links": [
     {
+      "verb": "add",
       "from": "axiom_graph::docs.features.x.design::section",
       "to": "axiom_graph::axiom_graph.module::function",
       "edge_type": "documents",
       "existing_links": ["axiom_graph::axiom_graph.module::other_function"],
-      "rationale": "Semantic sweep: section describes this function's behavior in prose but declares no edge — invisible to LINKED_STALE. PROPOSAL ONLY: the orchestrator surfaces this at the Phase 8 proposed-links gate; add_link only on human approval."
+      "rationale": "Link audit (add): section describes this function's behavior in prose but declares no edge — invisible to LINKED_STALE. PROPOSAL ONLY: orchestrator applies at the Phase 8 proposed-links gate on human approval."
+    },
+    {
+      "verb": "repoint",
+      "from": "axiom_graph::docs.features.x.prd::user-stories",
+      "to": "axiom_graph::axiom_graph.module::handler@workflow",
+      "replaces": "axiom_graph::axiom_graph.module::handler",
+      "edge_type": "documents",
+      "existing_links": ["axiom_graph::axiom_graph.module::handler"],
+      "rationale": "Link audit (repoint): narrative user-story section is linked to the bare function; per the granularity rule (`link-audit-reference.md`) it should point at the @workflow envelope so it re-evaluates on contract changes, not every body edit. PROPOSAL ONLY: orchestrator applies (delete `replaces` + add `to`) at the Phase 8 gate."
     }
   ],
   "checks_completed": {
     "staleness_review": true,
-    "automated_checks": true,
+    "link_audit": true,
     "final_verification": true
   },
   "skipped_nodes": [
@@ -298,21 +307,21 @@ AUDITOR {status}
 
 | Status | Meaning | When to use |
 |---|---|---|
-| `DONE` | **All steps completed** — staleness review (4b), automated checks (4c), and final verification (Step 5) | Happy path — every step in the workflow finished |
+| `DONE` | **All steps completed** — the link audit (4a.0), staleness review (4b), and final verification (Step 5) | Happy path — every step in the workflow finished |
 | `DONE_WITH_CONCERNS` | All steps completed but with `needs_fix` items | Code issues found that the Auditor cannot fix (no code-write tools). The orchestrator presents these to the user for follow-up. |
 | `CONTINUING` | Any step incomplete, need another incarnation | Tool budget running low, maxTurns approaching, or too many nodes to review in one pass. **This is the default for any incomplete work.** |
 | `NEEDS_INPUT` | Need user judgment to proceed | Ambiguous doc placement, unclear whether a change matches user intent, feature doc ownership questions |
 
-**Critical distinction:** `DONE` means all 3 sub-steps of Step 4 (4a, 4b, 4c) AND Step 5 are finished. If you completed the staleness review (4b) but haven't run the automated checks (4c), you are NOT done — return `CONTINUING`. The orchestrator will redispatch you and already-marked-clean nodes won't reappear as stale.
+**Critical distinction:** `DONE` means all sub-steps of Step 4 (4a.0 link audit, 4a, 4b) AND Step 5 are finished. If you completed the staleness review (4b) but haven't done the final verification (Step 5), you are NOT done — return `CONTINUING`. The orchestrator will redispatch you and already-marked-clean nodes won't reappear as stale.
 
 ### Handling CONTINUING (incomplete work)
 
 Return `CONTINUING` whenever you cannot complete all steps in this incarnation. Common reasons:
 - **Tool budget** — approaching the maxTurns limit or tool gate threshold
 - **Large review scope** — too many stale nodes to review in one pass
-- **Steps remaining** — staleness review done but automated checks (4c) not started yet
+- **Steps remaining** — staleness review done but final verification (Step 5) not finished yet
 
-Do NOT return `DONE` just because you finished the staleness review. That's only Step 4b — there are still automated checks (4c) and final verification (Step 5) to complete.
+Do NOT return `DONE` just because you finished the staleness review. That's only Step 4b — there is still final verification (Step 5) to complete.
 
 If you are running low on tool calls (approaching the maxTurns limit set by the orchestrator), or if you realize you cannot complete all reviews in this incarnation:
 
@@ -336,7 +345,7 @@ Progress summary:
 - Docs updated: {count}
 - Needs fix so far: {list}
 - Remaining work: {description of what's left}
-- Current phase: {staleness review | automated checks | pev checks}
+- Current phase: {link audit | staleness review | final verification}
 
 ---IMPACT-REPORT---
 {
@@ -388,7 +397,7 @@ The orchestrator relays your questions to the user and resumes you with the answ
 - **Do NOT commit.** No git operations.
 - **Stale ≠ broken.** Most stale nodes are fine — changed intentionally. Read the diff, make a judgment. Only flag things that are actually wrong. (Exception: reconciled code/test nodes per Step 3.4 are batch-cleaned on the Reviewer's validation without a per-node diff read.)
 - **`axiom_graph_mark_clean` is the single clean action.** It both records the AGENT_VERIFIED judgment and clears the CONTENT_STALE marker. There is no separate tag removal step for individual nodes — `mark_clean` handles both.
-- **Follow the Auditor Reference Protocol** (`${CLAUDE_PROJECT_DIR}/.claude/templates/auditor-reference-protocol.md`) for the full checklist. The protocol sections are ordered — follow them in order.
+- **Follow the Auditor Reference Protocol** (`${CLAUDE_PLUGIN_ROOT}/templates/auditor-reference-protocol.md`) for the full checklist. The protocol sections are ordered — follow them in order.
 - **Use `verified_by="agent:pev-auditor"` in `axiom_graph_mark_clean` calls** for traceability.
 - **The `decisions` section is your only narrative artifact.** What changed (sections updated, nodes marked clean, links added/removed) is recoverable mechanically from `axiom_graph_report(since_sha=baseline)` — do not duplicate it in prose. Reserve the cycle-wide `decisions` section for non-obvious judgment calls (e.g., "marked clean despite drift because logic is identical"): `### D-{N} (Auditor): {title}\n**Phase:** audit\n**Choice:** {judgment}\n**Reason:** {why}`. If there are no non-obvious judgments, append nothing.
 - **Use Google-style docstrings** conventions when writing doc content.

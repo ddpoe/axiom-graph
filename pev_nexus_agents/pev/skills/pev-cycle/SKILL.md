@@ -205,9 +205,9 @@ Handle status codes:
 
 ### 8. Complete
 
-**Proposed-links gate.** Collect `proposed_links` entries from the Auditor's Impact Report and the Doc Reviewer's review (both may propose; neither adds). If the combined list is non-empty:
+**Proposed-links gate.** Collect `proposed_links` entries from the Auditor's Impact Report and the Doc Reviewer's review (both may propose; neither applies). Each entry carries a **verb** — `add`, `repoint`, or `drop`. If the combined list is non-empty:
 
-**HUMAN GATE** — present each proposal: the doc section, the target node, the section's *existing* links (so redundancy is visible), and the rationale. Ask which to apply (all / subset / none). Apply only the approved ones via `axiom_graph_add_link`; record the decision (approved/rejected per link) in the cycle manifest's `decisions` section. Links are deliberate staleness signals — unreviewed bulk-linking bloats the graph, so rejection is a normal outcome, not a failure.
+**HUMAN GATE** — present each proposal: its verb, the doc section, the target node (and for a `repoint`, the edge it `replaces`), the section's *existing* links (so redundancy/granularity is visible), and the rationale. Ask which to apply (all / subset / none). Apply only the approved ones — `add` via `axiom_graph_add_link`, `repoint` via `axiom_graph_delete_link` (the replaced edge) + `axiom_graph_add_link` (the new target), `drop` via `axiom_graph_delete_link`; record the decision (approved/rejected per proposal) in the cycle manifest's `decisions` section. Edges are deliberate staleness signals — unreviewed bulk edits bloat the graph, so rejection is a normal outcome, not a failure.
 
 **Render the audit changes-summary** before checkpointing. Call `axiom_graph_report(project_root=main_repo_path, since_sha=baseline_sha, verbose=True)` and write the result into the cycle manifest's `auditor.changes-summary` section:
 

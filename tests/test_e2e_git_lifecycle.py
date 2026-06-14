@@ -471,9 +471,9 @@ def test_multiple_builds_same_sha(git_project: Path, git_db_path: Path):
     )
 
 
-# Test 5 — SHA not in history → git log date fallback
-@workflow(purpose="SHA not in any history row falls back to git log date resolution")
-def test_sha_not_in_history_git_log_fallback(git_project: Path, git_db_path: Path):
+# Test 5 — SHA not in history → fail loud (no fallback to a different baseline)
+@workflow(purpose="An explicit SHA absent from history returns resolved:false instead of a fallback baseline")
+def test_sha_not_in_history_fails_loud(git_project: Path, git_db_path: Path):
     (git_project / "mod.py").write_text(
         'def greet():\n    """Hello."""\n    return "hello"\n',
         encoding="utf-8",
@@ -496,10 +496,13 @@ def test_sha_not_in_history_git_log_fallback(git_project: Path, git_db_path: Pat
     sha_c = _commit(git_project, "Change greet again")
     _build(git_project)
 
-    # Since with sha_b — not in history, should fall back to git log date
+    # Since with sha_b — committed but never built, so absent from history.
+    # The endpoint must fail loud rather than resolve a different baseline.
     since_result = _since(git_db_path, git_project, sha=sha_b[:10])
-    assert since_result["baseline_sha"] is not None
-    assert since_result["baseline_timestamp"] is not None
+    assert since_result["resolved"] is False
+    assert since_result["reason"] == "not in index"
+    assert since_result.get("requested_sha") == sha_b[:10]
+    assert "node_ids" not in since_result
 
 
 # Test 6 — No params, no checkpoints → latest sha-bearing row

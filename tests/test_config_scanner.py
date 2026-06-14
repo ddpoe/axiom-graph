@@ -165,3 +165,29 @@ def test_hash_changes_on_content_change(tmp_path: Path):
     hash2 = nodes2[0].code_hash
 
     assert hash1 != hash2
+
+
+def test_scan_skips_dirs_in_skip_set(tmp_path: Path):
+    """Files under a directory named in ``skip_dirs`` are not scanned.
+
+    Top-level config files are indexed; config files nested inside a skipped
+    directory (e.g. a ``worktrees/<name>/`` checkout under the config dir) are
+    excluded. Omitting ``skip_dirs`` scans every supported file.
+    """
+    config_dir = tmp_path / ".claude"
+    config_dir.mkdir()
+    (config_dir / "settings.json").write_text("{}", encoding="utf-8")
+    nested = config_dir / "worktrees" / "feature-x"
+    nested.mkdir(parents=True)
+    (nested / "settings.json").write_text("{}", encoding="utf-8")
+
+    # No skip-set: every supported file under the dir is scanned.
+    everything, _, _ = scan_config_dir(config_dir, tmp_path, "test_proj")
+    assert {n.id for n in everything} == {
+        "test_proj::config.claude.settings",
+        "test_proj::config.claude.worktrees.feature-x.settings",
+    }
+
+    # A directory in skip_dirs is excluded along with everything under it.
+    nodes, _, _ = scan_config_dir(config_dir, tmp_path, "test_proj", skip_dirs=frozenset({"worktrees"}))
+    assert {n.id for n in nodes} == {"test_proj::config.claude.settings"}

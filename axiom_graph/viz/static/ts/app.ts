@@ -792,6 +792,36 @@ function _applyFiltersAndRefresh(): void {
 
 // ── Since filter ────────────────────────────────────────────────────────────
 
+/**
+ * Render the index-freshness banner in the Changed-Since panel.
+ *  - resolved=false → warning that the requested commit isn't indexed.
+ *  - behind > 0     → standing "index is N behind HEAD — rebuild" nudge.
+ *  - otherwise      → hidden.
+ * Informational only: never triggers a rebuild (the passive model stays).
+ */
+function _renderSinceBanner(opts: { resolved: boolean; requestedSha?: string | null; behind?: number | null }): void {
+  const el = document.getElementById('since-banner');
+  if (!el) return;
+  const behind = typeof opts.behind === 'number' && opts.behind > 0 ? opts.behind : 0;
+  const behindMsg = behind > 0 ? ` The index is ${behind} commit${behind === 1 ? '' : 's'} behind HEAD.` : '';
+  if (!opts.resolved) {
+    const reqSha = escHtml((opts.requestedSha || '').slice(0, 8));
+    el.className = 'since-banner';
+    el.innerHTML =
+      `⚠ Commit <code>${reqSha}</code> isn't in the index — "changed since" ` +
+      `can't be computed for it.${behindMsg} Rebuild the index ` +
+      `(<code>axiom-graph build</code>) and try again.`;
+  } else if (behind > 0) {
+    el.className = 'since-banner nudge';
+    el.innerHTML =
+      `The index is ${behind} commit${behind === 1 ? '' : 's'} behind HEAD — ` +
+      `rebuild (<code>axiom-graph build</code>) to see the latest.`;
+  } else {
+    el.className = 'since-banner hidden';
+    el.innerHTML = '';
+  }
+}
+
 async function applySinceFilter(
   type: string,
   customValue?: string,
@@ -820,11 +850,18 @@ async function applySinceFilter(
   try {
     const qs = params.toString();
     const data = await apiFetch('/api/history/since' + (qs ? '?' + qs : ''));
+    if (data.resolved === false) {
+      _renderSinceBanner({ resolved: false, requestedSha: data.requested_sha, behind: data.commits_behind_head });
+      setStatus(`Commit ${(data.requested_sha || '').slice(0, 8)} isn't in the index`);
+      _updateSinceUI(null);
+      return;
+    }
     if (!data.baseline_sha && !data.baseline_timestamp) {
       setStatus('No checkpoint found \u2014 use a SHA or date instead');
       _updateSinceUI(null);
       return;
     }
+    _renderSinceBanner({ resolved: true, behind: data.commits_behind_head });
     state.sinceFilter = {
       type: type as any,
       value: customValue || null,
@@ -855,11 +892,18 @@ async function applySinceRange(
     params.set('sha', sinceSha);
     params.set('until_sha', untilSha);
     const data = await apiFetch('/api/history/since?' + params.toString());
+    if (data.resolved === false) {
+      _renderSinceBanner({ resolved: false, requestedSha: data.requested_sha, behind: data.commits_behind_head });
+      setStatus(`Commit ${(data.requested_sha || '').slice(0, 8)} isn't in the index`);
+      _updateSinceUI(null);
+      return;
+    }
     if (!data.baseline_sha && !data.baseline_timestamp) {
       setStatus('Range filter failed \u2014 could not resolve reference points');
       _updateSinceUI(null);
       return;
     }
+    _renderSinceBanner({ resolved: true, behind: data.commits_behind_head });
     state.sinceFilter = {
       type: 'range',
       value: sinceSha,
@@ -886,6 +930,7 @@ function clearSinceFilter(): void {
   state._sinceBaselineSha = null;
   state._sinceDeletedNodes = null;
   state._sinceUntilTimestamp = null;
+  _renderSinceBanner({ resolved: true, behind: 0 });
   _updateSinceUI(null);
   _applyFiltersAndRefresh();
   setStatus(`${state.meta ? state.meta.node_count : '?'} nodes \u00b7 ${state.meta ? state.meta.edge_count : '?'} edges`);

@@ -358,7 +358,9 @@ def get_node_diff_endpoint(node_id: str, sha: str | None = None) -> dict:
 @workflow(
     purpose="Return node IDs that changed since a reference point, with ghost nodes for deleted entries",
     inputs="optional sha (git SHA prefix), optional timestamp (ISO-8601), optional until_sha, optional until_timestamp",
-    outputs="dict with node_ids, baseline_sha, baseline_timestamp, until_timestamp, deleted_nodes",
+    outputs="on success: resolved=true plus node_ids, baseline_sha, baseline_timestamp, "
+    "until_timestamp, deleted_nodes, index_head_sha, commits_behind_head; on an "
+    "explicit-SHA miss: resolved=false plus requested_sha, reason, index_head_sha, commits_behind_head",
 )
 def get_history_since_endpoint(
     sha: str | None = None,
@@ -372,30 +374,21 @@ def get_history_since_endpoint(
     if server._PROJECT_ROOT is None:
         raise HTTPException(status_code=503, detail="Server not initialized")
 
-    口 = AutoStep(step_num=1, name="Resolve reference point")
+    from axiom_graph.index import git_utils
+
+    口 = AutoStep(step_num=1, name="Compute index freshness vs HEAD")
+    # Always surfaced so the frontend can show a standing "index is N behind
+    # HEAD — rebuild" nudge.  Best-effort hint; None when git is unavailable.
+    index_head_sha = db.get_index_head_sha(server._db())
+    commits_behind_head = (
+        git_utils.count_commits_ahead(server._PROJECT_ROOT, index_head_sha) if index_head_sha is not None else None
+    )
+
+    口 = AutoStep(step_num=2, name="Resolve reference point")
     cutoff_ts, baseline_sha = db.resolve_since_cutoff(server._db(), since_sha=sha, since_timestamp=timestamp)
 
-    口 = Step(
-        step_num=2,
-        name="Last resort: git log date fallback",
-        purpose="If SHA not in history at all, resolve its commit date via git log",
-    )
-    if sha and baseline_sha is None and cutoff_ts is None:
-        try:
-            result = subprocess.run(
-                ["git", "log", "-1", "--format=%aI", sha],
-                capture_output=True,
-                text=True,
-                cwd=str(server._PROJECT_ROOT),
-                stdin=subprocess.DEVNULL,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                cutoff_ts = result.stdout.strip()
-                baseline_sha = sha
-        except Exception as exc:
-            logger.debug("git log for baseline sha failed: %s", exc)
-
     resolved_until_ts: str | None = until_timestamp
+    until_resolved = True
     if until_sha and not resolved_until_ts:
         until_cutoff_ts, _ = db.resolve_since_cutoff(
             server._db(),
@@ -403,9 +396,28 @@ def get_history_since_endpoint(
         )
         if until_cutoff_ts:
             resolved_until_ts = until_cutoff_ts
+        else:
+            until_resolved = False
 
     口 = Step(
         step_num=3,
+        name="Fail loud on an explicitly-requested SHA that is not indexed",
+        purpose="An explicit sha/until_sha absent from node_history returns resolved:false "
+        "instead of a count against a different baseline — never report 'changed since X' "
+        "against the wrong reference point",
+    )
+    sha_missing = bool(sha) and baseline_sha is None and cutoff_ts is None
+    if sha_missing or (until_sha and not until_resolved):
+        return {
+            "resolved": False,
+            "requested_sha": sha if sha_missing else until_sha,
+            "reason": "not in index",
+            "index_head_sha": index_head_sha,
+            "commits_behind_head": commits_behind_head,
+        }
+
+    口 = Step(
+        step_num=4,
         name="Query history rows after cutoff",
         purpose="Fetch all node_history rows with scanned_at > cutoff_timestamp, bounded by until if given",
     )
@@ -421,7 +433,7 @@ def get_history_since_endpoint(
     node_ids = sorted(set(r["node_id"] for r in rows))
 
     口 = Step(
-        step_num=4,
+        step_num=5,
         name="Synthesize ghost nodes from DELETED rows",
         purpose="Reconstruct phantom entries for purged nodes so the viz can show them as dimmed strikethrough rows",
         critical="Ghost nodes depend on preserved=1 DELETED history rows — if those are missing, deleted nodes silently disappear from the since view",
@@ -450,7 +462,7 @@ def get_history_since_endpoint(
             )
 
     口 = Step(
-        step_num=5,
+        step_num=6,
         name="Resolve baseline SHA for timestamp-only cutoffs",
         purpose="When cutoff came from a timestamp (no SHA), find the nearest git commit for scoped diff",
     )
@@ -469,11 +481,14 @@ def get_history_since_endpoint(
             logger.debug("git rev-list for baseline resolution failed: %s", exc)
 
     return {
+        "resolved": True,
         "node_ids": node_ids,
         "baseline_sha": baseline_sha,
         "baseline_timestamp": cutoff_ts,
         "until_timestamp": resolved_until_ts,
         "deleted_nodes": deleted_nodes,
+        "index_head_sha": index_head_sha,
+        "commits_behind_head": commits_behind_head,
     }
 
 
@@ -532,7 +547,11 @@ def get_recent_shas() -> dict:
         checkpoint_rows = conn.execute(
             "SELECT DISTINCT git_sha FROM node_history WHERE change_type = 'CHECKPOINT' AND git_sha IS NOT NULL",
         ).fetchall()
+        indexed_rows = conn.execute(
+            "SELECT DISTINCT git_sha FROM node_history WHERE git_sha IS NOT NULL",
+        ).fetchall()
     checkpoint_shas = {r["git_sha"] for r in checkpoint_rows}
+    indexed_shas = {r["git_sha"] for r in indexed_rows}
 
     try:
         result = subprocess.run(
@@ -570,6 +589,7 @@ def get_recent_shas() -> dict:
                 "commit_subject": subject or None,
                 "commit_body": body if body else None,
                 "is_checkpoint": is_cp,
+                "indexed": sha in indexed_shas,
             }
         )
 

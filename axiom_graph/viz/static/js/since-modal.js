@@ -168,13 +168,22 @@ function _createCommitRow(commit, rangeSet) {
     if (rangeSet.has(commit.sha)) {
         row.classList.add('in-range');
     }
+    // Un-indexed commits have no node_history rows, so they can't be a valid
+    // "since" reference — fade them out and make them non-selectable.
+    if (!commit.indexed) {
+        row.classList.add('not-indexed');
+        row.title = 'Not in the index — rebuild (axiom-graph build) to filter since this commit';
+    }
     // Checkbox
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
     checkbox.className = 'cm-checkbox';
     checkbox.checked = _checkedShas.includes(commit.sha);
+    checkbox.disabled = !commit.indexed;
     checkbox.addEventListener('click', (e) => {
         e.stopPropagation();
+        if (!commit.indexed)
+            return;
         _toggleCheck(commit.sha);
     });
     row.appendChild(checkbox);
@@ -241,6 +250,8 @@ function _createCommitRow(commit, rangeSet) {
         const target = e.target;
         if (target.tagName === 'INPUT' || target.classList.contains('since-modal-commit-expand'))
             return;
+        if (!commit.indexed)
+            return; // un-indexed: not a valid reference point
         _selectSingle(commit);
     });
     return row;

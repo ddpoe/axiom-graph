@@ -156,6 +156,16 @@ Three project-customizable DocJSON files consumers may create in their repo:
 
 Each has a plugin-shipped fallback at `${CLAUDE_PLUGIN_ROOT}/templates/<name>.json`. Skills read the project file first, fall back to the template if absent.
 
+### Procedure vs. knobs: when to split a SOP into a plugin reference
+
+A `.pev/` SOP holds content the **consumer edits** — project knobs (paths, thresholds, vocabulary) and customizable *defaults* (doc categories, the test tier system). That's why it's a copyable file with a template fallback: the consumer shapes it.
+
+Content the **consumer never edits** — fixed, role-shared plugin *procedure* — does not belong in a copied SOP. Living there, it gets duplicated across every skill that uses it and forces consumers to hand-merge it on each plugin update. It belongs in a **plugin-internal reference** instead: a `templates/<name>-reference.md` read from `${CLAUDE_PLUGIN_ROOT}`, never copied, that the skills point at and the consumer never sees (the same shape as `pev-orchestrator-reference.md` and `auditor-reference-protocol.md`). Each skill keeps only a pointer plus its role-specific disposition.
+
+The test: **does a consumer ever edit this?** Yes → a `.pev/` copyable SOP. No → a plugin reference.
+
+`doc-topology.json` shows both halves. Its `category.*` sections are consumer-customizable, so they stay in the copied file — but the **Link Audit** procedure (the fixed add/repoint/drop logic every role runs identically) was extracted to `templates/link-audit-reference.md`, leaving only the project's `Scope` knob behind. By contrast, `test-policy.json`'s tier system is a customizable *default* — the policy explicitly invites projects to add or replace tiers — so it correctly stays in the copyable SOP, not a reference.
+
 ### Adding a new SOP
 
 If you extend PEV with a new concern that varies per project:
@@ -163,6 +173,7 @@ If you extend PEV with a new concern that varies per project:
 1. Create `pev_nexus_agents/pev/templates/<new-sop>.json` as the plugin's default. DocJSON format with clearly-named sections. Include an `overview` section documenting which skills read this file and what fields matter.
 2. Update the relevant skill to read `{worktree_path}/.pev/<new-sop>.json` first, fall back to `${CLAUDE_PLUGIN_ROOT}/templates/<new-sop>.json`. Use `Read` tool + JSON parse; don't require axiom-graph indexing.
 3. Document the new SOP in this file's table above and in [USER_GUIDE.md](./USER_GUIDE.md#customizing-via-pev-sops).
+4. **Split fixed procedure out.** If the SOP mixes project knobs/defaults with fixed plugin procedure the consumer never edits, put the procedure in a `templates/<name>-reference.md` (read from `${CLAUDE_PLUGIN_ROOT}`, never copied) that the skills point at — don't bury it in the copyable SOP, where it would duplicate across skills and create a merge burden on upgrades (see "Procedure vs. knobs" above).
 
 ### Adding a category to `doc-topology.json`
 

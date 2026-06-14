@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Single reference for the PEV Auditor agent. Combines post-implementation documentation updates with automated audit checks. The Auditor skill points at this doc.
+Single reference for the PEV Auditor agent. Combines post-implementation documentation updates with the change-scoped Link Audit. The Auditor skill points at this doc.
 
 The Auditor IS the post-implementation protocol — there is no separate step. Follow sections in order: post-implementation updates first (fast, targeted), then audit checks (systematic), then checkpoint.
 
@@ -152,33 +152,17 @@ Also re-check any `AGENT_VERIFIED` events via `axiom_graph_report` — verify th
 
 **Key principle:** Stale ≠ broken. Most stale nodes after a Builder run are fine — changed intentionally. For residual and doc nodes: read the diff, make a judgment, mark clean. Only flag things that are actually wrong. (Reconciled code/test batches skip the diff read — they ride on the Reviewer's pass plus the clean pre-merge bracket.)
 
-## Automated Audit Checks
+## Link Audit (change-scoped) & Whole-graph Hygiene
 
-Run these in order after the staleness review. Each check produces findings to triage.
+After the staleness review, run the change-scoped **Link Audit** — the shared procedure is in `${CLAUDE_PLUGIN_ROOT}/templates/link-audit-reference.md` (the three verbs add/repoint/drop, detection, the granularity rule, term families). Read the project's `Scope` from `.pev/doc-topology.json` (`link-audit` section; a pre-1.3 topology may name it `semantic-sweep`). Auditor disposition: patch content fixes directly; record each add/repoint/drop as a verb-tagged `proposed_links` entry for the Phase 8 gate (see the §4a.0 skill step).
 
-### 1. Unlinked public nodes
-**Tool:** `axiom_graph_list_undocumented`
-**Filter out:** `_`-prefixed (unless core internal with own doc section), `test_`-prefixed, fixtures/helpers in test files, external package nodes, entity nodes.
-**Resolution:** For each unlinked public node, find or create the doc section that describes its contract, then `axiom_graph_add_link`.
+**Whole-graph hygiene is NOT run per-cycle.** A tree-wide census of unlinked public nodes or orphan/broken edges is change-independent maintenance that re-flags standing conditions every cycle and dilutes the signal — it lives in `/pev-audit-dev-docs`. The change-scoped slices that matter this cycle are already covered:
 
-### 2. Section length
-**Threshold:** Flag sections over ~1500 characters.
-**Why:** Long sections cover multiple concerns, harder to keep accurate and harder to update surgically.
-**Resolution:** Split into focused subsections, each covering one concept or one function's contract.
+- **New public surface** this change added → linked in §4a (post-implementation doc-to-code links), filtering `_`-prefixed (unless core internal with its own section), `test_`-prefixed, fixtures/helpers, external-package and entity nodes.
+- **Orphan / dead links** from this change's renames or deletions → caught in the staleness review as `BROKEN_LINK` / `NOT_FOUND`; repoint to the new ID, or remove the dead link and update the prose.
+- **Over-fanned or wrong-granularity edges** in the change's neighbourhood → the Link Audit's `repoint` / `drop` verbs above.
 
-### 3. Orphan links
-**Tool:** `axiom_graph_graph(section_id, direction="out")` for each doc section with links.
-**Flags:** Links pointing to node IDs that no longer exist (graph rot from renames/deletions).
-**Resolution:** Remove dead link. If function renamed, relink to new ID. If deleted, remove link and update prose.
-
-### 4. Composite coverage
-**Tool:** `axiom_graph_list(parent_id=module_id)` to get children, check which have `documents` edges.
-**Threshold:** Flag modules where <50% of public children have `documents` edges.
-**Resolution:** Prioritize linking the most important public functions.
-
-### 5. Link fan-out
-**Threshold:** Flag doc sections with >8 outbound `documents` edges.
-**Resolution:** Split the section, or remove links to functions mentioned only for orientation.
+(Section length is surfaced standing by `axiom_graph_check` as `DOC_SECTION_LONG`; split oversized sections opportunistically when you touch them. The retired composite-coverage <50% and fan-out >8 metrics were arbitrary thresholds — `list_undocumented` by identity and the Link Audit's kind-aware judgment are the real signals.)
 
 ## Reference Policy for Current-State Docs
 
@@ -237,9 +221,10 @@ Process findings in this order (highest impact first):
 1. **CODE NEEDS FIX** items → add to `needs_fix` in Impact Report for user review
 2. **MISSING DOCS** → create from templates via `axiom_graph_write_doc`
 3. **DOC NEEDS UPDATE** → fix via `axiom_graph_update_section` + `mark_clean`
-4. **Unlinked public nodes** → `axiom_graph_add_link` to existing doc sections
-5. **Orphan links** → remove dead links
-6. **Section length / fan-out** → refactor docs for maintainability
+4. **New public surface (this change)** → `axiom_graph_add_link` to existing doc sections
+5. **Orphan / broken links (this change)** → repoint to new ID or remove dead link
+6. **Link Audit proposals** → record verb-tagged `add` / `repoint` / `drop` in `proposed_links` for the Phase 8 gate
+7. **Section length** → split oversized sections opportunistically for maintainability
 
 ### After all findings resolved
 1. `axiom_graph_build` — re-index
@@ -264,12 +249,11 @@ Process findings in this order (highest impact first):
 - [ ] AGENT_VERIFIED events re-checked
 - [ ] Scope categorization: expected vs collateral for each finding
 
-### Automated Checks
-- [ ] axiom_graph_list_undocumented — no unlinked public nodes
-- [ ] Section length — no sections >1500 chars
-- [ ] Orphan links — no links to nonexistent nodes
-- [ ] Composite coverage — >50% public children linked
-- [ ] Link fan-out — no sections with >8 outbound links
+### Link Audit (change-scoped)
+- [ ] Link Audit run — add / repoint / drop proposals recorded in `proposed_links` (verb-tagged)
+- [ ] New public surface this change added → linked
+- [ ] Orphan / broken links from this change → repointed or removed
+- [ ] Whole-graph hygiene (coverage / fan-out census) — N/A, delegated to `/pev-audit-dev-docs`
 
 ### Completion
 - [ ] axiom_graph_build + axiom_graph_check — clean after fixes

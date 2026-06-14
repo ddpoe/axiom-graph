@@ -64,7 +64,7 @@ def _dotpath(rel: str) -> str:
 @task(
     purpose="Walk config_dir for supported files, apply mtime fast-pass, "
     "create composite_process nodes with whole-file hashing",
-    inputs="config_dir, project_root, project_id, prefix, optional stored_mtimes",
+    inputs="config_dir, project_root, project_id, prefix, optional stored_mtimes, optional skip_dirs",
     outputs="Tuple of (nodes, edges, files_skipped)",
 )
 def scan_config_dir(
@@ -73,6 +73,7 @@ def scan_config_dir(
     project_id: str,
     prefix: str = "config",
     stored_mtimes: dict[str, float] | None = None,
+    skip_dirs: frozenset[str] | None = None,
 ) -> tuple[list[AxiomNode], list[AxiomEdge], int]:
     """Walk config_dir for config files and return (nodes, edges, files_skipped).
 
@@ -83,6 +84,11 @@ def scan_config_dir(
         prefix: Node ID prefix (e.g. "config" → "{project_id}::config.claude.…").
         stored_mtimes: ``{rel_path: mtime}`` map from the DB. Files whose
             current mtime is <= the stored value are skipped.
+        skip_dirs: Directory names to skip while walking. A file is skipped
+            when any component of its project-root-relative path is in this
+            set. Mirrors the whole-tree (.py/.js) scanners so a config dir
+            that nests an excluded tree (e.g. ``.claude/worktrees/<name>/``)
+            does not leak its files into the parent index.
 
     Returns:
         Tuple of (nodes, edges, files_skipped_by_mtime).
@@ -100,8 +106,15 @@ def scan_config_dir(
         if path.suffix.lower() not in _SUPPORTED_EXTENSIONS:
             continue
 
+        rel = path.relative_to(project_root)
+        # Honor skip_dirs (e.g. .git, .axiom_graph, worktrees) so a config dir
+        # that nests an excluded tree doesn't leak its files into the parent
+        # index. Mirrors the whole-tree (.py/.js) iterators in builder.py.
+        if skip_dirs and any(part in skip_dirs for part in rel.parts):
+            continue
+
         # mtime fast-pass
-        rel_path = path.relative_to(project_root).as_posix()
+        rel_path = rel.as_posix()
         if stored_mtimes:
             stored = stored_mtimes.get(rel_path)
             if file_unchanged_since(stored, path.stat().st_mtime):

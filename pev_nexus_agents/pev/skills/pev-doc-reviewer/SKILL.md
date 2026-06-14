@@ -106,17 +106,11 @@ Run `axiom_graph_drift_query(project_root=..., filter="all", group_by="status", 
 
 This pass catches in-scope drift in graph-linked docs the Auditor didn't resolve. It does **not** verify whether the Auditor's reasoning was honest — `axiom_graph_report(since_sha=baseline)` already records what was touched mechanically.
 
-### Step 6: Semantic sweep — unlinked docs that mention the changed behavior
+### Step 6: Link audit — unlinked, mis-granular, and noise edges
 
-The category scan (Step 4) and the drift survey (Step 5) only reach docs the graph can see — triggered categories and linked nodes. Docs that *mention* the changed behavior in prose without declaring a `links` edge to the changed nodes are invisible to both, and they rot silently. Sweep them by search:
+The category scan (Step 4) and the drift survey (Step 5) only reach docs the graph can see. The link audit covers the rest. Run the shared procedure in `${CLAUDE_PLUGIN_ROOT}/templates/link-audit-reference.md` (add/repoint/drop, detection, the granularity rule, term families), scoped to this cycle's change, reading the project's `Scope` from `.pev/doc-topology.json` (`link-audit` section; a pre-1.3 topology may name it `semantic-sweep`).
 
-1. Read the topology's `semantic-sweep` section (if present) for the project's term families and living-vs-frozen scope. If absent, derive terms yourself and skip frozen/historical record trees (cycle manifests, instance checkins, devlogs, release notes).
-2. Derive 2–4 term families from the cycle's change: mechanism names (from the pitch), status/vocabulary names, edge/event types, and the names of changed functions / tools / commands.
-3. `axiom_graph_search` each family. Collect living-doc hits the earlier passes didn't already cover.
-4. Read each hit and judge it against the implemented behavior: accurate / drifted / gap (a spec or lifecycle subsection that should now mention the new behavior but doesn't).
-5. Flag drifted/gap docs under `findings.semantic_drift`. For each hit that *describes* a changed node without linking it, add an entry to `proposed_links` — include the section's **existing** links so the human can judge redundancy, plus a one-line rationale.
-
-**Link proposals are exactly that — proposals.** You never add links, and neither does anyone else without a human approving the list (the orchestrator surfaces `proposed_links` at the Phase 8 proposed-links gate). Unreviewed bulk-linking bloats the graph and dilutes LINKED_STALE into noise; the human gate keeps each edge a deliberate signal.
+**Disposition (Doc Reviewer) — flag-only.** You hold no link-mutation tools. Record drifted/gap docs under `findings.semantic_drift`, and each **add / repoint / drop** under `proposed_links` (verb, section, target, `existing_links`, rationale; `replaces` for a repoint). The orchestrator surfaces `proposed_links` at the Phase 8 gate and applies only what the human approves — you never apply.
 
 ### Step 7: Return the review verdict
 
@@ -166,11 +160,21 @@ DOC-REVIEWER {status}
   },
   "proposed_links": [
     {
+      "verb": "add",
       "from": "axiom_graph::docs.features.auth.design::session-handling",
       "to": "axiom_graph::axiom_graph.auth::validate_session",
       "edge_type": "documents",
       "existing_links": ["axiom_graph::axiom_graph.auth::create_session"],
-      "rationale": "Section describes validate_session's retry behavior in prose but declares no edge to it — invisible to LINKED_STALE. PROPOSAL ONLY: human approves at the Phase 8 proposed-links gate before any add_link."
+      "rationale": "Link audit (add): section describes validate_session's retry behavior in prose but declares no edge to it — invisible to LINKED_STALE. PROPOSAL ONLY: human approves at the Phase 8 proposed-links gate before any edge is applied."
+    },
+    {
+      "verb": "repoint",
+      "from": "axiom_graph::docs.features.auth.prd::user-stories",
+      "to": "axiom_graph::axiom_graph.auth::login_endpoint@workflow",
+      "replaces": "axiom_graph::axiom_graph.auth::login_endpoint",
+      "edge_type": "documents",
+      "existing_links": ["axiom_graph::axiom_graph.auth::login_endpoint"],
+      "rationale": "Link audit (repoint): narrative user-story section links the bare function; per the granularity rule (`link-audit-reference.md`) it should point at the @workflow envelope so it re-evaluates on contract changes, not every body edit. PROPOSAL ONLY: orchestrator applies (delete `replaces` + add `to`) at the Phase 8 gate."
     }
   ],
   "conventions_violations": [
@@ -188,7 +192,7 @@ DOC-REVIEWER {status}
 
 | Status | Meaning | When to use |
 |---|---|---|
-| `PASS` | No drift found in scanned categories, in linked nodes downstream of the cycle's changes, or in the semantic sweep | Happy path |
+| `PASS` | No drift found in scanned categories, in linked nodes downstream of the cycle's changes, or in the link audit | Happy path |
 | `FAIL` | Substantive drift found that blocks merge confidence (wrong PRD, incorrect interface spec, broken ADR status, missing doc for new feature) | Gates merge |
 | `PASS_WITH_CONCERNS` | Minor drift (convention violations, style issues, optional sections empty) | Noted but doesn't block |
 | `CONTINUING` | Scan incomplete, need another incarnation | Tool budget running low or large review scope |

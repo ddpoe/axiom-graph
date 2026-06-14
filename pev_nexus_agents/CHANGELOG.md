@@ -17,6 +17,28 @@ The PEV plugin drives the `axiom-graph` MCP server, so each plugin release has a
 
 Nothing pending.
 
+## [1.3.0] — 2026-06-14
+
+> **Requires axiom-graph ≥ 2.1.0** (unchanged — no new MCP tool). Backward-compatible: the doc-topology section renamed in this release keeps a legacy `semantic-sweep` fallback (see [Deprecated](#deprecated) below), so existing customized `.pev/doc-topology.json` copies keep working without changes. Minor (not patch) because it adds the repoint/drop capability and introduces a deprecation; minor (not major) because the fallback means migration is optional, not required.
+
+### Added
+
+- **Link Audit — existing edges are audited now, not just missing ones.** Every doc review (the full-cycle Auditor and Doc Reviewer, plus `/pev-instance`) ran a *semantic sweep* that only ever proposed **new** links for unlinked prose. It is generalized into a **Link Audit** with three verbs over one proposal list: **add** (a living section describes a changed node but declares no edge), **repoint** (an existing edge sits at the wrong granularity for its section's *kind* — a narrative/intent section should point at the `@workflow`/`@task` envelope, a behavior/contract section at the function), and **drop** (a noise or redundant edge). All three are human-gated: `proposed_links` entries are now verb-tagged, and a `repoint` carries a `replaces` field naming the edge it supersedes. The cycle's Phase 8 proposed-links gate applies all three verbs (`add_link` / `delete_link`+`add_link` / `delete_link`).
+- **The procedure is externalized to a plugin-internal reference.** The Link Audit procedure (the three verbs add/repoint/drop, detection, the granularity rule, term families, and the per-role disposition) lives in one place — a new `templates/link-audit-reference.md` that all three roles read in place and never copy (like `auditor-reference-protocol.md` and `pev-orchestrator-reference.md`). The agent skills carry only a pointer plus their role's gate-and-apply wiring. The consumer-copied `.pev/doc-topology.json` `link-audit` section holds only the project's `Scope` knob — so a plugin update to the procedure never forces a consumer to merge.
+- **Link-granularity rule.** The rule the Link Audit's `repoint` verb audits against — link a section at the granularity matching what it promises: narrative/intent sections to the `@workflow`/`@task` envelope (so they re-evaluate on a contract change, not every body edit), behavior/contract sections to the function (so they *do* flag on behavior changes). Lives in `templates/link-audit-reference.md` (`## The granularity rule`).
+
+### Changed
+
+- **`/pev-instance` and the cycle Auditor are now symmetric on link work.** Both run the *same* change-scoped Link Audit against the same rules; the only difference is the gate-and-apply harness — the instance is a single agent with a conversational gate that applies inline, while the cycle has the Auditor and Doc Reviewer propose and the orchestrator apply at the Phase 8 gate (the Doc Reviewer never applies — flag-only). The Auditor's link work consolidates at Step 4a.0; its self-report key `checks_completed.automated_checks` is renamed `link_audit`.
+
+### Removed
+
+- **Whole-graph hygiene metrics dropped from the per-cycle Auditor.** The Auditor's §4c "Automated Audit Checks" — a tree-wide census re-run every cycle — is retired (in both the skill and the Auditor Reference Protocol). Two of its checks, **composite coverage <50%** and **link fan-out >8**, are removed outright: arbitrary thresholds that proxy poorly for "is the contract documented" and pressure noise edges to hit a quota. The genuinely whole-graph scans (unlinked-node coverage, orphan sweeps) are change-independent maintenance that belongs to `/pev-audit-dev-docs`, not a per-change validation; §4c is now an explicit "delegated, not run here" tombstone. The change-scoped slices remain covered — new public surface (§4a), broken edges (§4b staleness), and over-fan / wrong-granularity edges (the Link Audit's `repoint`/`drop`).
+
+### Deprecated
+
+- **doc-topology section id `semantic-sweep` → `link-audit`.** The Link Audit section's `id` was renamed to match its heading, and its procedure paragraphs moved out to the plugin reference (above). If you keep a customized `.pev/doc-topology.json` copied from a pre-1.3 template, it still has a `semantic-sweep` section. **No action is required** — the agents accept the legacy `semantic-sweep` name as a fallback, and the procedure now lives in the plugin (not your copy), so there is **nothing to merge**. **To migrate (optional):** rename that section's `id` to `link-audit` and its heading to `Link Audit`, and keep your `Scope` paragraph (the procedure paragraphs in an old copy are now ignored — delete them if you like; your `Scope` is read either way). The legacy `semantic-sweep` fallback will be **removed in v1.5**; rename before then.
+
 ## [1.2.0] — 2026-06-10
 
 > **Requires axiom-graph ≥ 2.1.0** (see [Compatibility](#compatibility)) — this release adds `axiom_graph_patch_section` to the agent toolsets, and that MCP tool first ships in server 2.1.0.

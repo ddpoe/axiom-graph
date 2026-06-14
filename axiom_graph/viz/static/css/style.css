@@ -4256,6 +4256,26 @@ th.hidden, td.hidden { display: none; }
   font-size: 11px;
   color: var(--text-secondary);
 }
+.since-banner {
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  border: 1px solid var(--accent-amber, #9e6a03);
+  border-radius: 4px;
+  background: rgba(187, 128, 9, 0.12);
+  color: var(--text-primary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.since-banner.hidden { display: none; }
+.since-banner code {
+  font-family: "Cascadia Code", "Fira Code", monospace;
+  font-size: 10px;
+}
+.since-banner.nudge {
+  border-color: var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+}
 
 /* ── Commit picker modal ───────────────────────────────────────────────── */
 .since-modal-overlay {
@@ -4366,6 +4386,12 @@ th.hidden, td.hidden { display: none; }
 .since-modal-commit-row.in-range {
   background: var(--bg-selected);
 }
+.since-modal-commit-row.not-indexed {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.since-modal-commit-row.not-indexed:hover { background: transparent; }
+.since-modal-commit-row.not-indexed .cm-checkbox { cursor: not-allowed; }
 .since-modal-commit-row .cm-checkbox {
   margin-top: 2px;
   flex-shrink: 0;

@@ -1,7 +1,7 @@
 {
   "name": "pev",
   "description": "PEV (Plan-Execute-Validate) agent workflow — orchestrates Architect, Builder, Reviewer, and Auditor subagents for structured code changes with axiom-graph integration",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "author": {
     "name": "ddpoe"
   },

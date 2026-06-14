@@ -440,3 +440,118 @@ def test_since_endpoint_with_until(db_path: Path, mini_project: Path):
     result_range = get_history_since_endpoint(sha="cp_start", until_timestamp=until_ts)
     # Should include mid_sha changes but not end_sha changes
     assert "until_timestamp" in result_range
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 — explicit-SHA miss fails loud + index-freshness helpers
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_cutoff_explicit_sha_miss_returns_none(db_path: Path):
+    """An explicit since_sha absent from history resolves to (None, None).
+
+    The no-arg checkpoint/any-SHA fallback must not fire for an explicit SHA —
+    borrowing a different baseline would answer "changed since X" against the
+    wrong reference point.
+    """
+    n = _node("proj::mod::fn")
+    db.upsert_node(db_path, n, discovery_only=False)
+    # A checkpoint exists, but the caller asks for a different, un-indexed SHA.
+    _seed_history(db_path, n.id, "CHECKPOINT", git_sha="indexed_sha", preserved=True)
+
+    cutoff_ts, sha = db.resolve_since_cutoff(db_path, since_sha="ffff0000")
+    assert cutoff_ts is None
+    assert sha is None
+
+
+def test_index_head_sha_and_indexed_shas(db_path: Path):
+    """get_index_head_sha returns the most recent SHA; get_indexed_shas the set."""
+    n = _node("proj::mod::fn")
+    db.upsert_node(db_path, n, discovery_only=False)
+    _seed_history(db_path, n.id, "INITIAL", git_sha="sha_old")
+    _seed_history(db_path, n.id, "CONTENT_ONLY", git_sha="sha_new")
+
+    assert db.get_index_head_sha(db_path) == "sha_new"
+    assert db.get_indexed_shas(db_path) == {"sha_old", "sha_new"}
+
+
+def test_index_head_sha_none_without_history(db_path: Path):
+    """get_index_head_sha is None when no history row carries a SHA."""
+    n = _node("proj::mod::fn")
+    db.upsert_node(db_path, n, discovery_only=False)
+    _seed_history(db_path, n.id, "CONTENT_ONLY")  # no git_sha
+
+    assert db.get_index_head_sha(db_path) is None
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 — endpoint fails loud on an un-indexed SHA / surfaces freshness
+# ---------------------------------------------------------------------------
+
+
+@workflow(purpose="Verify /api/history/since returns resolved:false for an un-indexed SHA instead of a count")
+def test_since_endpoint_unindexed_sha_fails_loud(db_path: Path, mini_project: Path):
+    """An explicit SHA not in node_history returns resolved:false and no node_ids."""
+    from axiom_graph.viz.server import get_history_since_endpoint, _apply_project
+
+    _apply_project(mini_project)
+
+    n = _node("proj::mod::fn")
+    db.upsert_node(db_path, n, discovery_only=False)
+    _seed_history(db_path, n.id, "CHECKPOINT", git_sha="indexed_sha", preserved=True)
+    _seed_history(db_path, n.id, "CONTENT_ONLY", git_sha="indexed_sha")
+
+    result = get_history_since_endpoint(sha="deadbeefcafe")
+
+    assert result["resolved"] is False
+    assert result["requested_sha"] == "deadbeefcafe"
+    assert result["reason"] == "not in index"
+    assert "node_ids" not in result  # never a count against the wrong baseline
+    assert "index_head_sha" in result
+    assert "commits_behind_head" in result
+
+
+@workflow(purpose="Verify a resolvable since query returns resolved:true plus index-freshness fields")
+def test_since_endpoint_resolved_includes_freshness(db_path: Path, mini_project: Path):
+    """A matched SHA resolves with node_ids and carries the freshness fields."""
+    from axiom_graph.viz.server import get_history_since_endpoint, _apply_project
+
+    _apply_project(mini_project)
+
+    n = _node("proj::mod::fn")
+    db.upsert_node(db_path, n, discovery_only=False)
+    _seed_history(db_path, n.id, "CHECKPOINT", git_sha="cp_sha", preserved=True)
+    _seed_history(db_path, n.id, "CONTENT_ONLY", git_sha="cp_sha")
+
+    result = get_history_since_endpoint(sha="cp_sha")
+
+    assert result["resolved"] is True
+    assert n.id in result["node_ids"]
+    assert "index_head_sha" in result
+    assert "commits_behind_head" in result  # may be None when git is unavailable
+
+
+@workflow(purpose="Verify recent-shas marks which commits are present in the index")
+def test_recent_shas_indexed_flag(db_path: Path, mini_project: Path):
+    """Each commit is flagged indexed=True iff it has node_history rows."""
+    from axiom_graph.viz.server import get_recent_shas, _apply_project
+
+    _apply_project(mini_project)
+
+    n = _node("proj::mod::fn")
+    db.upsert_node(db_path, n, discovery_only=False)
+    _seed_history(db_path, n.id, "CHECKPOINT", git_sha="cp_sha_001", preserved=True)
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = (
+        "cp_sha_001\x002026-04-04T10:00:00+00:00\x00Indexed commit\x00\x1e"
+        "ghost_sha_999\x002026-04-04T09:00:00+00:00\x00Un-indexed commit\x00\x1e"
+    )
+
+    with patch("axiom_graph.viz.nodes.subprocess.run", return_value=mock_result):
+        result = get_recent_shas()
+
+    by_sha = {e["sha"]: e for e in result["shas"]}
+    assert by_sha["cp_sha_001"]["indexed"] is True
+    assert by_sha["ghost_sha_999"]["indexed"] is False

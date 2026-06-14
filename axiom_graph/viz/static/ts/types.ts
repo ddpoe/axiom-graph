@@ -191,6 +191,23 @@ export interface CommitEntry {
   commit_subject: string | null;
   commit_body: string | null;
   is_checkpoint: boolean;
+  /** True iff this commit has node_history rows (a valid "since" reference). */
+  indexed: boolean;
+}
+
+/** Response from /api/history/since. When `resolved` is false the requested
+ *  SHA isn't in the index — the viz shows a banner, never a count. */
+export interface SinceResponse {
+  resolved: boolean;
+  node_ids?: string[];
+  baseline_sha?: string | null;
+  baseline_timestamp?: string | null;
+  until_timestamp?: string | null;
+  deleted_nodes?: AxiomNode[];
+  index_head_sha?: string | null;
+  commits_behind_head?: number | null;
+  requested_sha?: string | null;
+  reason?: string;
 }
 
 /** Step edge label data. */
