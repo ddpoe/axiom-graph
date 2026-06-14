@@ -59,6 +59,7 @@ let _sortCol = 'title';
 let _sortDir = 1;
 let _nodes: AxiomNode[] = [];
 let _stalenessMap: StalenessMap = {};
+let _changeKinds: Record<string, string[]> = {};
 let _groupBy: string | null = null;
 let _selectedIds = new Set<string>();
 let _collapsedGroups = new Set<string>();
@@ -67,6 +68,12 @@ let _causeCache: Record<string, any> = {};
 let _columns: Record<string, boolean> = { check: true, title: true, node_type: true, location: true, staleness: true, tags: true };
 
 // ── Public API ──────────────────────────────────────────────────────────────
+
+/** Set the net change-kinds map (node_id -> [kind,...]) from the since response.
+ *  Drives the per-node change-kind badge in the staleness cell. */
+export function setChangeKinds(kinds: Record<string, string[]> | undefined): void {
+  _changeKinds = kinds || {};
+}
 
 export function render(nodes: AxiomNode[], stalenessMap: StalenessMap): void {
   _nodes = nodes;
@@ -418,14 +425,17 @@ function _makeNodeRow(node: AxiomNode, depth = 0): HTMLTableRowElement {
     nameSpan.textContent = node.title || node.id.split('::').pop() || '';
     td.appendChild(nameSpan);
 
-    if (!isGhost) {
+    {
       const detBtn = document.createElement('button');
       detBtn.className = 'inline-details-btn';
       detBtn.textContent = '\u00b7\u00b7\u00b7';
-      detBtn.title = 'Open detail panel';
+      // Deleted ghosts are now selectable: their detail button opens an
+      // old-side-only baseline-source view (new side is gone).
+      detBtn.title = isGhost ? 'Show deleted baseline source' : 'Open detail panel';
       detBtn.addEventListener('click', e => {
         e.stopPropagation();
-        selectNodeFn(node.id);
+        if (isGhost) _showGhostSource(node);
+        else selectNodeFn(node.id);
       });
       td.appendChild(detBtn);
     }
@@ -487,6 +497,22 @@ function _makeNodeRow(node: AxiomNode, depth = 0): HTMLTableRowElement {
       }
     }
     if (isGhost) td.appendChild(badge);
+
+    // Net change-kind badge(s) — added / content / desc / content+desc /
+    // renamed / deleted. Reuses the detail-tab history-badge-* styling;
+    // `added` maps to history-badge-initial (the existing initial/add class).
+    const kinds = _changeKinds[node.id];
+    if (kinds && kinds.length) {
+      for (const kind of kinds) {
+        const kb = document.createElement('span');
+        const cls = kind === 'added' ? 'history-badge-initial'
+          : `history-badge-${kind.replace('+', '-')}`;
+        kb.className = `history-badge ${cls} change-kind-badge`;
+        kb.textContent = kind;
+        kb.title = `Net change since baseline: ${kind}`;
+        td.appendChild(kb);
+      }
+    }
     tr.appendChild(td);
   }
 
@@ -498,7 +524,10 @@ function _makeNodeRow(node: AxiomNode, depth = 0): HTMLTableRowElement {
   }
 
   // Row click
-  if (!isGhost) {
+  if (isGhost) {
+    // Deleted ghosts are selectable -> old-side-only baseline source view.
+    tr.addEventListener('click', () => _showGhostSource(node));
+  } else {
     tr.addEventListener('click', () => {
       if (isCode && node.location) {
         openSource(node.id);
@@ -512,6 +541,51 @@ function _makeNodeRow(node: AxiomNode, depth = 0): HTMLTableRowElement {
     });
   }
   return tr;
+}
+
+/** Render the git-recovered baseline source of a deleted ghost (old side only).
+ *
+ *  A deleted node is purged from the index, so it has no live two-sided diff.
+ *  This surfaces the `recovered_source` carried on the ghost dict (the since
+ *  endpoint recovered it via git) in a single read-only pane. When recovery
+ *  failed (unreachable blob) a clear message is shown rather than an empty box.
+ */
+function _showGhostSource(node: AxiomNode): void {
+  const src = node.recovered_source;
+  const title = node.title || node.id.split('::').pop() || node.id;
+  const loc = node.location || '';
+  const existing = document.getElementById('ghost-source-overlay');
+  if (existing) existing.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'ghost-source-overlay';
+  overlay.className = 'ghost-source-overlay';
+  const panel = document.createElement('div');
+  panel.className = 'ghost-source-panel';
+  const header = document.createElement('div');
+  header.className = 'ghost-source-header';
+  header.innerHTML =
+    `<span class="ghost-source-title">Deleted: <strong>${esc(title)}</strong>` +
+    `<span class="history-badge history-badge-deleted change-kind-badge">deleted</span></span>` +
+    `<span class="ghost-source-loc">${esc(loc)} (baseline — new side gone)</span>`;
+  const close = document.createElement('button');
+  close.className = 'ghost-source-close';
+  close.textContent = '×';
+  close.title = 'Close';
+  close.addEventListener('click', () => overlay.remove());
+  header.appendChild(close);
+  const body = document.createElement('pre');
+  body.className = 'ghost-source-body';
+  if (src && src.trim()) {
+    body.textContent = src;
+  } else {
+    body.textContent = 'Baseline source could not be recovered from git for this deleted node.';
+    body.classList.add('ghost-source-empty');
+  }
+  panel.appendChild(header);
+  panel.appendChild(body);
+  overlay.appendChild(panel);
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
 }
 
 function _updateSelectAll(): void {

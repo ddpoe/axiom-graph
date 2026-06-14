@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from axiom_annotations import workflow, AutoStep, Step
-from axiom_graph.lifecycle.api import get_node_diff
+from axiom_graph.lifecycle.api import compute_net_diff, get_node_diff, recover_deleted_source
 from axiom_graph.index import builder, db
 from axiom_graph.index.status import (
     VERIFIED,
@@ -418,8 +418,9 @@ def get_history_since_endpoint(
 
     口 = Step(
         step_num=4,
-        name="Query history rows after cutoff",
-        purpose="Fetch all node_history rows with scanned_at > cutoff_timestamp, bounded by until if given",
+        name="Query DELETED history rows after cutoff (for ghost synthesis)",
+        purpose="Fetch node_history rows with scanned_at > cutoff_timestamp so DELETED ghosts can be "
+        "reconstructed — the live-node membership is computed by the net diff (step 7), not these rows",
     )
     if cutoff_ts:
         rows = db.get_history_since(
@@ -430,41 +431,10 @@ def get_history_since_endpoint(
     else:
         rows = db.get_history_since(server._db(), until_timestamp=resolved_until_ts)
 
-    node_ids = sorted(set(r["node_id"] for r in rows))
-
     口 = Step(
         step_num=5,
-        name="Synthesize ghost nodes from DELETED rows",
-        purpose="Reconstruct phantom entries for purged nodes so the viz can show them as dimmed strikethrough rows",
-        critical="Ghost nodes depend on preserved=1 DELETED history rows — if those are missing, deleted nodes silently disappear from the since view",
-    )
-    deleted_nodes = []
-    deleted_rows = [r for r in rows if r["change_type"] == "DELETED"]
-    if deleted_rows:
-        seen_deleted: set[str] = set()
-        for r in deleted_rows:
-            nid = r["node_id"]
-            if nid in seen_deleted:
-                continue
-            seen_deleted.add(nid)
-            meta = json.loads(r["meta"]) if r.get("meta") else {}
-            deleted_nodes.append(
-                {
-                    "id": nid,
-                    "title": meta.get("title", nid.split("::")[-1]),
-                    "node_type": meta.get("node_type", "unknown"),
-                    "subtype": meta.get("subtype"),
-                    "location": meta.get("location", ""),
-                    "tags": meta.get("tags", []),
-                    "deleted_at": r["scanned_at"],
-                    "_deleted": True,
-                }
-            )
-
-    口 = Step(
-        step_num=6,
         name="Resolve baseline SHA for timestamp-only cutoffs",
-        purpose="When cutoff came from a timestamp (no SHA), find the nearest git commit for scoped diff",
+        purpose="When cutoff came from a timestamp (no SHA), find the nearest git commit for the net diff",
     )
     if baseline_sha is None and cutoff_ts is not None:
         try:
@@ -480,9 +450,70 @@ def get_history_since_endpoint(
         except Exception as exc:
             logger.debug("git rev-list for baseline resolution failed: %s", exc)
 
+    口 = Step(
+        step_num=6,
+        name="Synthesize ghost nodes from DELETED rows (with preserved span + recovered source)",
+        purpose="Reconstruct phantom entries for purged nodes so the viz can show them as dimmed strikethrough "
+        "rows, carrying the preserved level_3_location span and the git-recovered baseline source",
+        critical="Ghost nodes depend on preserved=1 DELETED history rows — if those are missing, deleted nodes silently disappear from the since view",
+    )
+    deleted_nodes = []
+    deleted_rows = [r for r in rows if r["change_type"] == "DELETED"]
+    if deleted_rows:
+        seen_deleted: set[str] = set()
+        for r in deleted_rows:
+            nid = r["node_id"]
+            if nid in seen_deleted:
+                continue
+            seen_deleted.add(nid)
+            meta = json.loads(r["meta"]) if r.get("meta") else {}
+            location = meta.get("location", "")
+            preserved_l3 = meta.get("level_3_location")
+            preserved_sha = meta.get("git_sha") or r.get("git_sha")
+            recovered_source = recover_deleted_source(
+                server._PROJECT_ROOT,
+                location,
+                preserved_sha=preserved_sha,
+                preserved_level_3=preserved_l3,
+                baseline_sha=baseline_sha,
+            )
+            deleted_nodes.append(
+                {
+                    "id": nid,
+                    "title": meta.get("title", nid.split("::")[-1]),
+                    "node_type": meta.get("node_type", "unknown"),
+                    "subtype": meta.get("subtype"),
+                    "location": location,
+                    "level_3_location": preserved_l3,
+                    "tags": meta.get("tags", []),
+                    "deleted_at": r["scanned_at"],
+                    "recovered_source": recovered_source,
+                    "_deleted": True,
+                }
+            )
+
+    口 = Step(
+        step_num=7,
+        name="Compute the net state-diff vs the baseline (live-node membership + change kinds)",
+        purpose="Replace the event-log replay with a true net diff: edit-then-revert cancels, and each "
+        "changed node is labelled by kind (added/content/desc/content+desc/renamed). Thin caller — all "
+        "DB logic lives in lifecycle.api.compute_net_diff",
+    )
+    change_kinds: dict[str, list[str]] = {}
+    node_ids: list[str] = []
+    if baseline_sha and index_head_sha:
+        net = compute_net_diff(server._db(), server._PROJECT_ROOT, baseline_sha, index_head_sha)
+        change_kinds = net.change_kinds
+        node_ids = net.node_ids
+    # Deleted ghosts contribute the `deleted` kind (carried by deleted_nodes,
+    # synthesized above — not double-counted in the net diff's candidate set).
+    for ghost in deleted_nodes:
+        change_kinds.setdefault(ghost["id"], []).append("deleted")
+
     return {
         "resolved": True,
         "node_ids": node_ids,
+        "change_kinds": change_kinds,
         "baseline_sha": baseline_sha,
         "baseline_timestamp": cutoff_ts,
         "until_timestamp": resolved_until_ts,

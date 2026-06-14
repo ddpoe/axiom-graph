@@ -20,6 +20,10 @@ export interface AxiomNode {
   // Ghost node fields (from since filter deleted nodes)
   _ghost?: boolean;
   _ghost_change_type?: string;
+  _deleted?: boolean;
+  deleted_at?: string;
+  /** Git-recovered baseline source for a deleted ghost (old side only). */
+  recovered_source?: string | null;
 }
 
 /** An edge between two cortex nodes. */
@@ -200,6 +204,8 @@ export interface CommitEntry {
 export interface SinceResponse {
   resolved: boolean;
   node_ids?: string[];
+  /** Per-node net change kinds: added / content / desc / content+desc / renamed / deleted. */
+  change_kinds?: Record<string, string[]>;
   baseline_sha?: string | null;
   baseline_timestamp?: string | null;
   until_timestamp?: string | null;
@@ -270,6 +276,10 @@ export interface AppState {
   _sinceNodeIds: Set<string> | null;
   _sinceDeletedNodes: AxiomNode[] | null;
   _sinceUntilTimestamp: string | null;
+  /** node_id -> [change-kind,...] from the since response (net diff). */
+  _sinceChangeKinds: Record<string, string[]>;
+  /** Net change-kinds currently enabled in the kind filter (all on by default). */
+  _sinceEnabledKinds: Set<string>;
   searchMode: 'keyword' | 'semantic';
   searchQuery: string;
   searchResultNodes: AxiomNode[] | null;

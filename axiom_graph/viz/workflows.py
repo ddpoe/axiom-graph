@@ -15,6 +15,7 @@ import json
 import logging
 import sqlite3
 from collections import defaultdict
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
@@ -619,6 +620,34 @@ def get_test_steps(func_id: str) -> dict:
 def get_workflow_steps(func_id: str) -> dict:
     """Ordered steps for a @workflow envelope (graph.db-backed)."""
     return _envelope_steps_payload(func_id)
+
+
+@workflows_router.get("/api/source")
+def get_source(path: str) -> dict:
+    """Return raw source content for a file under the project root.
+
+    The path safety check prevents directory traversal outside the project root.
+    Relative paths are resolved against the project root; the workflow- and
+    test-view source panels pass step ``level_3_location`` paths here.
+    """
+    from axiom_graph.viz import server
+
+    if server._PROJECT_ROOT is None:
+        raise HTTPException(status_code=503, detail="Server not initialized")
+    try:
+        raw = Path(path)
+        file_path = (raw if raw.is_absolute() else server._PROJECT_ROOT / raw).resolve()
+        root_resolved = server._PROJECT_ROOT.resolve()
+        if not str(file_path).startswith(str(root_resolved)):
+            raise HTTPException(status_code=403, detail="Path outside project root")
+        content = file_path.read_text(encoding="utf-8", errors="replace")
+        return {"content": content, "lines": content.count("\n") + 1, "path": str(file_path)}
+    except HTTPException:
+        raise
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @workflows_router.get("/api/workflow_graph_labels")

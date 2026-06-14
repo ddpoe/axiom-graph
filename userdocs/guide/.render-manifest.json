@@ -9,7 +9,7 @@
   },
   "concepts/history.md": {
     "doc_id": "axiom_graph::docs.consumer.concepts.history",
-    "hash": "b9a08e2b85e0"
+    "hash": "c4bdd98e97cb"
   },
   "concepts/index.md": {
     "doc_id": "axiom_graph::docs.consumer.concepts",
@@ -45,7 +45,7 @@
   },
   "get-started/configuration.md": {
     "doc_id": "axiom_graph::docs.consumer.get-started.configuration",
-    "hash": "79881838e8aa"
+    "hash": "13d8315f1f5f"
   },
   "get-started/connect-your-agent.md": {
     "doc_id": "axiom_graph::docs.consumer.get-started.connect-your-agent",
@@ -73,6 +73,6 @@
   },
   "viz.md": {
     "doc_id": "axiom_graph::docs.consumer.viz",
-    "hash": "cb9dfc5de4ff"
+    "hash": "51341425220d"
   }
 }

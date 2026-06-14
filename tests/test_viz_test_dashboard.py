@@ -274,3 +274,26 @@ def test_no_module_nodes_in_tests_endpoint(mini_project, db_path):
         assert "::" in item["cortex_id"].split("::", 1)[-1], (
             f"Test {item['cortex_id']} appears to be a module-level node"
         )
+
+
+@workflow(purpose="/api/source returns raw file content for a path under the project root")
+def test_api_source_returns_file_content(tmp_path):
+    """A project-relative path resolves to its file body and a line count."""
+    _write(tmp_path / "pkg" / "mod.py", "def foo():\n    return 1\n")
+    client = _setup_server(tmp_path)
+
+    resp = client.get("/api/source", params={"path": "pkg/mod.py"})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "def foo()" in body["content"]
+    assert body["lines"] == 3
+
+
+def test_api_source_rejects_path_traversal(tmp_path):
+    """The traversal guard must block paths that resolve outside the project root."""
+    client = _setup_server(tmp_path)
+
+    resp = client.get("/api/source", params={"path": "../../etc/passwd"})
+
+    assert resp.status_code == 403

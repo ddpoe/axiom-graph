@@ -167,6 +167,21 @@
         </div>
         <div id="since-banner" class="since-banner hidden"></div>
         <div id="since-summary" class="since-summary hidden"></div>
+        <!-- Net change-kind filter. Toggles hide/show changed-since rows by
+             kind; all NET kinds are ON by default. The `link` toggle is
+             disabled — link/tag net membership is deferred to ADR-021, so the
+             backend emits no link kind. -->
+        <div id="since-kind-filter" class="since-kind-filter hidden">
+          <span class="since-kind-filter-label">Kinds</span>
+          <div class="since-kind-toggles">
+            <button class="since-kind-toggle history-badge history-badge-initial active" data-kind="added" title="Show/hide added nodes">added</button>
+            <button class="since-kind-toggle history-badge history-badge-content active" data-kind="content" title="Show/hide content-changed nodes">content</button>
+            <button class="since-kind-toggle history-badge history-badge-desc active" data-kind="desc" title="Show/hide description-changed nodes">desc</button>
+            <button class="since-kind-toggle history-badge history-badge-renamed active" data-kind="renamed" title="Show/hide renamed nodes">renamed</button>
+            <button class="since-kind-toggle history-badge history-badge-deleted active" data-kind="deleted" title="Show/hide deleted nodes">deleted</button>
+            <button class="since-kind-toggle history-badge history-badge-link since-kind-deferred" data-kind="link" disabled title="Link/tag net membership is deferred (ADR-021) — the backend emits no link kind">link (deferred)</button>
+          </div>
+        </div>
         <button id="btn-since-clear" class="since-clear-btn hidden">Clear filter</button>
         <div id="since-status" class="since-status"></div>
       </section>

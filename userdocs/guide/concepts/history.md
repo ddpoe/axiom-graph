@@ -1,4 +1,4 @@
-<!-- generated from axiom_graph::docs.consumer.concepts.history @ b9a08e2b85e0; do not edit -->
+<!-- generated from axiom_graph::docs.consumer.concepts.history @ c4bdd98e97cb; do not edit -->
 
 # History: the append-only spine under drift, diffs, and time travel
 
@@ -69,11 +69,11 @@ Each family of rows is the substrate for a feature you already use. Read the log
 
 **The verification gate.** `history agent-verified` reads the preserved Actor events to build the pre-push sign-off queue: every node an agent marked verified with no later human verification. A person scans that list before the work lands. It is the human-in-the-loop checkpoint of the [docs-honesty loop](../examples/docs-honesty-loop.md).
 
-**Time travel and the "changed since" filter.** Any row carrying a `git_sha` is a usable reference point; `CHECKPOINT` rows are explicit, named ones ("this release matters"). Resolution checks checkpoints first, then falls back to any row matching a SHA prefix, so the filter works even right after `init`. Give it a reference point and the engine returns every node that changed after it — which powers both the impact report and the viz [Changed Since](../viz.md) filter. See the [reporting pipeline](../examples/reporting-pipeline.md) for the end-to-end flow.
+**Time travel and the "changed since" filter.** Any row carrying a `git_sha` is a usable reference point; `CHECKPOINT` rows are explicit, named ones ("this release matters"). Resolution checks checkpoints first, then falls back to any row matching a SHA prefix, so the filter works even right after `init`. Give it a reference point and you get back every node that changed after it — which powers both the impact report and the viz [Changed Since](../viz.md) filter. For the viz filter, "changed" is a true **net state-diff** of the current index against the baseline: a node edited and then reverted within the window *cancels* and never appears, and each changed node is labelled by kind (added, content, descriptor, content+descriptor, renamed, deleted). The history log still anchors the reference point — but membership is the net state, not a replay of every event row. See the [reporting pipeline](../examples/reporting-pipeline.md) for the end-to-end flow.
 
 **Diffs.** History also supplies the *baseline* for a diff. To show what changed in a node, the diff subsystem reads `git show {sha}:{file}` where `{sha}` comes from the node's own history — its most recent verified or checkpoint row, falling back to the oldest `INITIAL`. No source snapshots are stored in the database; the log just remembers which commit to compare against.
 
-**Ghost nodes.** A `DELETED` tombstone keeps a removed node visible. When the "changed since" filter spans a deletion, the viz synthesizes a dimmed, struck-through [ghost row](../viz.md) from the preserved snapshot, so a node disappearing is itself a visible event rather than a silent gap.
+**Ghost nodes.** A `DELETED` tombstone keeps a removed node visible. When the "changed since" filter spans a deletion, the viz synthesizes a dimmed, struck-through [ghost row](../viz.md) from the preserved snapshot, so a node disappearing is itself a visible event rather than a silent gap. The tombstone also preserves the node's source span and the commit it was deleted at, so the ghost's baseline source can be recovered straight from git for inspection.
 
 ## How you reach it
 

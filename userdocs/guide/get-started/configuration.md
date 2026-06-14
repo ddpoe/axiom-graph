@@ -1,4 +1,4 @@
-<!-- generated from axiom_graph::docs.consumer.get-started.configuration @ 79881838e8aa; do not edit -->
+<!-- generated from axiom_graph::docs.consumer.get-started.configuration @ 13d8315f1f5f; do not edit -->
 
 # Configuration
 
@@ -33,7 +33,7 @@ exclude_dirs = ["worktrees", "pev-worktrees"]
 
 ### Built-in exclusions
 
-axiom-graph always skips these directories, regardless of configuration: `.axiom_graph`, `__pycache__`, `.git`, `.venv`, `venv`, `node_modules`, `.tox`, `dist`, `build`, `.pixi`. Your `exclude_dirs` entries add to this set; they do not replace it. Use it for data folders, scratch notebooks, or worktree directories that would otherwise pollute the graph.
+axiom-graph ships with a built-in set of directories it always skips — version-control, virtualenv, build-output, cache, and worktree directories. The authoritative list lives in code (`_BASE_SKIP_DIRS` in `axiom_graph/index/builder.py`), not here, so this guide doesn't duplicate it. Your `exclude_dirs` entries **add to** that set; they never replace it. Use `exclude_dirs` for project-specific data folders, scratch notebooks, or generated trees that would otherwise pollute the graph.
 
 ### Multi-root docs and config
 

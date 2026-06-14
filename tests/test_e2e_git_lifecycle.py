@@ -223,8 +223,10 @@ def test_full_lifecycle(git_project: Path, git_db_path: Path):
 
 @workflow(
     purpose=(
-        "Verify the PR review workflow: checkpoint → edit → since filter "
-        "scopes to changed nodes → staleness cause → bulk verify → re-check clean."
+        "Verify the PR review workflow under the net-diff contract: checkpoint → "
+        "edit → commit → re-index → the net since filter scopes to the changed "
+        "node (labelled `content`) → staleness cause carries the stored hash → "
+        "record a manual verification → since SHA flows to the diff as baseline."
     ),
 )
 def test_pr_review_workflow(git_project: Path, git_db_path: Path):
@@ -250,8 +252,13 @@ def test_pr_review_workflow(git_project: Path, git_db_path: Path):
 
     口 = Step(
         step_num=2,
-        name="Edit one function, commit, and discovery build",
-        purpose="Only greet() changes — farewell() should not appear in since results",
+        name="Edit one function, commit, and FULL re-index",
+        purpose=(
+            "Only greet() changes — under the net-diff contract (D-2) the net diff "
+            "compares the baseline blob against the index's STORED hashes, so a real "
+            "PR re-index (discovery_only=False) must advance greet's stored hash "
+            "before it can appear in the since results; farewell() must not."
+        ),
     )
     (git_project / "mod.py").write_text(
         "def greet():\n"
@@ -265,12 +272,18 @@ def test_pr_review_workflow(git_project: Path, git_db_path: Path):
         encoding="utf-8",
     )
     sha_b = _commit(git_project, "Update greet")
-    _build(git_project)
+    # FULL rebuild (not discovery-only): advances the stored code_hash so the
+    # net diff (baseline-blob vs stored hash) sees greet as changed.  Mirrors the
+    # real PR-review re-index flow.
+    _init(git_project)
 
     口 = Step(
         step_num=3,
-        name="Since filter with SHA-A returns only changed nodes",
-        purpose="Verify scoped filtering works with real checkpoints",
+        name="Net since filter with SHA-A scopes to the changed node",
+        purpose=(
+            "The net diff returns only greet (labelled `content`), not the unchanged "
+            "farewell — net membership is stored-hash-vs-baseline-blob, not event replay."
+        ),
     )
     greet_node = _find_node(git_db_path, "greet")
     farewell_node = _find_node(git_db_path, "farewell")
@@ -278,25 +291,34 @@ def test_pr_review_workflow(git_project: Path, git_db_path: Path):
     since_result = _since(git_db_path, git_project, sha=sha_a[:10])
     assert greet_node.id in since_result["node_ids"]
     assert farewell_node.id not in since_result["node_ids"]
+    # The net diff labels the changed node by kind (a body-only change -> content).
+    assert since_result["change_kinds"].get(greet_node.id) == ["content"]
     assert since_result["baseline_sha"] is not None
     assert since_result["baseline_timestamp"] is not None
 
     口 = Step(
         step_num=4,
-        name="Staleness cause explains why the node is stale",
-        purpose="Verify get_staleness_cause returns meaningful info",
+        name="Staleness cause carries the node's stored hash",
+        purpose=(
+            "get_staleness_cause returns meaningful info. After a FULL re-index the "
+            "stored hash matches on disk, so own_status is VERIFIED (no working-tree "
+            "drift) — staleness is the stored-vs-disk axis, orthogonal to net-diff "
+            "membership, which is stored-vs-baseline-blob. The stored hash is surfaced "
+            "regardless of status."
+        ),
     )
     from axiom_graph.viz.server import get_staleness_cause, _apply_project
 
     _apply_project(git_project)
     cause = get_staleness_cause(greet_node.id)
-    assert cause["own_status"] == "CONTENT_UPDATED"
+    # Post-rebuild: stored == on-disk, so the content axis is clean.
+    assert cause["own_status"] == "VERIFIED"
     assert cause["details"].get("stored_code_hash") is not None
 
     口 = Step(
         step_num=5,
-        name="Bulk verify changed nodes, then re-check → all clean",
-        purpose="Verify the verify → BECAME_VERIFIED cycle with real hashes",
+        name="Record a manual verification — the verify history is chained",
+        purpose="Verify the manual-verification snapshot + MANUAL_VERIFIED history mechanism with real hashes",
     )
     # Re-read the node to get current code_hash
     greet_node = db.get_node(git_db_path, greet_node.id)
@@ -319,7 +341,7 @@ def test_pr_review_workflow(git_project: Path, git_db_path: Path):
     record_staleness(git_db_path, git_project, nodes)
 
     staleness = db.get_all_staleness(git_db_path)
-    assert staleness.get(greet_node.id)[0] in ("VERIFIED", "VERIFIED")
+    assert staleness.get(greet_node.id)[0] == "VERIFIED"
 
     types = _history_types(git_db_path, greet_node.id)
     assert "MANUAL_VERIFIED" in types
@@ -443,32 +465,49 @@ def test_verification_lifecycle(git_project: Path, git_db_path: Path):
 # ---------------------------------------------------------------------------
 
 
-# Test 4 — Multiple builds on same SHA (the cutoff bug)
-@workflow(purpose="Multiple builds on same commit must not push since-filter cutoff forward")
+# Test 4 — Multiple builds on same SHA (net-diff idempotence)
+@workflow(
+    purpose=(
+        "Net since membership is stable across redundant rebuilds: a node changed "
+        "since the baseline must still appear after multiple full re-indexes on the "
+        "same HEAD commit (no double-count, no drop, no cutoff drift)."
+    )
+)
 def test_multiple_builds_same_sha(git_project: Path, git_db_path: Path):
     (git_project / "mod.py").write_text(
         'def greet():\n    """Hello."""\n    return "hello"\n',
         encoding="utf-8",
     )
-    sha = _commit(git_project, "Add greet")
+    sha_a = _commit(git_project, "Add greet")
     _init(git_project)
 
-    # Edit without committing
+    # Edit greet and COMMIT (the net diff is stored-hash-vs-baseline-blob; the
+    # edited body must be committed so its blob differs from the SHA-A baseline).
     (git_project / "mod.py").write_text(
         'def greet():\n    """Hello."""\n    return "goodbye"\n',
         encoding="utf-8",
     )
-    _build(git_project)
+    _commit(git_project, "Change greet")
 
-    # Second build on same commit — should not push cutoff forward
-    _build(git_project)
-
+    # First FULL re-index on the new HEAD — advances greet's stored hash.
+    _init(git_project)
     node = _find_node(git_db_path, "greet")
-    since_result = _since(git_db_path, git_project, sha=sha[:10])
+    first = _since(git_db_path, git_project, sha=sha_a[:10])
+    assert node.id in first["node_ids"]
+    assert first["change_kinds"].get(node.id) == ["content"]
 
-    assert node.id in since_result["node_ids"], (
-        "Node that went CONTENT_UPDATED must appear in since results even after multiple builds on the same SHA"
+    # Second full re-index on the SAME HEAD commit — redundant rebuild.  Net
+    # membership must be idempotent: greet still present, still labelled content,
+    # listed exactly once.
+    _init(git_project)
+    second = _since(git_db_path, git_project, sha=sha_a[:10])
+
+    assert node.id in second["node_ids"], (
+        "A node changed since the baseline must still appear in the net since results "
+        "after multiple full re-indexes on the same SHA"
     )
+    assert second["node_ids"].count(node.id) == 1, "net membership must not double-count across redundant rebuilds"
+    assert second["change_kinds"].get(node.id) == ["content"]
 
 
 # Test 5 — SHA not in history → fail loud (no fallback to a different baseline)

@@ -47,6 +47,8 @@ from __future__ import annotations
 
 import ast
 import logging
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -559,3 +561,84 @@ def current_node_hashes_for_file(
                 # maps to NOT_FOUND (parity with the Python branch).
 
     return result
+
+
+def node_hashes_for_blob(
+    blob_text: str,
+    nodes: list["AxiomNode"],
+    project_root: Path,
+    location: str,
+) -> dict[str, tuple[str | None, str | None]]:
+    """Hash *nodes* against a supplied blob (e.g. ``git show`` content).
+
+    Routes the blob through the **same dispatch** as
+    :func:`current_node_hashes_for_file` (Python AST, JS/TS tree-sitter, or
+    DocJSON scan) so a TypeScript file is never fed to ``ast.parse`` and a
+    DocJSON section is scanned the way the indexer scans it.
+
+    **Non-destructive.** The blob is materialised into a private temp directory
+    that *mirrors* the node's real relative path (``<tmp>/<location>``) and is
+    scanned with that temp directory as the logical project root. The user's
+    real working-tree file at ``project_root / location`` is **never written,
+    overwritten, or deleted** — a hard process kill mid-scan can only ever
+    abandon the temp directory, never corrupt the user's source.
+
+    Node-id parity is preserved because the path-dependent scanners (JS/TS
+    tree-sitter, DocJSON section ids) derive ids from ``file_path.relative_to(
+    project_root)`` — identical for ``<tmp>/<location>`` against ``<tmp>`` and
+    for ``project_root/<location>`` against ``project_root``. The project's
+    ``axiom-graph.toml`` is copied into the temp root so DocJSON docs-dir
+    resolution (custom ``docs_dirs``) resolves the same way and yields matching
+    section ids. Python nodes are resolved by qualified id (path-independent),
+    so they match regardless.
+
+    Args:
+        blob_text: The baseline-blob source text (from ``git show``).
+        nodes: The nodes located at *location* whose baseline hashes to compute.
+        project_root: Absolute path to the real project root. Used only to copy
+            config into the temp mirror — never written to.
+        location: Repo-relative path of the file at the **current** index
+            (the path the blob's nodes map to; mirrored under the temp root).
+
+    Returns:
+        ``{node.id: (code_hash, desc_hash)}`` for every node resolvable in the
+        blob. Nodes absent from the blob (e.g. a function not yet present at
+        baseline) are omitted -- exactly like
+        :func:`current_node_hashes_for_file`.
+    """
+    if not nodes:
+        return {}
+
+    # Normalise the location to a relative POSIX path so the mirror reproduces
+    # the exact relative path the scanners hash against.
+    rel = Path(location.replace("\\", "/"))
+
+    tmp_root: str | None = None
+    try:
+        tmp_root = tempfile.mkdtemp(prefix="axiom_blob_hash_")
+        tmp_root_path = Path(tmp_root)
+
+        # Mirror the file at <tmp>/<location> so relative-path-derived node ids
+        # (JS/TS, DocJSON) match the stored node.id exactly.
+        mirror_path = tmp_root_path / rel
+        mirror_path.parent.mkdir(parents=True, exist_ok=True)
+        mirror_path.write_text(blob_text, encoding="utf-8")
+
+        # Copy the project config into the temp root so DocJSON docs-dir
+        # resolution (custom `docs_dirs`) matches and produces identical
+        # section ids. Absent / unreadable config falls back to defaults —
+        # harmless for the default `docs` layout.
+        src_toml = project_root / "axiom-graph.toml"
+        if src_toml.exists():
+            try:
+                shutil.copyfile(src_toml, tmp_root_path / "axiom-graph.toml")
+            except OSError as exc:
+                logger.debug("Failed to mirror config for blob hash: %s", exc)
+
+        return current_node_hashes_for_file(mirror_path, nodes, tmp_root_path)
+    except OSError as exc:
+        logger.debug("Failed to materialise blob for hashing at %s: %s", location, exc)
+        return {}
+    finally:
+        if tmp_root is not None:
+            shutil.rmtree(tmp_root, ignore_errors=True)

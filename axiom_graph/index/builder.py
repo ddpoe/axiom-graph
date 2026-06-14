@@ -585,7 +585,9 @@ def build(
     # ------------------------------------------------------------------
     # Purge pass — remove DB rows for files that no longer exist on disk
     # ------------------------------------------------------------------
-    nodes_purged = _purge_stale_entries(db_path, project_root, warnings, exclude_dirs=config.scan.exclude_dirs)
+    nodes_purged = _purge_stale_entries(
+        db_path, project_root, warnings, exclude_dirs=config.scan.exclude_dirs, git_sha=git_sha
+    )
 
     # ------------------------------------------------------------------
     # documents-edge reconciliation pass
@@ -963,6 +965,7 @@ def _purge_stale_entries(
     warnings: list[str],
     *,
     exclude_dirs: list[str] | None = None,
+    git_sha: str | None = None,
 ) -> int:
     """Check all indexed file paths against disk and cascade-delete missing ones.
 
@@ -982,6 +985,9 @@ def _purge_stale_entries(
         warnings: Mutable list; scanner/purge errors are appended here.
         exclude_dirs: Directory names to purge from the index (from
             ``axiom-graph.toml [axiom_graph.scan] exclude_dirs``).
+        git_sha: The current build SHA, threaded down to
+            ``delete_nodes_by_location`` so DELETED ghosts preserve the
+            deletion-time SHA + span for later baseline-source recovery.
 
     Returns:
         Total number of nodes (doc + code) purged.
@@ -1020,7 +1026,7 @@ def _purge_stale_entries(
             if not abs_path.exists():
                 logger.info("Purging stale node location: %s", loc)
                 with db._connect(db_path) as conn:
-                    nodes_purged += db.delete_nodes_by_location(conn, loc)
+                    nodes_purged += db.delete_nodes_by_location(conn, loc, git_sha)
     except Exception as exc:  # pragma: no cover
         warnings.append(f"node location purge failed: {exc}")
         logger.warning("node location purge error: %s", exc)
@@ -1038,7 +1044,7 @@ def _purge_stale_entries(
                 if any(d in parts for d in exclude_dirs):
                     logger.info("Purging excluded-dir node location: %s", loc)
                     with db._connect(db_path) as conn:
-                        nodes_purged += db.delete_nodes_by_location(conn, loc)
+                        nodes_purged += db.delete_nodes_by_location(conn, loc, git_sha)
         except Exception as exc:  # pragma: no cover
             warnings.append(f"exclude-dir purge failed: {exc}")
             logger.warning("exclude-dir purge error: %s", exc)

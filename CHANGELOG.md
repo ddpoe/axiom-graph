@@ -10,6 +10,24 @@ All notable changes to axiom-graph are recorded here. Format follows [Keep a Cha
 
 _Nothing yet — entries accumulate here for the next release._
 
+## [2.1.1] - 2026-06-14
+
+Viz-focused release. The "changed since" history view is reworked from event-log replay to a **net state-diff**, gaining deleted-source recovery, change-kind badges with a kind filter, and a fail-loud index-behind banner. Backend route handlers and frontend only — no MCP or CLI signature changes.
+
+### Added
+
+- **Deleted-source recovery for "ghost" nodes.** A node deleted since the baseline SHA now retains its `level_3_location` span and originating `git_sha`, so the viz can fetch and display its source as it existed before deletion (`recover_deleted_source`). Deleted ghosts are selectable in the source panel; `/api/history/since` carries the recovered source in an expanded `deleted_nodes` shape (`level_3_location`, `recovered_source`).
+- **Change-kind badges and kind filter in the history view.** Each changed row shows a change-kind badge, and a kind filter lets you slice the "changed since" set by kind. The net change-kinds are active; the link kind is disabled/deferred pending ADR-021.
+- **Index-behind banner — fail loud on an un-indexed "changed since" SHA.** Choosing a baseline SHA that isn't in the index now raises a clear error and surfaces an index-behind banner, instead of silently computing against a stale or partial index.
+
+### Fixed
+
+- **`/api/source` route restored.** The path-based source endpoint (`GET /api/source?path=…`) that backs the workflow- and test-view source panels was dropped during the viz `server.py` router split and never re-added, so those panels 404'd. Restored into the workflows router with its directory-traversal guard intact, with a regression test.
+
+### Changed
+
+- **"Changed since" computes a net state-diff instead of replaying the event log.** Membership now reflects the net difference between the baseline SHA and the current index, so a node that was edited and then reverted back to its baseline state no longer appears as changed. The keystone `compute_net_diff` derives membership from `get_name_status_changes` plus a `node_hashes_for_blob` baseline-blob-vs-stored-hash classification; blob hashing is **non-destructive** (it never mutates stored node hashes). `/api/history/since` now returns a `change_kinds` map and the change-kind vocabulary.
+
 ## [2.1.0] - 2026-06-10
 
 Feature + maintenance release: new MCP tooling (`axiom_graph_drift_query`, `axiom_graph_patch_section`), an XState v5 state-machine scanner, configurable multi-target consumer rendering, full removal of the legacy dFlow package, and a cluster of staleness-correctness fixes. Two minor breaking changes to MCP tool signatures (`axiom_graph_check` and `mark_clean` / `purge_node`) — see **Changed** and **Migration notes**.

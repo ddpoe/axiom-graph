@@ -207,9 +207,17 @@ def test_since_returns_distinct_node_ids(db_path: Path):
 # ---------------------------------------------------------------------------
 
 
-@workflow(purpose="Verify /api/history/since endpoint returns node_ids and baseline info")
+@workflow(purpose="Verify /api/history/since endpoint resolves the baseline SHA and emits change_kinds")
 def test_since_endpoint_with_checkpoint(db_path: Path, mini_project: Path):
-    """Endpoint returns changed node_ids and resolved baseline SHA."""
+    """Endpoint resolves the baseline SHA and returns the net-diff shape.
+
+    Under the net-diff contract (D-1/D-2), membership is a true git state-diff
+    of the index's stored hashes vs the baseline blob — not an event replay.
+    With a synthetic (non-git) baseline SHA the net diff can't run, so
+    ``node_ids`` is empty; the baseline resolution and response shape are still
+    asserted here. Real membership/kind behaviour is covered by the e2e tests
+    against a real git repo.
+    """
     from axiom_graph.viz.server import get_history_since_endpoint, _apply_project
 
     _apply_project(mini_project)
@@ -222,14 +230,14 @@ def test_since_endpoint_with_checkpoint(db_path: Path, mini_project: Path):
     result = get_history_since_endpoint()
 
     assert isinstance(result["node_ids"], list)
-    assert n.id in result["node_ids"]
+    assert isinstance(result["change_kinds"], dict)
     assert result["baseline_sha"] == "cp_sha_123"
     assert result["baseline_timestamp"] is not None
 
 
-@workflow(purpose="Verify /api/history/since with timestamp param and no checkpoint SHA")
+@workflow(purpose="Verify /api/history/since with timestamp param resolves and emits the net-diff shape")
 def test_since_endpoint_with_timestamp(db_path: Path, mini_project: Path):
-    """Endpoint handles timestamp-only param, baseline_sha may be None or git-resolved."""
+    """Endpoint handles timestamp-only param; baseline_timestamp is preserved."""
     from axiom_graph.viz.server import get_history_since_endpoint, _apply_project
 
     _apply_project(mini_project)
@@ -242,7 +250,7 @@ def test_since_endpoint_with_timestamp(db_path: Path, mini_project: Path):
     result = get_history_since_endpoint(timestamp="2020-01-01T00:00:00")
 
     assert isinstance(result["node_ids"], list)
-    assert n.id in result["node_ids"]
+    assert isinstance(result["change_kinds"], dict)
     assert result["baseline_timestamp"] == "2020-01-01T00:00:00"
 
 
@@ -267,10 +275,11 @@ def test_since_diff_workflow_existing_file(db_path: Path, mini_project: Path):
     _seed_history(db_path, n.id, "CHECKPOINT", git_sha="cp_sha_1", preserved=True)
     _seed_history(db_path, n.id, "CONTENT_ONLY", git_sha="later_sha")
 
-    # Step 1: since endpoint resolves baseline
+    # Step 1: since endpoint resolves baseline (membership is a real git diff;
+    # with a synthetic baseline SHA node_ids is empty — see net-diff contract).
     since_result = get_history_since_endpoint()
     assert since_result["baseline_sha"] == "cp_sha_1"
-    assert n.id in since_result["node_ids"]
+    assert isinstance(since_result["change_kinds"], dict)
 
     # Step 2: diff endpoint uses that baseline SHA
     show_mock = MagicMock()
@@ -422,9 +431,11 @@ def test_since_endpoint_with_until(db_path: Path, mini_project: Path):
     _seed_history(db_path, n2.id, "CONTENT_ONLY", git_sha="mid_sha")
     _seed_history(db_path, n1.id, "CONTENT_ONLY", git_sha="end_sha")
 
-    # Without until — should see changes after checkpoint including end_sha
+    # Without until — resolves and returns the net-diff shape (membership is a
+    # real git diff; with synthetic SHAs node_ids is empty — net-diff contract).
     result_all = get_history_since_endpoint(sha="cp_start")
-    assert n1.id in result_all["node_ids"]
+    assert isinstance(result_all["node_ids"], list)
+    assert isinstance(result_all["change_kinds"], dict)
 
     # With until_sha — mock resolve to get its timestamp
     # We need to get the scanned_at for end_sha to use as until
@@ -526,7 +537,8 @@ def test_since_endpoint_resolved_includes_freshness(db_path: Path, mini_project:
     result = get_history_since_endpoint(sha="cp_sha")
 
     assert result["resolved"] is True
-    assert n.id in result["node_ids"]
+    assert isinstance(result["node_ids"], list)
+    assert isinstance(result["change_kinds"], dict)
     assert "index_head_sha" in result
     assert "commits_behind_head" in result  # may be None when git is unavailable
 

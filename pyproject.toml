@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "axiom-graph"
-version = "2.1.0"
+version = "2.1.1"
 description = "Project knowledge indexer for AI agents — scans code, tracks documentation staleness, and serves a knowledge graph to AI agents via MCP"
 authors = ["ddpoe <dap182@pitt.edu>"]
 license = "MIT"

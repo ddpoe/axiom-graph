@@ -453,10 +453,10 @@ def get_undocumented_nodes(
 
 @task(
     purpose="Cascade-delete all nodes at a given file location, removing associated edges (keeping inbound documents edges from surviving sources), tags, FTS, history, and verification rows",
-    inputs="conn (open SQLite connection), location file path",
+    inputs="conn (open SQLite connection), location file path, optional git_sha",
     outputs="Number of nodes deleted",
 )
-def delete_nodes_by_location(conn: sqlite3.Connection, location: str) -> int:
+def delete_nodes_by_location(conn: sqlite3.Connection, location: str, git_sha: str | None = None) -> int:
     """Cascade-delete all nodes at a given file location.
 
     Removes associated edges, tags, FTS entries, history, and verification rows.
@@ -472,6 +472,20 @@ def delete_nodes_by_location(conn: sqlite3.Connection, location: str) -> int:
 
     Takes an open connection so it can be batched in a transaction.
     Returns the number of nodes deleted.
+
+    Args:
+        conn: Open SQLite connection (so the delete can be batched in a txn).
+        location: Repo-relative file path whose nodes to cascade-delete.
+        git_sha: The index/build SHA at deletion time. Written into the
+            DELETED-history ``git_sha`` column **and** preserved in the meta
+            JSON (alongside each node's ``level_3_location`` span) so a deleted
+            ghost's baseline source can be recovered later via ``git show``.
+            ``None`` (the default) preserves the legacy behaviour (no SHA, no
+            span) for callers that do not supply one — those ghosts fall back
+            to whole-file recovery.
+
+    Returns:
+        The number of nodes deleted (unchanged contract).
     """
     口 = Step(
         step_num=1,
@@ -480,7 +494,7 @@ def delete_nodes_by_location(conn: sqlite3.Connection, location: str) -> int:
         critical="LINK_REMOVED history is attached to the surviving node (not the deleted one) so it persists after the cascade delete",
     )
     nodes = conn.execute(
-        "SELECT id, node_type, subtype, title, location FROM nodes WHERE location = ?",
+        "SELECT id, node_type, subtype, title, location, level_3_location FROM nodes WHERE location = ?",
         (location,),
     ).fetchall()
 
@@ -501,13 +515,15 @@ def delete_nodes_by_location(conn: sqlite3.Connection, location: str) -> int:
                 row["id"],
                 now,
                 "DELETED",
-                None,
+                git_sha,
                 json.dumps(
                     {
                         "title": row["title"],
                         "node_type": row["node_type"],
                         "subtype": row["subtype"],
                         "location": row["location"],
+                        "level_3_location": row["level_3_location"],
+                        "git_sha": git_sha,
                         "tags": tags,
                         "actor": "system",
                     }

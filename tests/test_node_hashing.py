@@ -24,6 +24,7 @@ from axiom_graph.scanners.module_scanner import _split_function
 from axiom_graph.scanners.node_hashing import (
     current_node_hash,
     current_node_hashes_for_file,
+    node_hashes_for_blob,
 )
 
 
@@ -619,3 +620,79 @@ def test_single_ts_node_re_derives_from_file(tmp_path: Path) -> None:
         desc_hash="STALE_DESC",
     )
     assert current_node_hash(stale, tmp_path) == (beta.code_hash, beta.desc_hash)
+
+
+# ---------------------------------------------------------------------------
+# node_hashes_for_blob — baseline-blob hashing via the same dispatch
+# ---------------------------------------------------------------------------
+
+
+def test_node_hashes_for_blob_python_dispatch_real_file_untouched(tmp_path: Path) -> None:
+    """Hash a Python node against a baseline blob without touching the real file.
+
+    The blob is the *old* body; the on-disk file is the *new* body. The
+    returned baseline hash must reflect the blob (not the disk). Crucially the
+    real working-tree file is **never written** during the scan — its bytes and
+    mtime are identical before and after, so a hard process kill mid-scan can
+    never leave baseline content in the user's source.
+    """
+    f = tmp_path / "mod.py"
+    new_src = 'def greet():\n    """Say hi."""\n    return "new"\n'
+    f.write_text(new_src, encoding="utf-8")
+    before = f.read_bytes()
+    before_mtime = f.stat().st_mtime_ns
+
+    node = _make_node("proj::mod::greet", location="mod.py", subtype=None)
+
+    old_blob = 'def greet():\n    """Say hi."""\n    return "old"\n'
+    out = node_hashes_for_blob(old_blob, [node], tmp_path, "mod.py")
+
+    # Expected baseline hash = hash of the OLD body in the blob.
+    tree = ast.parse(old_blob)
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef))
+    code_text, docstring = _split_function(fn)
+    assert out[node.id] == (hash16(code_text), hash16(docstring))
+
+    # The real working-tree file is byte-identical AND its mtime is unchanged:
+    # it was never opened for writing.
+    assert f.read_bytes() == before
+    assert f.stat().st_mtime_ns == before_mtime
+
+
+def test_node_hashes_for_blob_real_file_untouched_on_error_path(tmp_path: Path) -> None:
+    """The real file stays untouched even when hashing yields nothing.
+
+    A blob whose body no longer contains the node (a "real miss") returns an
+    empty mapping for that node — exercising the path where the scan produces
+    no hit. Even on this path the user's working-tree file must be byte- and
+    mtime-identical: the non-destructive materialisation never writes it.
+    """
+    f = tmp_path / "mod.py"
+    src = 'def greet():\n    return "new"\n'
+    f.write_text(src, encoding="utf-8")
+    before = f.read_bytes()
+    before_mtime = f.stat().st_mtime_ns
+
+    node = _make_node("proj::mod::greet", location="mod.py", subtype=None)
+
+    # Baseline blob does NOT define `greet` -> the node is omitted from output.
+    old_blob = "def other():\n    return 0\n"
+    out = node_hashes_for_blob(old_blob, [node], tmp_path, "mod.py")
+    assert node.id not in out
+
+    # Real file unmodified throughout.
+    assert f.read_bytes() == before
+    assert f.stat().st_mtime_ns == before_mtime
+
+
+def test_node_hashes_for_blob_body_unchanged_matches_current(tmp_path: Path) -> None:
+    """When the blob body equals the current body, the baseline hash equals
+    the current on-disk hash — the revert-cancel equality at the hash level."""
+    f = tmp_path / "mod.py"
+    src = "def f():\n    return 1\n"
+    f.write_text(src, encoding="utf-8")
+
+    node = _make_node("proj::mod::f", location="mod.py", subtype=None)
+    current = current_node_hash(node, tmp_path)
+    baseline = node_hashes_for_blob(src, [node], tmp_path, "mod.py")
+    assert baseline[node.id] == current

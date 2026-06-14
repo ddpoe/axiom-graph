@@ -262,6 +262,48 @@ def test_delete_nodes_by_location_keeps_inbound_documents_edge(mini_project, db_
     assert "proj::mod::func_a" not in _link_removed_targets(db_path)
 
 
+def test_delete_nodes_by_location_contract_preserved_with_git_sha(mini_project, db_path):
+    """Functionality-preservation: passing ``git_sha`` must not change the contract.
+
+    The SHA/span meta enrichment (D-5) amends a hot, well-tested path. This
+    asserts the load-bearing behaviour is byte-for-byte identical to the
+    no-SHA call: same return count, the inbound ``documents`` edge from a
+    surviving source is KEPT (flag-don't-drop), the internal edge between
+    deleted nodes is removed, the source is flagged BROKEN_LINK, and the kept
+    edge gets NO LINK_REMOVED. It then asserts the NEW behaviour: the SHA is
+    written into both the DELETED meta and the ``git_sha`` column, and the
+    node's ``level_3_location`` span is preserved in the meta.
+    """
+    import json
+
+    _upsert_code_node(db_path, "proj::mod::func_a")
+    _upsert_code_node(db_path, "proj::mod::func_b")
+    _upsert_node(db_path, "proj::docs.test::s1")
+    _insert_edge(db_path, "documents", "proj::docs.test::s1", "proj::mod::func_a")
+    _insert_edge(db_path, "depends_on", "proj::mod::func_a", "proj::mod::func_b")
+
+    with db._connect(db_path) as conn:
+        deleted = db.delete_nodes_by_location(conn, "mod.py", "feedface1234")
+
+    # --- Contract preserved (identical to the no-SHA test) ---
+    assert deleted == 2
+    assert _edge_tuples(db_path) == {("documents", "proj::docs.test::s1", "proj::mod::func_a")}
+    assert find_broken_links(db_path).get("proj::docs.test::s1") == "proj::mod::func_a"
+    assert "proj::mod::func_a" not in _link_removed_targets(db_path)
+
+    # --- New behaviour: SHA + span preserved on the DELETED rows ---
+    with db._connect(db_path) as conn:
+        rows = conn.execute("SELECT node_id, git_sha, meta FROM node_history WHERE change_type = 'DELETED'").fetchall()
+    assert len(rows) == 2
+    for r in rows:
+        assert r["git_sha"] == "feedface1234"
+        meta = json.loads(r["meta"])
+        assert meta["git_sha"] == "feedface1234"
+        # level_3_location key is always present (may be None for nodes without
+        # a span, but these code nodes have one from upsert).
+        assert "level_3_location" in meta
+
+
 def test_delete_nodes_by_location_removes_documents_edge_when_both_ends_deleted(mini_project, db_path):
     """No signal is needed when the source dies in the same purge as the target."""
     _upsert_node(db_path, "proj::docs.test::s1")

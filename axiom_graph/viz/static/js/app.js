@@ -12,6 +12,11 @@ import * as DocApi from './doc-api.js';
 import * as DocTree from './doc-tree.js';
 import * as DocEditor from './doc-editor.js';
 import * as SinceModal from './since-modal.js';
+// ── Constants ─────────────────────────────────────────────────────────────────
+/** The NET change kinds the changed-since list filters by, all ON by default.
+ *  `link` is intentionally absent — link/tag net membership is deferred to
+ *  ADR-021, so the backend emits no link kind and there is nothing to filter. */
+const NET_KINDS = ['added', 'content', 'desc', 'renamed', 'deleted'];
 // ── State ────────────────────────────────────────────────────────────────────
 const state = {
     view: 'graph',
@@ -44,6 +49,8 @@ const state = {
     _sinceNodeIds: null,
     _sinceDeletedNodes: null,
     _sinceUntilTimestamp: null,
+    _sinceChangeKinds: {},
+    _sinceEnabledKinds: new Set(NET_KINDS),
     searchMode: 'keyword',
     searchQuery: '',
     searchResultNodes: null,
@@ -141,6 +148,16 @@ export async function init() {
         });
         document.getElementById('btn-since-browse').addEventListener('click', () => SinceModal.openCommitPicker());
         document.getElementById('btn-since-clear').addEventListener('click', () => clearSinceFilter());
+        // Net change-kind filter toggles. Each toggle hides/shows changed-since
+        // rows of that kind; the `link` toggle is disabled (ADR-021 deferral).
+        document.querySelectorAll('.since-kind-toggle').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const el = btn;
+                if (el.disabled)
+                    return; // deferred `link` toggle is inert
+                _toggleSinceKind(el.dataset.kind || '');
+            });
+        });
         SinceModal.initSinceModal({
             onSelect: (selection) => {
                 if (selection.mode === 'single') {
@@ -768,8 +785,8 @@ function _applyFilters() {
             nodes = nodes.filter(n => { const loc = n.location || ''; return !testPaths.some(tp => loc.startsWith(tp)); });
     }
     if (state._sinceNodeIds) {
-        nodes = nodes.filter(n => state._sinceNodeIds.has(n.id));
-        if (state._sinceDeletedNodes) {
+        nodes = nodes.filter(n => state._sinceNodeIds.has(n.id) && _nodePassesKindFilter(n.id));
+        if (state._sinceDeletedNodes && state._sinceEnabledKinds.has('deleted')) {
             const liveIds = new Set(nodes.map(n => n.id));
             for (const ghost of state._sinceDeletedNodes) {
                 if (!liveIds.has(ghost.id))
@@ -778,6 +795,44 @@ function _applyFilters() {
         }
     }
     state.filteredNodes = nodes;
+}
+/** Whether a changed-since node passes the active net-kind filter.
+ *
+ *  A node is kept when at least one of its change-kinds is enabled. The
+ *  composite `content+desc` kind is treated as both `content` and `desc`, so
+ *  it survives if either is enabled. A node with no recorded kind (defensive)
+ *  is kept. Deleted ghosts are filtered separately (they have no live id in
+ *  the change-kinds map). */
+function _nodePassesKindFilter(nodeId) {
+    const kinds = state._sinceChangeKinds[nodeId];
+    if (!kinds || kinds.length === 0)
+        return true;
+    return kinds.some(kind => {
+        if (kind === 'content+desc') {
+            return state._sinceEnabledKinds.has('content') || state._sinceEnabledKinds.has('desc');
+        }
+        return state._sinceEnabledKinds.has(kind);
+    });
+}
+/** Toggle a net change-kind on/off and refresh the filtered list/graph. */
+function _toggleSinceKind(kind) {
+    if (!kind)
+        return;
+    if (state._sinceEnabledKinds.has(kind))
+        state._sinceEnabledKinds.delete(kind);
+    else
+        state._sinceEnabledKinds.add(kind);
+    _updateKindToggleUI();
+    _applyFiltersAndRefresh();
+}
+/** Sync the active/inactive visual state of the kind-filter toggles. */
+function _updateKindToggleUI() {
+    document.querySelectorAll('.since-kind-toggle').forEach(btn => {
+        const el = btn;
+        if (el.disabled)
+            return; // deferred `link` toggle never toggles
+        el.classList.toggle('active', state._sinceEnabledKinds.has(el.dataset.kind || ''));
+    });
 }
 function _applyFiltersAndRefresh() {
     _applyFilters();
@@ -878,6 +933,9 @@ async function applySinceFilter(type, customValue, opts) {
         state._sinceNodeIds = new Set(data.node_ids);
         state._sinceBaselineSha = data.baseline_sha || null;
         state._sinceDeletedNodes = data.deleted_nodes || null;
+        state._sinceChangeKinds = data.change_kinds || {};
+        state._sinceEnabledKinds = new Set(NET_KINDS);
+        List.setChangeKinds(data.change_kinds);
         state._sinceUntilTimestamp = null;
         _updateSinceUI(type);
         _applyFiltersAndRefresh();
@@ -920,6 +978,9 @@ async function applySinceRange(sinceSha, untilSha, sinceSubject, untilSubject) {
         state._sinceNodeIds = new Set(data.node_ids);
         state._sinceBaselineSha = data.baseline_sha || null;
         state._sinceDeletedNodes = data.deleted_nodes || null;
+        state._sinceChangeKinds = data.change_kinds || {};
+        state._sinceEnabledKinds = new Set(NET_KINDS);
+        List.setChangeKinds(data.change_kinds);
         state._sinceUntilTimestamp = data.until_timestamp || null;
         _updateSinceUI('range');
         _applyFiltersAndRefresh();
@@ -939,6 +1000,8 @@ function clearSinceFilter() {
     state._sinceBaselineSha = null;
     state._sinceDeletedNodes = null;
     state._sinceUntilTimestamp = null;
+    state._sinceChangeKinds = {};
+    state._sinceEnabledKinds = new Set(NET_KINDS);
     _renderSinceBanner({ resolved: true, behind: 0 });
     _updateSinceUI(null);
     _applyFiltersAndRefresh();
@@ -953,6 +1016,12 @@ function _updateSinceUI(activeType) {
     const clearBtn = document.getElementById('btn-since-clear');
     if (clearBtn)
         clearBtn.classList.toggle('hidden', !activeType);
+    // Show the net change-kind filter only when a since filter is active, and
+    // sync its toggle visual state.
+    const kindFilter = document.getElementById('since-kind-filter');
+    if (kindFilter)
+        kindFilter.classList.toggle('hidden', !activeType);
+    _updateKindToggleUI();
     // Update browse button label
     const browseBtn = document.getElementById('btn-since-browse');
     if (browseBtn) {

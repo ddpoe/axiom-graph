@@ -1,4 +1,4 @@
-<!-- generated from axiom_graph::docs.consumer.viz @ cb9dfc5de4ff; do not edit -->
+<!-- generated from axiom_graph::docs.consumer.viz @ 51341425220d; do not edit -->
 
 # The Viz Dashboard
 
@@ -87,7 +87,7 @@ This is the same editing surface used to maintain the docs you are reading - the
 
 **Search** - the header search bar does keyword full-text matching, filtering both Graph and List to the matching nodes at once.
 
-**Changed Since** - the sidebar narrows the display to nodes that changed after a reference point. Quick presets cover *Last Checkpoint*, *Last Commit*, and *24h*; for finer control, *Browse...* opens a commit picker that lists recent commits - pick one to filter since that point, or check two to define a range. Deleted nodes appear as **ghost nodes**: dimmed, struck-through rows synthesized from preserved history, so a node disappearing is itself visible rather than silent. Both the since-query and those ghost rows are reads against the [history log](concepts/history.md).
+**Changed Since** - the sidebar narrows the display to nodes that changed after a reference point. Quick presets cover *Last Checkpoint*, *Last Commit*, and *24h*; for finer control, *Browse...* opens a commit picker that lists recent commits - pick one to filter since that point, or check two to define a range. "Changed" is a true **net diff** of the current index against that point: a node you edited and then reverted within the window cancels out and won't show up. Each changed row carries a **change-kind badge** - *added*, *content*, *descriptor*, *content+descriptor*, *renamed*, or *deleted* - and a kind filter lets you narrow to just one kind (e.g. only renames). The net kinds are on by default; a *link* toggle is shown but disabled (links/tags net-membership is deferred). Deleted nodes appear as **ghost nodes**: dimmed, struck-through rows synthesized from preserved history, so a node disappearing is itself visible rather than silent - and their pre-deletion source is recovered from git so you can still inspect what was removed. Both the since-query and those ghost rows are reads against the [history log](concepts/history.md).
 
 **Check and Rescan** - two header buttons. *Check* recomputes staleness for all nodes and writes it back, without re-indexing. *Rescan* runs a full `axiom-graph build` to pick up new or changed files. (Staleness shown in the UI reflects the last build or check, not live disk state - *Check* is how you refresh it on demand.)
 

@@ -4177,6 +4177,44 @@ th.hidden, td.hidden { display: none; }
   border-color: var(--accent-blue) !important;
   color: var(--accent-blue) !important;
 }
+
+/* Net change-kind filter (sidebar). Toggle-set beside the since presets that
+   hides/shows changed-since rows by kind; all net kinds ON by default. Each
+   toggle reuses the history-badge-* badge styling; inactive toggles fade. */
+.since-kind-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.since-kind-filter-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+.since-kind-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.since-kind-toggle {
+  cursor: pointer;
+  border: 1px solid transparent;
+  opacity: 0.4;
+  transition: opacity 0.12s, border-color 0.12s;
+}
+.since-kind-toggle:hover { opacity: 0.75; }
+.since-kind-toggle.active {
+  opacity: 1;
+  border-color: var(--accent-blue);
+}
+.since-kind-toggle.since-kind-deferred {
+  cursor: not-allowed;
+  opacity: 0.35;
+  font-style: italic;
+}
+.since-kind-toggle.since-kind-deferred:hover { opacity: 0.35; }
 .since-browse-row {
   margin-bottom: 6px;
 }
@@ -4581,6 +4619,84 @@ th.hidden, td.hidden { display: none; }
 .history-badge-verified { background: #0d2818; color: #7ee787; }
 .history-badge-link { background: #2a1a2e; color: #bc8cff; }
 .history-badge-initial { background: #161b22; color: #8b949e; }
+/* Net change-kind badges (changed-since list).  `content+desc` -> the
+   `content-desc` class; `added` reuses `history-badge-initial`. */
+.history-badge-content-desc { background: #2e2a00; color: #d2c322; }
+.history-badge-renamed { background: #16261f; color: #56d4a0; }
+.history-badge-deleted { background: #2d1416; color: #f8838f; }
+/* Modifier applied to a net change-kind badge in the staleness column. */
+.change-kind-badge { margin-left: 4px; vertical-align: middle; }
+
+/* ── Deleted-ghost baseline source overlay (old side only) ─────────────── */
+.ghost-source-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+.ghost-source-panel {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  width: min(820px, 90vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.ghost-source-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-tertiary);
+}
+.ghost-source-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ghost-source-loc {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-left: auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ghost-source-close {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.ghost-source-close:hover { color: var(--text-primary); }
+.ghost-source-body {
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  white-space: pre;
+  tab-size: 4;
+}
+.ghost-source-empty {
+  color: var(--text-secondary);
+  font-style: italic;
+  white-space: normal;
+}
 
 /* ── Diff commit header ────────────────────────────────────────────────── */
 .diff-commit-header {

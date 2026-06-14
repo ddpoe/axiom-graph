@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,90 @@ def _parse_name_status_renames(raw: str) -> dict[str, str]:
             old_path, new_path = parts[1], parts[2]
             pairs[old_path.replace("\\", "/")] = new_path.replace("\\", "/")
     return pairs
+
+
+@dataclass
+class NameStatusChanges:
+    """Full per-file change set from ``git diff --name-status -M``.
+
+    Attributes:
+        added: Repo-relative paths added between the two commits (``A`` lines).
+        modified: Repo-relative paths modified in place (``M`` lines).
+        deleted: Repo-relative paths deleted (``D`` lines).
+        renamed: Mapping ``{old_path: new_path}`` for renamed files (``R`` lines).
+    """
+
+    added: set[str] = field(default_factory=set)
+    modified: set[str] = field(default_factory=set)
+    deleted: set[str] = field(default_factory=set)
+    renamed: dict[str, str] = field(default_factory=dict)
+
+
+def _parse_name_status_changes(raw: str) -> NameStatusChanges:
+    """Parse ``git diff --name-status -M`` output into a full change set.
+
+    Unlike :func:`_parse_name_status_renames` — which keeps only ``R`` lines —
+    this retains **every** status code: ``A`` (added), ``M`` (modified),
+    ``D`` (deleted), and ``R`` (renamed). Copy (``C``) lines are treated like
+    renames (old->new). Paths are POSIX-normalised.
+
+    Args:
+        raw: Raw stdout from ``git diff --name-status -M``.
+
+    Returns:
+        A :class:`NameStatusChanges` with the four buckets populated.
+    """
+    changes = NameStatusChanges()
+    for line in raw.splitlines():
+        if not line:
+            continue
+        parts = line.split("\t")
+        status = parts[0]
+        code = status[0] if status else ""
+        if code == "A" and len(parts) >= 2:
+            changes.added.add(parts[1].replace("\\", "/"))
+        elif code == "M" and len(parts) >= 2:
+            changes.modified.add(parts[1].replace("\\", "/"))
+        elif code == "D" and len(parts) >= 2:
+            changes.deleted.add(parts[1].replace("\\", "/"))
+        elif code in ("R", "C") and len(parts) >= 3:
+            old_path, new_path = parts[1], parts[2]
+            changes.renamed[old_path.replace("\\", "/")] = new_path.replace("\\", "/")
+        # else: T (type change) / U (unmerged) / blank — ignore.
+    return changes
+
+
+def get_name_status_changes(
+    project_root: Path,
+    baseline_sha: str,
+    current_sha: str,
+) -> NameStatusChanges:
+    """Return the full A/M/D/R change set between two commits in one git call.
+
+    Runs ``git diff --name-status -M <baseline_sha>..<current_sha>`` exactly
+    once and classifies every changed path. This is the keystone primitive for
+    the net "changed since" diff: it is O(changed files), giving revert-cancel,
+    rename, delete, and add detection from a single invocation.
+
+    Args:
+        project_root: Repo root to run git in.
+        baseline_sha: The baseline commit (the "old" side of the diff).
+        current_sha: The current commit (the "new" side — typically the
+            index's last-built SHA).
+
+    Returns:
+        A :class:`NameStatusChanges`. Returns an empty change set when git is
+        unavailable or either SHA is unknown to git.
+    """
+    if not baseline_sha or not current_sha:
+        return NameStatusChanges()
+    raw = _run_git(
+        ["diff", "--name-status", "-M", f"{baseline_sha}..{current_sha}"],
+        project_root,
+    )
+    if raw is None:
+        return NameStatusChanges()
+    return _parse_name_status_changes(raw)
 
 
 def get_rename_pairs(project_root: Path, since_sha: str | None) -> dict[str, str]:

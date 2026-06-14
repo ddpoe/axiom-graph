@@ -1213,3 +1213,233 @@ def get_node_diff(
         "commit_author": commit_author,
         "commit_date": commit_date,
     }
+
+
+# ---------------------------------------------------------------------------
+# Net "changed since" diff (Option A) — true state-diff vs a baseline commit
+# ---------------------------------------------------------------------------
+
+# Map the four-field ``_derive_change_type`` verdicts to the public net kinds.
+_CHANGE_TYPE_TO_KIND = {
+    "CONTENT_ONLY": "content",
+    "DESC_ONLY": "desc",
+    "CONTENT_AND_DESC": "content+desc",
+}
+
+
+@dataclass
+class NetDiffResult:
+    """The net state-diff of the index's built state vs a baseline commit.
+
+    Attributes:
+        change_kinds: ``{node_id: [kind, ...]}`` for every node whose built
+            state differs from the baseline. Kinds: ``added``, ``content``,
+            ``desc``, ``content+desc``, ``renamed``. ``deleted`` is carried by
+            the endpoint's ghost-synthesis path, not here.
+        node_ids: Sorted list of the changed node ids (the keys of
+            ``change_kinds``).
+        baseline_sha: The baseline commit the diff was computed against.
+        git_calls: Number of git invocations made (instrumentation for the
+            O(changed files) acceptance criterion).
+    """
+
+    change_kinds: dict[str, list[str]] = field(default_factory=dict)
+    node_ids: list[str] = field(default_factory=list)
+    baseline_sha: str | None = None
+    git_calls: int = 0
+
+
+def compute_net_diff(
+    db_path: Path,
+    project_root: Path,
+    baseline_sha: str,
+    current_sha: str,
+) -> NetDiffResult:
+    """Compute the net state-diff of the built index vs *baseline_sha*.
+
+    Replaces the event-log replay in the "changed since" endpoint with a true
+    net diff, so an edit-then-revert cancels to zero and each changed node is
+    labelled by kind. Two stages, both O(changed files):
+
+    **Stage 1 — file membership.** One ``git diff --name-status -M`` call
+    (the keystone :func:`get_name_status_changes`) yields the full A/M/D/R set.
+    Modified + renamed (new-side) + added paths map to candidate nodes via
+    ``nodes.location``. Coarse-but-correct — over-includes by design.
+
+    **Stage 2 — per-node precision + kind.** For each candidate:
+
+    * If the node's path is in the keystone **A** (added) set, label it
+      ``added`` and skip the classifier (D-4): an added node's baseline blob is
+      empty-string, so ``_derive_change_type`` would mislabel it ``content``.
+    * Renamed nodes (path is a rename new-side) are labelled ``renamed``.
+    * Otherwise compare the **baseline-blob** ``(code_hash, desc_hash)``
+      (re-derived from ``git show <baseline_sha>:<old_path>`` via the same
+      hashing dispatch) against the **DB's stored** ``(code_hash, desc_hash)``
+      (the built state — D-2, *not* the on-disk file). Feed both to
+      :func:`_derive_change_type`; ``None`` drops the node (this is where
+      edit-then-revert cancels).
+
+    Args:
+        db_path: Path to the axiom-graph SQLite database.
+        project_root: Absolute path to the project root (git repo).
+        baseline_sha: The "old" side commit to diff against.
+        current_sha: The index's built SHA (the "new" side anchor). Used for
+            the single name-status call; the per-node current hashes come from
+            the DB, not this commit's blobs.
+
+    Returns:
+        A :class:`NetDiffResult`. Empty when either SHA is falsy.
+    """
+    from axiom_graph.index import git_utils  # noqa: PLC0415
+    from axiom_graph.scanners.node_hashing import node_hashes_for_blob  # noqa: PLC0415
+
+    result = NetDiffResult(baseline_sha=baseline_sha)
+    if not baseline_sha or not current_sha:
+        return result
+
+    # --- Stage 1: file membership (one git call) ---
+    changes = git_utils.get_name_status_changes(project_root, baseline_sha, current_sha)
+    result.git_calls += 1
+
+    # Reverse rename map: new_path -> old_path (baseline blob lives at old_path).
+    new_to_old: dict[str, str] = {new: old for old, new in changes.renamed.items()}
+    renamed_new_paths = set(changes.renamed.values())
+
+    # Paths whose nodes are candidates: modified in place, renamed (new side),
+    # or added. Deleted paths are handled by the endpoint's ghost path.
+    candidate_paths = changes.modified | renamed_new_paths | changes.added
+    if not candidate_paths:
+        return result
+
+    # Group the built nodes by their current (POSIX) location.
+    nodes_by_location: dict[str, list] = {}
+    for node in db.all_nodes(db_path):
+        loc = (node.location or "").replace("\\", "/")
+        if loc in candidate_paths:
+            nodes_by_location.setdefault(loc, []).append(node)
+
+    # --- Stage 2: per-node precision + kind ---
+    for path, nodes in nodes_by_location.items():
+        is_added = path in changes.added
+        is_renamed = path in renamed_new_paths
+
+        if is_added:
+            # D-4: the A set is the only clean add signal. Branch BEFORE the
+            # classifier — an added node's baseline blob is "" (not None), so
+            # the classifier would mislabel it `content`.
+            for node in nodes:
+                result.change_kinds.setdefault(node.id, []).append("added")
+            continue
+
+        if is_renamed:
+            # Renamed nodes are labelled `renamed` (not delete+add). The
+            # name-status -M call already detected the file rename.
+            for node in nodes:
+                result.change_kinds.setdefault(node.id, []).append("renamed")
+            continue
+
+        # Modified in place: hash the baseline blob and compare to STORED hashes.
+        old_path = new_to_old.get(path, path)
+        blob = git_utils.get_old_body(project_root, baseline_sha, old_path, None, None)
+        result.git_calls += 1
+        if blob is None:
+            # No clean baseline blob (e.g. config / envelope with no span, or
+            # an unreachable blob) — exclude from net membership.
+            continue
+        baseline_hashes = node_hashes_for_blob(blob, nodes, project_root, path)
+        # Also hash the CURRENT on-disk file through the same dispatch so we can
+        # tell a genuinely-new node (present now, absent at baseline) apart from
+        # a node the hashing dispatch legitimately skips (module composites,
+        # pass-through subtypes) — those must NOT be mislabelled `added`.
+        current_dispatch = node_hashes_for_blob(
+            (project_root / path).read_text(encoding="utf-8", errors="replace")
+            if (project_root / path).exists()
+            else blob,
+            nodes,
+            project_root,
+            path,
+        )
+        result.git_calls += 0  # local file read, not a git call
+        for node in nodes:
+            base = baseline_hashes.get(node.id)
+            if base is None:
+                # Node absent from the baseline blob. Only label `added` when
+                # the dispatch DOES produce a current hash for it (a real new
+                # node within a modified file). If the dispatch skips it too
+                # (module composite / pass-through), it has no own hash story —
+                # drop it (its constituent functions carry the signal).
+                if node.id in current_dispatch:
+                    result.change_kinds.setdefault(node.id, []).append("added")
+                continue
+            base_code, base_desc = base
+            change_type = db._derive_change_type(base_code, base_desc, node.code_hash or "", node.desc_hash)
+            kind = _CHANGE_TYPE_TO_KIND.get(change_type)
+            if kind is None:
+                # None -> unchanged (revert cancels here); INITIAL -> handled
+                # by the added branch above. Drop everything else.
+                continue
+            result.change_kinds.setdefault(node.id, []).append(kind)
+
+    result.node_ids = sorted(result.change_kinds.keys())
+    return result
+
+
+def recover_deleted_source(
+    project_root: Path,
+    location: str,
+    *,
+    preserved_sha: str | None,
+    preserved_level_3: str | None,
+    baseline_sha: str | None,
+) -> str | None:
+    """Recover the baseline source text of a deleted ghost node.
+
+    Deleted ghosts are purged from the index, so they cannot route through
+    :func:`get_node_diff` / ``get_node_source`` (both 404 on a missing node).
+    This reads the old source directly from git.
+
+    Two tiers (D-5):
+
+    * **Exact-span** — when the DELETED history row preserved a SHA and a
+      ``level_3_location`` span (ghosts deleted after this ships):
+      ``git show <preserved_sha>:<location>`` sliced to the preserved span.
+    * **Legacy whole-file fallback** — when span/SHA are absent (ghosts deleted
+      before this ships): ``git show <baseline_sha>:<location>`` whole file.
+
+    Never raises on a missing span/SHA; returns ``None`` only when the blob is
+    genuinely unreachable.
+
+    Args:
+        project_root: Absolute path to the project root (git repo).
+        location: Repo-relative path of the deleted node's file.
+        preserved_sha: SHA preserved in the DELETED meta, or ``None`` (legacy).
+        preserved_level_3: ``level_3_location`` span preserved in the DELETED
+            meta, or ``None`` (legacy).
+        baseline_sha: The net-diff's baseline commit, used for the legacy
+            whole-file fallback.
+
+    Returns:
+        The recovered baseline source text, or ``None`` if unreachable.
+    """
+    from axiom_graph.index import git_utils  # noqa: PLC0415
+
+    if not location:
+        return None
+
+    # Exact-span tier.
+    if preserved_sha and preserved_level_3:
+        _file, start, end = _parse_level3(preserved_level_3)
+        body = git_utils.get_old_body(project_root, preserved_sha, location, start, end)
+        if body is not None:
+            return body
+        # Fall through to whole-file if the exact-span blob is unreachable.
+
+    # Legacy whole-file fallback.
+    if baseline_sha:
+        return git_utils.get_old_body(project_root, baseline_sha, location, None, None)
+
+    # Last resort: try the preserved SHA whole-file if we have one.
+    if preserved_sha:
+        return git_utils.get_old_body(project_root, preserved_sha, location, None, None)
+
+    return None
