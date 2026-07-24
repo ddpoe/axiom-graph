@@ -104,19 +104,56 @@ class CheckSummary:
     doc_quality_count: int
     all_clean: bool
     statuses: dict[str, tuple[str, str, list[str]]]
-    # Count of docjson shadow rows whose four invariant fields disagree
-    # with the canonical doc_sections row (cycle pev-2026-05-15).
-    # Always 0 on a freshly-built DB.
-    invariant_violations: int = 0
-    invariant_violation_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
 class MarkCleanResult:
-    """Result of :func:`mark_clean_nodes`."""
+    """Result of :func:`mark_clean_nodes`.
+
+    ``inherited`` and ``mixed`` carry the aggregate-honesty
+    classification (empty for ordinary nodes — the happy-path shape is
+    unchanged):
+
+    - ``inherited``: node ID -> stale descendant IDs, for targets whose
+      LINKED_STALE is *inherited* from their ``composes`` subtree with
+      no own stale signal.  Marking them wrote a verification row but
+      has no direct effect — the next recompute re-derives the parent's
+      link_status from those descendants.
+    - ``mixed``: node ID -> stale descendant IDs, for targets that had
+      an own stale signal (genuinely cleared) AND stale descendants
+      (the inherited portion survives the recompute).
+    """
 
     marked: list[str]
     not_found: list[str]
+    inherited: dict[str, list[str]] = field(default_factory=dict)
+    mixed: dict[str, list[str]] = field(default_factory=dict)
+
+
+@dataclass
+class ReverifyResult:
+    """Result of :func:`reverify_node`.
+
+    - ``verified``: nodes that received verification rows in this call
+      (the source first, then cascade-cleared dependents with
+      reverify-of-source provenance).
+    - ``cleared``: nodes whose persisted LINKED_STALE cleared during
+      this operation (superset of the cascade set — includes aggregates
+      cleared purely by composite inheritance in the final recompute).
+    - ``skipped``: nodes attributed partly to the source but also stale
+      via other root offenders — left LINKED_STALE, mapped to the
+      blocking offender IDs.
+    - ``before_linked_stale`` / ``after_linked_stale``: persisted
+      LINKED_STALE counts at entry and after the recompute.
+    """
+
+    source_id: str
+    not_found: bool = False
+    verified: list[str] = field(default_factory=list)
+    cleared: list[str] = field(default_factory=list)
+    skipped: dict[str, list[str]] = field(default_factory=dict)
+    before_linked_stale: int = 0
+    after_linked_stale: int = 0
 
 
 @dataclass
@@ -411,9 +448,6 @@ def compute_check_summary(
 
     all_clean = all(own == VERIFIED and link == VERIFIED for own, link, _via in statuses.values())
 
-    # DocJSON shadow-row invariant scan (cycle pev-2026-05-15).
-    invariant_violation_ids = db.find_docjson_shadow_invariant_violations(db_path)
-
     return CheckSummary(
         own_counts=own_counts,
         link_counts=link_counts,
@@ -421,8 +455,6 @@ def compute_check_summary(
         doc_quality_count=doc_quality_count,
         all_clean=all_clean,
         statuses=statuses,
-        invariant_violations=len(invariant_violation_ids),
-        invariant_violation_ids=invariant_violation_ids,
     )
 
 
@@ -455,9 +487,50 @@ def mark_clean_nodes(
             ``"agent:claude-sonnet-4-6"``, ...).  Required keyword.
 
     Returns:
-        :class:`MarkCleanResult` with marked vs not_found IDs.
+        :class:`MarkCleanResult` with marked vs not_found IDs plus the
+        aggregate-honesty classification (``inherited`` / ``mixed``).
     """
     from axiom_graph.index.mark_clean import mark_node_clean
+    from axiom_graph.index.staleness import (
+        _composes_children_map,
+        _get_linked_stale_ids,
+        classify_inherited_link,
+    )
+
+    # Classify aggregate targets BEFORE marking: marking writes
+    # verified_at, which clears each target's own signal from the live
+    # stale map and would misclassify own-signal nodes as inherited-only.
+    # Ordinary (childless) targets skip the stale-map computation.
+    inherited: dict[str, list[str]] = {}
+    mixed: dict[str, list[str]] = {}
+    children_map = _composes_children_map(db_path)
+    if any(nid in children_map for nid in node_ids):
+        config = AxiomGraphConfig.load(root)
+        stale_map = _get_linked_stale_ids(
+            db_path,
+            transitive_tags=config.staleness.transitive_tags,
+            frozen_tags=config.staleness.frozen_tags,
+        )
+        batch = set(node_ids)
+        for nid in node_ids:
+            if nid not in children_map:
+                continue
+            # Other batch members with own signals are genuinely cleared
+            # by this very call — exclude them from the hint so the
+            # report only names descendants that will remain stale.
+            has_own, stale_desc = classify_inherited_link(
+                db_path,
+                nid,
+                stale_map,
+                children_map=children_map,
+                exclude=batch - {nid},
+            )
+            if not stale_desc:
+                continue
+            if has_own:
+                mixed[nid] = stale_desc
+            else:
+                inherited[nid] = stale_desc
 
     marked: list[str] = []
     not_found: list[str] = []
@@ -469,7 +542,125 @@ def mark_clean_nodes(
         mark_node_clean(db_path, root, node, reason, verified_by)
         marked.append(nid)
 
-    return MarkCleanResult(marked=marked, not_found=not_found)
+    # Classifications only apply to nodes that were actually marked.
+    for nid in not_found:
+        inherited.pop(nid, None)
+        mixed.pop(nid, None)
+
+    return MarkCleanResult(marked=marked, not_found=not_found, inherited=inherited, mixed=mixed)
+
+
+def reverify_node(
+    db_path: Path,
+    root: Path,
+    source_node_id: str,
+    reason: str,
+    *,
+    verified_by: str,
+) -> ReverifyResult:
+    """Verify *source_node_id* and clear the LINKED_STALE it caused.
+
+    One-operation scoped clear: asserts "I verified the source; my change
+    to it does not invalidate its dependents".  The flow:
+
+    1. Expand the source to its full ``composes`` subtree (composite
+       sources match staleness rooted at any of their parts).
+    2. Compute the live stale map with the same transitive/frozen tag
+       configuration as ``check``.
+    3. Resolve every stale entry's via chain to its leaf root offenders
+       (:func:`axiom_graph.index.staleness.resolve_root_offenders`).
+    4. Select nodes whose entire root set falls within the source set;
+       nodes also stale via *other* offenders are skipped and reported
+       (under-clearing is acceptable, over-clearing is not).
+    5. Clear via :func:`mark_clean_nodes` — verification rows remain the
+       only clearing mechanism; cascade rows carry
+       ``[reverify:<source>]`` provenance in reason/history.
+    6. Finish with the shared staleness recompute (the same single-writer
+       path ``check`` uses), so aggregates cleared by composite
+       inheritance are visible in this call's own report.
+
+    The source itself is always marked verified — it is the explicit,
+    named target of the operation — even when there is nothing to clear
+    (idempotent "nothing to clear" reports are success, not errors).
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+        root: Project root directory.
+        source_node_id: The node the caller verified (any node type).
+        reason: Free-form reason recorded in history/verification rows.
+        verified_by: Verifier identifier (``"human"``, ``"agent"``, ...).
+            Required keyword.
+
+    Returns:
+        :class:`ReverifyResult` with verified/cleared/skipped node IDs
+        and before/after LINKED_STALE counts.
+    """
+    from axiom_graph.index.staleness import (
+        _get_linked_stale_ids,
+        expand_composes_subtree,
+        resolve_root_offenders,
+    )
+
+    node = db.get_node(db_path, source_node_id)
+    if node is None:
+        return ReverifyResult(source_id=source_node_id, not_found=True)
+
+    # Persisted LINKED_STALE surface at entry (the "before" set).
+    persisted = db.get_all_staleness(db_path)
+    before_ids = {nid for nid, (_own, link) in persisted.items() if link == LINKED_STALE}
+
+    # Live stale map with check-parity configuration.
+    config = AxiomGraphConfig.load(root)
+    stale_map = _get_linked_stale_ids(
+        db_path,
+        transitive_tags=config.staleness.transitive_tags,
+        frozen_tags=config.staleness.frozen_tags,
+    )
+
+    # Attribution: which stale nodes root entirely at the source?
+    source_set = {source_node_id} | expand_composes_subtree(db_path, source_node_id)
+    roots_map = resolve_root_offenders(stale_map)
+
+    selected: list[str] = []
+    skipped: dict[str, list[str]] = {}
+    for nid, roots in sorted(roots_map.items()):
+        if nid == source_node_id:
+            # The source is verified below regardless of its own staleness.
+            continue
+        root_set = set(roots)
+        if not root_set or not (root_set & source_set):
+            # Unattributable (empty root set) or rooted entirely at other
+            # offenders — untouched, conservatively.
+            continue
+        if root_set <= source_set:
+            selected.append(nid)
+        else:
+            skipped[nid] = sorted(root_set - source_set)
+
+    # ADR boundary: verification rows via the mark_clean machinery remain
+    # the ONLY clearing mechanism.  Source first (plain reason), then the
+    # cascade set with reverify-of-source provenance.
+    mark_clean_nodes(db_path, root, [source_node_id], reason, verified_by=verified_by)
+    if selected:
+        cascade_reason = f"[reverify:{source_node_id}] {reason}" if reason else f"[reverify:{source_node_id}]"
+        mark_clean_nodes(db_path, root, selected, cascade_reason, verified_by=verified_by)
+
+    # Shared recompute — same single-writer record_staleness path check
+    # uses.  include_frozen=True keeps sticky frozen sections in the
+    # after-surface so they never spuriously appear "cleared".
+    cs = compute_check_summary(db_path, root, include_frozen=True)
+    after_ids: set[str] = set()
+    if cs is not None:
+        after_ids = {nid for nid, (_own, link, _via) in cs.statuses.items() if link == LINKED_STALE}
+
+    return ReverifyResult(
+        source_id=source_node_id,
+        verified=[source_node_id, *selected],
+        cleared=sorted(before_ids - after_ids),
+        skipped=skipped,
+        before_linked_stale=len(before_ids),
+        after_linked_stale=len(after_ids),
+    )
 
 
 # ---------------------------------------------------------------------------

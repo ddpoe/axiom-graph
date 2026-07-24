@@ -268,6 +268,17 @@ def scan_module(
         purpose="Recursively extract function/method nodes at all nesting levels; emit composes, depends_on, and validates edges via AST call graph",
         outputs="Function nodes and edges appended, external package stubs created",
     )
+    # local_func_ids: bare name → node id for module-level functions, so an
+    # AutoStep that delegates to a function defined in the *same file* (not just
+    # an imported one) resolves to a delegates_to edge.  Built as a whole-module
+    # pre-pass over top-level defs so forward references resolve too — a workflow
+    # may delegate to a function defined later in the file.
+    local_func_ids: dict[str, str] = {
+        child.name: f"{module_id}::{child.name}"
+        for child in ast.iter_child_nodes(tree)
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
     # -----------------------------------------------------------------------
     # Function nodes (all nesting levels)
     # -----------------------------------------------------------------------
@@ -284,6 +295,7 @@ def scan_module(
         name_prefix="",
         top_level=True,
         name_map=name_map,
+        local_func_ids=local_func_ids,
         findings_out=findings_out,
         autosteps_out=autosteps_out,
         is_rule_enabled=is_rule_enabled,
@@ -325,6 +337,7 @@ def _collect_functions(
     name_prefix: str,
     top_level: bool,
     name_map: dict[str, tuple[str, str | None]] | None = None,
+    local_func_ids: dict[str, str] | None = None,
     findings_out: list | None = None,
     autosteps_out: list | None = None,
     is_rule_enabled=None,
@@ -410,6 +423,7 @@ def _collect_functions(
                 rel_path=rel_path,
                 project_id=project_id,
                 name_map=name_map,
+                local_func_ids=local_func_ids,
                 findings_out=findings_out,
                 autosteps_out=autosteps_out,
                 envelope_kind=dflow_dec.get("decorator", "workflow") if dflow_dec else "workflow",
@@ -478,6 +492,7 @@ def _collect_functions(
             name_prefix=f"{qualified_name}.",
             top_level=False,
             name_map=name_map,
+            local_func_ids=local_func_ids,
         )
 
     # Also descend into class bodies so methods are discovered
@@ -496,6 +511,7 @@ def _collect_functions(
                 name_prefix=f"{child.name}.",
                 top_level=False,
                 name_map=name_map,
+                local_func_ids=local_func_ids,
             )
 
 
@@ -612,6 +628,7 @@ def _extract_step_nodes(
     rel_path: str,
     project_id: str,
     name_map: dict[str, tuple[str, str | None]] | None = None,
+    local_func_ids: dict[str, str] | None = None,
     findings_out: list | None = None,
     autosteps_out: list | None = None,
     envelope_kind: str = "workflow",
@@ -624,8 +641,9 @@ def _extract_step_nodes(
     Produces ``atomic_process`` nodes with subtype ``step`` or ``autostep``
     for every ``Step(...)`` / ``AutoStep(...)`` call inside ``func_node``,
     plus a ``composes`` edge from the envelope to each step.  For AutoSteps
-    whose next statement is a direct call to a name in ``name_map`` (i.e.
-    an intra-project function), a ``delegates_to`` edge is emitted from the
+    whose next statement is a direct call to an intra-project function —
+    either an imported name (``name_map``) or a function defined in the same
+    module (``local_func_ids``) — a ``delegates_to`` edge is emitted from the
     autostep to the target function node.
 
     Step nodes carry NO staleness dimensions (empty code_hash sentinel,
@@ -640,6 +658,9 @@ def _extract_step_nodes(
         project_id: Project namespace prefix.
         name_map: Scanner name_map for intra-project call resolution.  Each
             value is ``(module_node_id, original_name_or_None)``.
+        local_func_ids: ``{func_name: node_id}`` for functions defined in the
+            same module, so an AutoStep delegating to a same-file function
+            resolves (not only imported ones).
 
     Returns:
         Tuple of (step_nodes, edges).  Never raises; on malformed
@@ -751,7 +772,7 @@ def _extract_step_nodes(
                     elif isinstance(_fn, ast.Attribute):
                         target_name = _fn.attr
                 if name_map is not None:
-                    target_id = _resolve_next_call_target(nxt, name_map)
+                    target_id = _resolve_next_call_target(nxt, name_map, local_func_ids)
                     if target_id:
                         step_edges.append(make_edge("delegates_to", step_id, target_id))
 
@@ -909,12 +930,17 @@ def _step_num_from_call(call: ast.Call) -> tuple[str | None, list[int]]:
 def _resolve_next_call_target(
     stmt: ast.stmt,
     name_map: dict[str, tuple[str, str | None]],
+    local_func_ids: dict[str, str] | None = None,
 ) -> str | None:
     """Given the statement AFTER an AutoStep, find the node ID of the called function.
 
     Handles ``x = foo(...)``, ``foo(...)``, and ``x = obj.method(...)``
     (qualified). Returns the axiom-graph node ID of the intra-project target,
     or None if no call or the target is unresolved.
+
+    A bare name is resolved against ``name_map`` (imports) first, then
+    ``local_func_ids`` (functions defined in the same module), so an AutoStep
+    delegating to a same-file function resolves as well as an imported one.
     """
     call: ast.Call | None = None
     if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call):
@@ -933,6 +959,7 @@ def _resolve_next_call_target(
         target_id, _ = resolve_call_target_via_name_map(
             {"kind": "name", "name": func_ref.id},
             name_map,
+            local_func_ids=local_func_ids,
         )
         return target_id
     if isinstance(func_ref, ast.Attribute):

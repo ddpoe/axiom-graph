@@ -1,4 +1,4 @@
-<!-- generated from axiom_graph::docs.consumer.concepts.staleness @ 2c4153b28327; do not edit -->
+<!-- generated from axiom_graph::docs.consumer.concepts.staleness @ 82e61794978c; do not edit -->
 
 # Staleness: the engine that keeps the mesh trustworthy
 
@@ -171,9 +171,11 @@ To enumerate, filter, group, or paginate the drift inventory, use the `axiom_gra
 Resolving each status:
 
 - **`CONTENT_UPDATED` / `DESC_UPDATED` / `RENAMED`:** review the code, fix the doc if it is wrong, then `mark-clean` the node with a reason. The next check sees matching hashes and promotes it to `VERIFIED`.
-- **`LINKED_STALE`:** follow the `via` breadcrumb, read what changed, update the prose if needed, then verify *the section itself* (the upstream code being clean does not clear it; LINKED_STALE is sticky, as covered above).
+- **`LINKED_STALE`:** follow the `via` breadcrumb, read what changed, update the prose if needed, then verify *the section itself* (the upstream code being clean does not clear it; LINKED_STALE is sticky, as covered above). After a single trivial edit, `axiom_graph_reverify(source)` does this in one operation — verifies the source and clears every LINKED_STALE rooted at it (expanding composite parents, skipping anything also stale via another offender) instead of hand-enumerating dependents.
 - **`NOT_FOUND`:** the target is gone with no detected rename. Update the doc to the new location, remove the stale reference, or apply a manual rename if it really moved.
 - **`BROKEN_LINK`:** an edge points at a node ID that no longer exists. Remove the dangling link, then re-link to the correct target.
+
+Marking a composite node (a doc envelope, a section with children) clean has no direct effect when its `LINKED_STALE` is entirely inherited from stale descendants — `mark_clean` reports this explicitly, naming the stale descendants, instead of a silent no-op success.
 
 For the full command reference, see [use the CLI](../get-started/use-the-cli.md). The everyday loop is: write code, `build`, `check`, review what flagged, fix what is wrong, `mark-clean` what is still right, repeat. Drift becomes visible the moment it happens, not months later when someone trips over it.
 

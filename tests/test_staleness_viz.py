@@ -12,6 +12,8 @@ Covers:
 
 from __future__ import annotations
 
+from tests.conftest import seed_section_tuple
+
 import time
 from pathlib import Path
 
@@ -308,11 +310,7 @@ def test_linked_stale_doc_section_when_code_changes(project: Path):
             "INSERT OR REPLACE INTO docs (id, title, file_path, desc_hash, updated_at) VALUES (?, ?, ?, ?, ?)",
             ("proj::docs.arch", "Architecture", "docs/arch.json", "x", section_updated_at),
         )
-        conn.execute(
-            "INSERT OR REPLACE INTO doc_sections (id, doc_id, heading, level, position, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            ("proj::docs.arch::overview", "proj::docs.arch", "Overview", 2, 0, section_updated_at),
-        )
+        seed_section_tuple(conn, ("proj::docs.arch::overview", "proj::docs.arch", "Overview", 2, 0, section_updated_at))
 
     time.sleep(0.02)
 
@@ -377,11 +375,7 @@ def test_primary_stale_takes_precedence_over_linked(project: Path):
             "INSERT OR REPLACE INTO docs (id, title, file_path, desc_hash, updated_at) VALUES (?, ?, ?, ?, ?)",
             ("proj::docs.arch", "Architecture", "src/mod.py", "x", section_updated_at),
         )
-        conn.execute(
-            "INSERT OR REPLACE INTO doc_sections (id, doc_id, heading, level, position, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            ("proj::docs.arch::overview", "proj::docs.arch", "Overview", 2, 0, section_updated_at),
-        )
+        seed_section_tuple(conn, ("proj::docs.arch::overview", "proj::docs.arch", "Overview", 2, 0, section_updated_at))
 
     time.sleep(0.02)
 

@@ -11,6 +11,8 @@ Covers:
 
 from __future__ import annotations
 
+from tests.conftest import seed_section_row
+
 import hashlib
 from unittest.mock import patch
 
@@ -391,7 +393,7 @@ class TestDocSectionFTS:
                     "updated_at": "2026-01-01T00:00:00",
                 },
             )
-            db.upsert_doc_section(
+            seed_section_row(
                 conn,
                 {
                     "id": "test::docs.guide::overview",
@@ -438,7 +440,7 @@ class TestDocSectionFTS:
                     "updated_at": "2026-01-01T00:00:00",
                 },
             )
-            db.upsert_doc_section(
+            seed_section_row(
                 conn,
                 {
                     "id": "test::docs.guide::staleness",
@@ -523,7 +525,7 @@ class TestSearchParameters:
                     "updated_at": "2026-01-01T00:00:00",
                 },
             )
-            db.upsert_doc_section(
+            seed_section_row(
                 conn,
                 {
                     "id": "test::docs.guide::staleness",

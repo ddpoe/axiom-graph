@@ -268,8 +268,6 @@ def save_and_reindex(
     with db._connect(db_path) as conn:
         for rec in doc_recs:
             db.upsert_doc(conn, rec)
-        for rec in sec_recs:
-            db.upsert_doc_section(conn, rec)
 
     # ------------------------------------------------------------------
     # Auto-mark pass: for each freshly-scanned node, if it pre-existed AND
@@ -302,9 +300,11 @@ def _cleanup_old_section_rows(
     root: Path,
     project_id: str,
 ) -> None:
-    """Remove old doc_section and node rows for a doc before re-indexing.
+    """Remove old section node rows for a doc before re-indexing.
 
     This ensures that renamed sections don't leave orphan rows in the DB.
+    Sections are ``nodes`` rows (ADR-021) — there is no separate section
+    table to clean.
 
     Args:
         db_path: Path to the axiom-graph SQLite DB.
@@ -320,12 +320,6 @@ def _cleanup_old_section_rows(
             (f"{doc_node_id}::%", doc_node_id),
         ).fetchall()
         section_ids = [r["id"] for r in section_rows]
-
-        # Delete all section rows for this doc
-        conn.execute(
-            "DELETE FROM doc_sections WHERE doc_id = ?",
-            (doc_node_id,),
-        )
 
         if section_ids:
             ph = ",".join("?" * len(section_ids))
@@ -350,11 +344,12 @@ def _cleanup_old_section_rows(
 # ---------------------------------------------------------------------------
 
 
-def axiom_graph_write_doc(project_root: str, doc_json: str | dict) -> str:
+def axiom_graph_write_doc(project_root: str, doc_json: str | dict, docs_root: str | None = None) -> str:
     """Write a DocJSON documentation file and register it in the index.
 
     Accepts a JSON string or dict describing a documentation document.  The
-    file is written under the project's primary docs directory and
+    file is written under the project's primary docs directory — or under
+    ``docs_root`` when a different configured root is requested — and
     immediately indexed.
 
     **Important:** the ``id`` key (if present) is treated as a *path-slug
@@ -379,6 +374,10 @@ def axiom_graph_write_doc(project_root: str, doc_json: str | dict) -> str:
             ``adrs/016-my-adr``) and stripped before writing.  Each section
             needs ``id``, ``heading`` and optionally ``content``, ``links``
             (list of ``{node_id: ...}``), ``tags``, and nested ``sections``.
+        docs_root: Which configured documentation root to write under.  Must
+            match an entry of ``[axiom_graph.scan].docs_dirs`` (compared as
+            POSIX paths); an unknown value is an error listing the valid
+            roots.  Defaults to the first entry — the primary root.
 
     Returns:
         Summary: sections written, links registered, and any unknown node_ids.
@@ -451,17 +450,27 @@ def axiom_graph_write_doc(project_root: str, doc_json: str | dict) -> str:
     # Strip top-level "id" -- canonical identity is derived from file path
     data.pop("id", None)
 
-    # Resolve docs_dir + out_file. Primary docs root = config.scan.docs_dirs[0]
-    # (honors absolute paths).  out_file may already exist (write_doc supports
-    # overwrite semantics) or may be a brand-new file.  Either way,
-    # save_and_reindex handles both branches uniformly: pre-state hash
-    # snapshot is empty for new files; auto-mark candidate set is empty for
-    # first-creation, non-empty when overwriting an existing doc with
-    # changed bytes.
+    # Resolve docs_dir + out_file.  The target root defaults to
+    # config.scan.docs_dirs[0] (the primary) and may be redirected to any
+    # other configured root via ``docs_root`` (honors absolute paths).
+    # out_file may already exist (write_doc supports overwrite semantics) or
+    # may be a brand-new file.  Either way, save_and_reindex handles both
+    # branches uniformly: pre-state hash snapshot is empty for new files;
+    # auto-mark candidate set is empty for first-creation, non-empty when
+    # overwriting an existing doc with changed bytes.
     _cfg = AxiomGraphConfig.load(root)
-    _primary = (_cfg.scan.docs_dirs or ["docs"])[0]
-    _primary_path = Path(_primary)
-    docs_dir = _primary_path if _primary_path.is_absolute() else (root / _primary_path)
+    _roots = _cfg.scan.docs_dirs or ["docs"]
+    if docs_root is None:
+        _selected = _roots[0]
+    else:
+        # Compare as POSIX paths so ".pev", "./.pev" and ".pev/" all match
+        # the configured entry.  Rejected before anything touches disk.
+        _want = Path(docs_root.replace("\\", "/")).as_posix()
+        _selected = next((r for r in _roots if Path(r.replace("\\", "/")).as_posix() == _want), None)
+        if _selected is None:
+            return f"ERROR: unknown docs_root {docs_root!r}. Configured docs_dirs: {', '.join(_roots)}"
+    _selected_path = Path(_selected)
+    docs_dir = _selected_path if _selected_path.is_absolute() else (root / _selected_path)
     out_file = docs_dir / f"{raw_slug}.json"
     out_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -568,7 +577,12 @@ def axiom_graph_read_doc(
         docs = db.list_docs(path)
         if not docs:
             return "(no docs indexed)"
-        return "\n".join(f"{d['id']}  {d['title']}" for d in docs)
+        # Doc ids flatten every configured docs_dirs root into the same
+        # ``docs.`` namespace — the file path is what distinguishes a doc in
+        # a secondary root from one in the primary root.
+        return "\n".join(
+            f"{d['id']}  {d['title']}" + (f"  [{d['file_path']}]" if d.get("file_path") else "") for d in docs
+        )
 
     # Verify doc exists
     doc_node = db.get_node(path, doc_id)

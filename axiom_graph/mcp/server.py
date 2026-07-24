@@ -131,6 +131,7 @@ from axiom_graph.lifecycle.mcp_tools import (  # noqa: E402
     axiom_graph_report as _impl_report,
     axiom_graph_diff as _impl_diff,
     axiom_graph_mark_clean as _impl_mark_clean,
+    axiom_graph_reverify as _impl_reverify,
     axiom_graph_purge_node as _impl_purge_node,
     axiom_graph_apply_rename as _impl_apply_rename,
     axiom_graph_revert_rename as _impl_revert_rename,
@@ -271,13 +272,14 @@ def axiom_graph_list_undocumented(
 
 @mcp.tool()
 @_timed_tool
-def axiom_graph_write_doc(project_root: str, doc_json: str | dict) -> str:
+def axiom_graph_write_doc(project_root: str, doc_json: str | dict, docs_root: str | None = None) -> str:
     """Write a DocJSON documentation file and register it in the index.
 
     Accepts a JSON string or dict describing a documentation document.  The
     file is written under the project's primary docs directory (the first
     entry of ``[axiom_graph.scan].docs_dirs`` in ``axiom-graph.toml``,
-    falling back to ``docs/``) and immediately indexed.
+    falling back to ``docs/``) and immediately indexed.  Pass ``docs_root``
+    to author into a different configured root instead.
 
     **The 'id' field is a path-slug filename hint, NOT the canonical node id.**
     The canonical node id is derived later by the indexer from the file's
@@ -295,12 +297,18 @@ def axiom_graph_write_doc(project_root: str, doc_json: str | dict) -> str:
         project_root: Absolute path to the indexed project.
         doc_json: JSON string or dict with keys: ``title``, ``sections``
             (required) and optionally ``tags``.
+        docs_root: Which configured documentation root to write under — must
+            match an entry of ``[axiom_graph.scan].docs_dirs`` (e.g.
+            ``".pev"``).  Defaults to the primary root.  Note that doc ids
+            are unaffected: every root flattens into the same ``docs.``
+            namespace, so ``.pev/test-policy.json`` is
+            ``{project_id}::docs.test-policy``.
 
     Returns:
         Summary: sections written, links registered, and any unknown node_ids.
         Or an ``ERROR: ...`` string when validation fails.
     """
-    return _impl_write_doc(project_root, doc_json)
+    return _impl_write_doc(project_root, doc_json, docs_root)
 
 
 @mcp.tool()
@@ -471,7 +479,7 @@ def axiom_graph_delete_section(project_root: str, section_id: str) -> str:
     """Delete a section (and all nested children) from a DocJSON document.
 
     This is a destructive operation. The section is removed from the JSON
-    file on disk, and all corresponding DB rows (nodes, edges, doc_sections)
+    file on disk, and all corresponding DB rows (section nodes, edges)
     are cleaned up.
 
     Args:
@@ -786,6 +794,35 @@ def axiom_graph_mark_clean(
         node_ids: Optional list of node IDs for batch operation.
     """
     return _impl_mark_clean(project_root, node_id, reason, verified_by, node_ids)
+
+
+@mcp.tool()
+@_timed_tool
+def axiom_graph_reverify(
+    project_root: str,
+    node_id: str,
+    reason: str,
+    verified_by: str = "agent",
+) -> str:
+    """Verify a node and clear the LINKED_STALE it caused, in one operation.
+
+    Assertion semantics: "I verified this node; my change to it does not
+    invalidate its dependents."  Expands composite sources to their subtree,
+    resolves transitive doc-to-doc chains back to their root offender, clears
+    the attributed dependents via the mark_clean machinery (with
+    ``[reverify:<source>]`` provenance), and finishes with a staleness
+    recompute plus a before/after report.
+
+    Skip rule: dependents that are also stale via *other* root offenders are
+    conservatively left LINKED_STALE and reported as skipped.
+
+    Args:
+        project_root: Absolute path to the indexed project.
+        node_id: The node you verified (the staleness root).
+        reason: Brief explanation of why dependents remain accurate.
+        verified_by: Identifier for the verifier. Defaults to ``'agent'``.
+    """
+    return _impl_reverify(project_root, node_id, reason, verified_by)
 
 
 @mcp.tool()

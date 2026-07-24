@@ -1,7 +1,7 @@
 // =============================================================================
 // app.ts -- Main controller: state, init, orchestration, event wiring
 // =============================================================================
-import { displayStaleness } from './types.js';
+import { displayStaleness, isDocSubtype } from './types.js';
 import { esc, escHtml, apiFetch } from './view-utils.js';
 import * as Graph from './graph.js';
 import * as Detail from './detail.js';
@@ -653,7 +653,7 @@ function _renderStalenessSummary(stalenessMap) {
 }
 function _nodeCategory(node) {
     const st = node.subtype || '';
-    if (st === 'docjson')
+    if (isDocSubtype(st))
         return 'doc';
     if (st === 'test')
         return 'test';
@@ -698,6 +698,8 @@ const SUBTYPE_LABELS = {
     'function': 'Function',
     'test': 'Test',
     'docjson': 'Doc',
+    'docjson_doc': 'Doc',
+    'docjson_section': 'Doc Section',
     'external_package': 'External',
     'module': 'Module',
 };
@@ -1164,6 +1166,42 @@ function _loadFullGraph() {
     Graph.loadAll(state.filteredNodes, state.allEdges, state.stalenessMap, state.layout, state.stepEdgeLabels);
     setView('graph');
 }
+/** Client-side keyword filter over the already-loaded node set.
+ *
+ *  Every node (name + body text) arrives in the browser via `/api/all`, so a
+ *  keyword query is answered locally with a case-insensitive *substring* match
+ *  rather than a round-trip to the server's whole-token, ranked, top-50 FTS
+ *  endpoint. Substring matching is what lets a partial name like `env` find
+ *  `store_env_content` \u2014 which whole-token FTS ranks too far down to ever show.
+ *
+ *  A node matches if the needle appears in its name (`title` / `id` / `level_1`)
+ *  or its body text (`level_2`). Name matches are returned ahead of body-only
+ *  matches, and within name matches the needle's position in the title breaks
+ *  ties (so a bare `env` floats above `\u2026environment\u2026`). No cap: all matches are
+ *  returned and the caller's tag/test filters narrow further.
+ */
+function _keywordFilter(nodes, query) {
+    const needle = query.toLowerCase();
+    const nameHits = [];
+    const bodyHits = [];
+    for (const n of nodes) {
+        const name = `${n.title || ''} ${n.id || ''} ${n.level_1 || ''}`.toLowerCase();
+        if (name.includes(needle))
+            nameHits.push(n);
+        else if ((n.level_2 || '').toLowerCase().includes(needle))
+            bodyHits.push(n);
+    }
+    nameHits.sort((a, b) => {
+        const ai = (a.title || '').toLowerCase().indexOf(needle);
+        const bi = (b.title || '').toLowerCase().indexOf(needle);
+        const ar = ai === -1 ? Number.MAX_SAFE_INTEGER : ai;
+        const br = bi === -1 ? Number.MAX_SAFE_INTEGER : bi;
+        if (ar !== br)
+            return ar - br;
+        return (a.title || '').length - (b.title || '').length;
+    });
+    return [...nameHits, ...bodyHits];
+}
 async function onSearch(query) {
     const q = query.trim();
     state.searchQuery = q;
@@ -1175,6 +1213,19 @@ async function onSearch(query) {
         else if (Graph.getCy())
             Graph.clearHighlights();
         setStatus(`${state.meta ? state.meta.node_count : '?'} nodes \u00b7 ${state.meta ? state.meta.edge_count : '?'} edges`);
+        return;
+    }
+    // Keyword search is answered entirely in the browser against `state.allNodes`
+    // (substring, uncapped, instant). Only semantic search needs the server, where
+    // the embeddings live.
+    if (state.searchMode === 'keyword') {
+        state.searchResultNodes = _keywordFilter(state.allNodes, q);
+        _applyFilters();
+        if (state.view !== 'list')
+            setView('list');
+        List.render(state.filteredNodes, state.stalenessMap);
+        const shown = state.filteredNodes.length;
+        setStatus(`${shown} result${shown === 1 ? '' : 's'} (keyword)`);
         return;
     }
     try {

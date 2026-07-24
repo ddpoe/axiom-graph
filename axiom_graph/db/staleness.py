@@ -140,19 +140,20 @@ def get_stale_doc_sections(db_path: Path) -> list[dict]:
     Each dict has: section_id, doc_id, heading, code_node_id,
     code_changed_at, section_updated_at.
     """
+    from axiom_graph.db.docs import _section_filter_sql, split_section_id  # noqa: PLC0415
+
     with _connect(db_path) as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 s.id          AS section_id,
-                s.doc_id,
-                s.heading,
+                s.level_1     AS heading,
                 e.to_id       AS code_node_id,
                 nh.scanned_at AS code_changed_at,
                 s.updated_at  AS section_updated_at
-            FROM doc_sections s
+            FROM nodes s
             JOIN edges e          ON e.from_id = s.id AND e.edge_type = 'documents'
-            JOIN nodes code_n     ON code_n.id = e.to_id AND NOT (code_n.node_type = 'atomic_process' AND COALESCE(code_n.subtype, '') = 'docjson')
+            JOIN nodes code_n     ON code_n.id = e.to_id AND NOT (code_n.node_type = 'atomic_process' AND COALESCE(code_n.subtype, '') IN ('docjson', 'docjson_section'))
             JOIN node_history nh  ON nh.node_id = e.to_id
                                  AND nh.change_type IN ('CONTENT_ONLY', 'CONTENT_AND_DESC', 'BECAME_CONTENT_UPDATED')
                                  AND nh.id = (
@@ -160,9 +161,15 @@ def get_stale_doc_sections(db_path: Path) -> list[dict]:
                                        WHERE h2.node_id = e.to_id
                                          AND h2.change_type IN ('CONTENT_ONLY', 'CONTENT_AND_DESC', 'BECAME_CONTENT_UPDATED')
                                      )
+            WHERE {_section_filter_sql("s.")}
             """
         ).fetchall()
-        return [dict(r) for r in rows]
+        out: list[dict] = []
+        for r in rows:
+            d = dict(r)
+            d["doc_id"] = split_section_id(d["section_id"])[0]
+            out.append(d)
+        return out
 
 
 @task(
@@ -340,7 +347,7 @@ def get_stale_tests(db_path: Path) -> list[dict]:
                 t.updated_at  AS test_updated_at
             FROM nodes t
             JOIN edges e         ON e.from_id = t.id AND e.edge_type = 'validates'
-            JOIN nodes code_n    ON code_n.id = e.to_id AND NOT (code_n.node_type = 'atomic_process' AND COALESCE(code_n.subtype, '') = 'docjson')
+            JOIN nodes code_n    ON code_n.id = e.to_id AND NOT (code_n.node_type = 'atomic_process' AND COALESCE(code_n.subtype, '') IN ('docjson', 'docjson_section'))
             JOIN node_history nh ON nh.node_id = e.to_id
                                 AND nh.change_type IN ('CONTENT_ONLY', 'CONTENT_AND_DESC', 'BECAME_CONTENT_UPDATED')
                                 AND nh.id = (
@@ -362,7 +369,8 @@ def get_stale_tests(db_path: Path) -> list[dict]:
 
 
 # DOC_SECTION_LONG advisory token (referenced by filter vocab; the
-# underlying data lives in doc_sections.content via get_long_sections).
+# underlying data lives in section nodes' level_2 content via
+# get_long_sections).
 DOC_SECTION_LONG = "DOC_SECTION_LONG"
 
 
@@ -559,15 +567,16 @@ def query_drift_rows(
         # Build status filter clause.
         clauses = []
         params: list = []
-        # Doc-quality clause (DOC_SECTION_LONG advisory: subtype='docjson'
-        # rows whose level_2 -- the shadow of doc_sections.content --
-        # exceeds DOC_SECTION_LONG_THRESHOLD).  OR-unions with the
+        # Doc-quality clause (DOC_SECTION_LONG advisory:
+        # subtype='docjson_section' node rows whose level_2 -- the
+        # canonical section content -- exceeds
+        # DOC_SECTION_LONG_THRESHOLD).  OR-unions with the
         # status clauses when filter='all'.
         doc_quality_clause: str | None = None
         if show_doc_quality:
             from axiom_graph.db.docs import DOC_SECTION_LONG_THRESHOLD  # noqa: PLC0415
 
-            doc_quality_clause = "(subtype = 'docjson' AND LENGTH(level_2) > ?)"
+            doc_quality_clause = "(subtype = 'docjson_section' AND LENGTH(level_2) > ?)"
         # Own/link union.
         if show_own and show_link:
             status_clause = "(own_status IN ({}) OR link_status IN ({}))".format(
@@ -678,7 +687,7 @@ def _filtered_rows_for_grouping(
         if show_doc_quality:
             from axiom_graph.db.docs import DOC_SECTION_LONG_THRESHOLD  # noqa: PLC0415
 
-            doc_quality_clause = "(subtype = 'docjson' AND LENGTH(level_2) > ?)"
+            doc_quality_clause = "(subtype = 'docjson_section' AND LENGTH(level_2) > ?)"
         if show_own and show_link:
             status_clause = "(own_status IN ({}) OR link_status IN ({}))".format(
                 ",".join("?" * len(show_own)),
@@ -813,12 +822,14 @@ def _build_feature_index(db_path: Path) -> dict[str, str]:
             "SELECT from_id AS section_id, to_id AS code_id FROM edges WHERE edge_type = 'documents'"
         ).fetchall()
         # All sections (for the doc_id lookup + hop-count walk).
-        sec_rows = conn.execute("SELECT id AS section_id, doc_id FROM doc_sections").fetchall()
+        from axiom_graph.db.docs import _SECTION_FILTER_SQL, split_section_id  # noqa: PLC0415
+
+        sec_rows = conn.execute(f"SELECT id AS section_id FROM nodes WHERE {_SECTION_FILTER_SQL}").fetchall()
         # All docs (for the id-suffix walk to docs.features.X).
         doc_rows = conn.execute("SELECT id FROM docs").fetchall()
 
-    # Map section_id -> doc_id.
-    sec_to_doc: dict[str, str] = {r["section_id"]: r["doc_id"] for r in sec_rows}
+    # Map section_id -> doc_id (derived from the section ID's dot-path).
+    sec_to_doc: dict[str, str] = {r["section_id"]: split_section_id(r["section_id"])[0] for r in sec_rows}
 
     # For each doc, walk its node-id (which is project_id::dotted.path)
     # backwards looking for the 'features' segment, and pick the X
@@ -847,13 +858,11 @@ def _build_feature_index(db_path: Path) -> dict[str, str]:
 
     # Hop-count proxy: depth of the section's parent path within the doc.
     # We don't have an explicit hop count from section to docs.features.X,
-    # but doc_sections.depth gives the section's nesting depth.  For
+    # but the section ID's dot-path encodes its nesting depth.  For
     # tie-breaking we use this depth as a coarse proxy: deeper section
     # implies the feature ancestor is closer to the section in the doc
-    # tree.  Pull section depths.
-    with _connect(db_path) as conn:
-        depth_rows = conn.execute("SELECT id, depth FROM doc_sections").fetchall()
-    sec_to_depth: dict[str, int] = {r["id"]: (r["depth"] or 0) for r in depth_rows}
+    # tree.
+    sec_to_depth: dict[str, int] = {sid: sid.rsplit("::", 1)[-1].count(".") for sid in sec_to_doc}
 
     # For each code node, collect all (feature_label, depth) candidates
     # from inbound documents edges, then pick the winner.

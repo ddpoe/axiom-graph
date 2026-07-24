@@ -1,4 +1,4 @@
-<!-- generated from axiom_graph::docs.consumer.get-started.connect-your-agent @ 168300d7c649; do not edit -->
+<!-- generated from axiom_graph::docs.consumer.get-started.connect-your-agent @ b52b22b12f6e; do not edit -->
 
 # Connect Your Agent
 
@@ -150,7 +150,8 @@ The server exposes its tools grouped by concern. Every tool takes `project_root`
 | `axiom_graph_diff` | What changed in a node since a baseline commit |
 | `axiom_graph_report` | Impact report since a checkpoint, SHA, or timestamp |
 | `axiom_graph_history` / `axiom_graph_list_reference_points` | Change timeline; available baselines |
-| `axiom_graph_mark_clean` | Record agent verification (clears promotable own_status) |
+| `axiom_graph_mark_clean` | Record agent verification (clears promotable own_status); reports inherited/mixed LINKED_STALE honestly on composite targets rather than a silent no-op |
+| `axiom_graph_reverify` | Verify a node and clear the LINKED_STALE it caused in one operation (composite-aware, skips dependents stale via other offenders) |
 | `axiom_graph_apply_rename` / `axiom_graph_revert_rename` | Manually weld / un-weld a missed rename |
 | `axiom_graph_checkout` | Isolated read-only DB snapshot |
 | `axiom_graph_purge_node` | Remove a node from the index |

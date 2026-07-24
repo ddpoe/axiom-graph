@@ -16,6 +16,8 @@ from pathlib import Path
 from axiom_graph.index import db
 from axiom_graph.models import AxiomEdge, AxiomNode
 
+from tests.conftest import seed_section_node
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -39,21 +41,16 @@ def _write_doc(db_path: Path, doc_id: str, title: str, sections: list[dict]) -> 
         )
         for i, sec in enumerate(sections):
             content = sec.get("content", "")
-            db.upsert_doc_section(
+            seed_section_node(
                 conn,
-                {
-                    "id": sec["id"],
-                    "doc_id": doc_id,
-                    "heading": sec["heading"],
-                    "level": sec.get("level", 2),
-                    "tags": sec.get("tags", ""),
-                    "content": content,
-                    "desc_hash": hashlib.sha256(content.encode()).hexdigest()[:16],
-                    "parent_id": sec.get("parent_id"),
-                    "depth": sec.get("depth", 0),
-                    "position": i,
-                    "updated_at": now,
-                },
+                sec["id"],
+                heading=sec["heading"],
+                content=content,
+                level=sec.get("level", 2),
+                position=i,
+                desc_hash=hashlib.sha256(content.encode()).hexdigest()[:16],
+                location=f"docs/{doc_id.split('::')[-1]}.json",
+                updated_at=now,
             )
     # Create a node so get_node() finds the doc
     _upsert_node(

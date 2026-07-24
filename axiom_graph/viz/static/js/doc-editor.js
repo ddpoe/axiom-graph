@@ -21,6 +21,8 @@ let _viewRaw = false;
 let _collapsedSections = null;
 let _expandedSubsections = null;
 let _scrollObserver = null;
+let _savedScrollTop = 0;
+let _preserveScroll = false;
 // ── Getters ─────────────────────────────────────────────────────────────────
 export function getRenderedData() { return _renderedData; }
 export function setRenderedData(data) { _renderedData = data; }
@@ -35,6 +37,8 @@ export function resetEditor() {
     _viewRaw = false;
     _collapsedSections = null;
     _expandedSubsections = null;
+    _savedScrollTop = 0;
+    _preserveScroll = false;
     destroyEditors();
     destroyScrollObserver();
     destroyRawMonaco();
@@ -935,8 +939,30 @@ export function setRerenderCallback(fn) {
     _rerenderFn = fn;
 }
 function _rerender() {
+    // Capture the doc scroll offset before the re-render replaces #doc-content
+    // (the overflow-y:auto scroll container) via innerHTML, which would otherwise
+    // reset scrollTop to 0. The flag gates restoration to re-renders only -- a
+    // fresh doc load runs resetEditor (clearing the flag), so it lands at the top.
+    const scrollEl = document.getElementById('doc-content');
+    if (scrollEl) {
+        _savedScrollTop = scrollEl.scrollTop;
+        _preserveScroll = true;
+    }
     if (_rerenderFn)
         _rerenderFn();
+}
+/**
+ * Reapply the scroll offset captured by _rerender to the freshly rebuilt
+ * #doc-content. No-op on a fresh doc load (flag not set), so new docs open at
+ * the top.
+ */
+function _restoreScroll(contentEl) {
+    if (!_preserveScroll)
+        return;
+    const el = contentEl.querySelector('#doc-content');
+    if (el)
+        el.scrollTop = _savedScrollTop;
+    _preserveScroll = false;
 }
 /**
  * Render the full interactive doc content into the given container element.
@@ -1007,6 +1033,7 @@ export function renderDocContent(contentEl) {
         contentEl.innerHTML = html;
         _wireRawSourceEvents(contentEl);
         _mountRawMonaco();
+        _restoreScroll(contentEl);
         return;
     }
     // ── Sort sections into depth-first (parent → children) order ──
@@ -1356,6 +1383,8 @@ export function renderDocContent(contentEl) {
     runMermaidDiagrams();
     // Build TOC sidebar
     _renderTocSidebar(contentEl);
+    // Reapply the pre-re-render scroll offset (no-op on a fresh doc load).
+    _restoreScroll(contentEl);
 }
 function _renderLinkSearchResults(sectionIdx, existingLinks) {
     const existingIds = new Set(existingLinks.map((l) => l.node_id));

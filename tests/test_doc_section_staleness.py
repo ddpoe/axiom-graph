@@ -336,12 +336,12 @@ def test_doc_section_unchanged_clean(mini_project: Path, db_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Tier 1 — Removed section → NOT_FOUND
+# Tier 1 — Removed section → pruned from the index on the next build
 # ---------------------------------------------------------------------------
 
 
 def test_doc_section_removed_structural_drift(mini_project: Path, db_path: Path):
-    """Remove a section from the JSON → NOT_FOUND."""
+    """Remove a section from the JSON → its node is pruned on the next build."""
     docs_dir = mini_project / "docs"
     _write_doc(
         docs_dir,
@@ -353,8 +353,9 @@ def test_doc_section_removed_structural_drift(mini_project: Path, db_path: Path)
         ],
     )
     _build_full(mini_project)
+    assert db.get_node(db_path, "proj::docs.arch::details") is not None
 
-    # Remove the 'details' section
+    # Remove the 'details' section via a raw file edit (not a doc tool).
     _write_doc(
         docs_dir,
         "arch.json",
@@ -365,10 +366,16 @@ def test_doc_section_removed_structural_drift(mini_project: Path, db_path: Path)
     )
     _build_discovery(mini_project)
 
+    # The vanished section is removed from the index (no NOT_FOUND ghost),
+    # with a preserved DELETED tombstone in its history.
+    assert db.get_node(db_path, "proj::docs.arch::details") is None
+    history = db.get_history(db_path, "proj::docs.arch::details", limit=50)
+    assert any(row["change_type"] == "DELETED" for row in history)
+
+    # The surviving section is unaffected.
     nodes = db.all_nodes(db_path)
     statuses = compute_staleness(db_path, mini_project, nodes)
-
-    assert statuses.get("proj::docs.arch::details")[0] == "NOT_FOUND"
+    assert statuses.get("proj::docs.arch::overview")[0] == "VERIFIED"
 
 
 # ---------------------------------------------------------------------------

@@ -26,6 +26,7 @@ tools:
   - mcp__axiom-graph__axiom_graph_patch_section
 skills:
   - pev-reviewer
+  - axiom-annotations-markers
 ---
 
 You are the PEV Reviewer agent. Your job is to find problems — not to confirm the Builder's work is correct.

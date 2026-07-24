@@ -5,7 +5,7 @@ All functions return str. Designed for CLI output and MCP tool responses.
 Functions
 ---------
 render_level_0(nodes)   — one line per node: ``{id}``
-render_level_1(nodes)   — one line per node: ``{id}  {level_1}  @ location`` (functions only)
+render_level_1(nodes)   — one line per node: ``{id}  {level_1}  @ location`` (functions + docs)
 render_level_2(nodes)   — full level_2 block per node
 render_steps(nodes)     — numbered step list for nodes that have level_steps
 render_graph(node, edges, direction) — ASCII tree of connected edges
@@ -28,8 +28,13 @@ def render_level_0(nodes: list[AxiomNode]) -> str:
     return "\n".join(n.id for n in nodes)
 
 
+#: Subtypes whose nodes come from a documentation file rather than code.
+#: ``docjson`` covers the markdown scanner and pre-ADR-021 envelopes.
+_DOC_SUBTYPES = frozenset({"docjson", "docjson_doc", "docjson_section"})
+
+
 def render_level_1(nodes: list[AxiomNode]) -> str:
-    """One line per node: ``{id}  {level_1}  @ {location}`` (location only for function nodes)."""
+    """One line per node: ``{id}  {level_1}  @ {location}`` (functions and docs)."""
     if not nodes:
         return "(no nodes)"
     # Align level_1 by padding id to the longest id length
@@ -37,9 +42,18 @@ def render_level_1(nodes: list[AxiomNode]) -> str:
     lines = []
     for n in nodes:
         line = f"{n.id:<{max_id}}  {n.level_1}"
-        # Only append location for function-level nodes (line range present, e.g. #L10-L45)
-        if n.level_3_location and "#L" in n.level_3_location:
-            line += f"  @ {n.level_3_location}"
+        if n.subtype in _DOC_SUBTYPES:
+            # Doc ids flatten every configured docs_dirs root into the same
+            # ``docs.`` namespace, so the path is the only signal of which
+            # root a doc actually lives under.
+            loc = n.level_3_location or n.location
+        elif n.level_3_location and "#L" in n.level_3_location:
+            # Function-level nodes carry a line range, e.g. #L10-L45
+            loc = n.level_3_location
+        else:
+            loc = None
+        if loc:
+            line += f"  @ {loc}"
         lines.append(line)
     return "\n".join(lines)
 

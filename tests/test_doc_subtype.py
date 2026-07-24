@@ -31,7 +31,7 @@ def test_json_doc_file_node_has_subtype_file(tmp_path):
     nodes, _, _, _ = json_doc_scanner.scan_single_json_doc(f, tmp_path, "proj")
 
     file_node = next(n for n in nodes if n.id == "proj::docs.mydoc")
-    assert file_node.subtype == "docjson"
+    assert file_node.subtype == "docjson_doc"
 
 
 def test_json_doc_section_node_has_subtype_section(tmp_path):
@@ -47,7 +47,7 @@ def test_json_doc_section_node_has_subtype_section(tmp_path):
     nodes, _, _, _ = json_doc_scanner.scan_single_json_doc(f, tmp_path, "proj")
 
     section_node = next(n for n in nodes if n.id == "proj::docs.mydoc::intro")
-    assert section_node.subtype == "docjson"
+    assert section_node.subtype == "docjson_section"
 
 
 def test_json_doc_section_desc_hash_changes_with_content(tmp_path):
@@ -80,7 +80,7 @@ def test_json_doc_no_sections_only_file_node(tmp_path):
     nodes, _, _, _ = json_doc_scanner.scan_single_json_doc(f, tmp_path, "proj")
 
     assert len(nodes) == 1
-    assert nodes[0].subtype == "docjson"
+    assert nodes[0].subtype == "docjson_doc"
 
 
 # ---------------------------------------------------------------------------

@@ -22,34 +22,32 @@ axiom-graph doc ID: `{project_id}::docs.pev.cycles.{cycle-id}` — the `{project
 
 ## Manifest Creation
 
-Use `axiom_graph_write_doc` to create the cycle manifest. Read the cycle manifest template from `${CLAUDE_PLUGIN_ROOT}/templates/cycle-manifest-template.json` for the full section layout and instructions.
+The cycle manifest is a **faithful copy** of the template at `${CLAUDE_PLUGIN_ROOT}/templates/cycle-manifest-template.json`. Do NOT hand-reconstruct, paraphrase, or summarize the section list — copy it. Every section the downstream agents write to is pre-seeded in that template, and `axiom_graph_update_section` returns an error for a missing section (it does not create one), so dropping a section silently breaks the phase that writes to it — this is the cause of the "section not found" failures agents hit.
 
-Call pattern:
+**Procedure:**
+
+1. **Read the template file** with the `Read` tool: `${CLAUDE_PLUGIN_ROOT}/templates/cycle-manifest-template.json`.
+2. **Take its `sections` array verbatim**, with one exception: **omit the `purpose` section** (it is template-only documentation, not a manifest section).
+3. **Fill only the two orchestrator-owned creation-time sections** — leave every other section's placeholder content exactly as copied (the Architect, Builder, Reviewer, Auditor, and Doc Reviewer replace them as the cycle runs):
+   - `status.content` — Phase, baseline SHA, timestamp, cycle ID, and the entry baseline (left bracket)
+   - `request.content` — the user's `/pev-cycle` prompt, verbatim
+4. **Write the doc** with `axiom_graph_write_doc`, passing the copied-and-filled structure:
+
 ```
 axiom_graph_write_doc(
   project_root="{worktree_path}",
-  doc_json='{JSON with title, id, tags, sections}'
+  doc_json='{ "title": "PEV Cycle: {cycle-id}", "id": "pev/cycles/{cycle-id}", "tags": ["pev-cycle", "pev-active"], "sections": [ ...template sections copied verbatim, purpose omitted, status + request filled... ] }'
 )
 ```
 
-Required values to fill:
+Top-level values to set:
 - `title`: `"PEV Cycle: {cycle-id}"`
-- `id`: `"pev/cycles/{cycle-id}"` (filename hint)
+- `id`: `"pev/cycles/{cycle-id}"` (path-slug filename hint — NOT the node id)
 - `tags`: `["pev-cycle", "pev-active"]`
-- `status.content`: Phase, baseline SHA, timestamp, cycle ID
-- `request.content`: User's request verbatim
-- `architect.required-artifacts`: Filled by Architect
-- `decisions`: Accumulated by all agents
-- `builder.build-plan`: Filled by Builder
-- `builder.progress`: Updated by Builder as it works
-- `builder.manifest`: Filled by Orchestrator from Builder return
-- `review`: Filled by Orchestrator from Reviewer return
-- `auditor.impact-report`: Filled by Orchestrator from Auditor return
-- `auditor.changes-summary`: Filled by Orchestrator at Phase 8 by rendering `axiom_graph_report(since_sha=baseline_sha)`
 
 After writing, the doc is indexed as `{project_id}::docs.pev.cycles.{cycle-id}`. Store this as `cycle_doc_id` in `.pev-state.json`.
 
-All other sections start with placeholder content — Architect, Builder, and Auditor fill them.
+**Do NOT add, rename, drop, or summarize sections when copying.** If the workflow needs a section the template lacks, fix the template — not the per-cycle copy — so every cycle stays consistent. The only sections created after creation are the incarnation-numbered continuation checkpoints (added by the orchestrator with `axiom_graph_add_section` when a subagent returns CONTINUING).
 
 ## State File
 

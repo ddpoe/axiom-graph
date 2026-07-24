@@ -4,7 +4,7 @@
 //   Source panel, diff viewer, doc preview, breadcrumb navigation, and
 //   Monaco init are in list-source-panel.ts.
 // =============================================================================
-import { displayStaleness } from './types.js';
+import { displayStaleness, isDocSubtype } from './types.js';
 import { esc, apiFetch } from './view-utils.js';
 import { NODE_TYPE_COLORS, NODE_TYPE_DEFAULT } from './graph.js';
 import { openSource, openDocPreview, openMarkdownPreview, openSourceWithDiff, toggleFocus, toggleDiff, closeSource, viewInGraph, initMonaco, vscodeUri, setSourcePanelCallbacks, bindSourcePanelHandlers, getDocCurrentId, } from './list-source-panel.js';
@@ -366,7 +366,7 @@ function _makeNodeRow(node, depth = 0) {
     const state = getAppState();
     const isActive = state.selectedNodeId === node.id;
     const isMarkdownConfig = node.subtype === 'config' && node.location && node.location.endsWith('.md');
-    const isCode = node.subtype !== 'docjson' && node.node_type !== 'entity' && !isMarkdownConfig;
+    const isCode = !isDocSubtype(node.subtype) && node.node_type !== 'entity' && !isMarkdownConfig;
     const indent = 16 + depth * 20;
     const firstCellIndent = depth > 0;
     const tr = document.createElement('tr');
@@ -514,7 +514,7 @@ function _makeNodeRow(node, depth = 0) {
             if (isCode && node.location) {
                 openSource(node.id);
             }
-            else if (node.subtype === 'docjson') {
+            else if (isDocSubtype(node.subtype)) {
                 openDocPreview(node.id);
             }
             else if (isMarkdownConfig) {

@@ -47,6 +47,10 @@ class AxiomNode:
     desc_hash: str | None = None  # SHA-256[:16] of docstring / description only
     file_mtime: float | None = None  # stored on module/doc nodes; None on function nodes
     dflow_meta: dict | None = None
+    # DocJSON section metadata (subtype='docjson_section' only; None elsewhere).
+    # Position is sibling-scoped render order; level is the heading level (2-6).
+    doc_position: int | None = None
+    doc_level: int | None = None
 
 
 @dataclass

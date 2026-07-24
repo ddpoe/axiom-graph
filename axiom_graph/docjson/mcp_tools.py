@@ -32,11 +32,12 @@ from axiom_graph.docjson.api import (
 logger = logging.getLogger(__name__)
 
 
-def axiom_graph_write_doc(project_root: str, doc_json: str | dict) -> str:
+def axiom_graph_write_doc(project_root: str, doc_json: str | dict, docs_root: str | None = None) -> str:
     """Write a DocJSON documentation file and register it in the index.
 
     Accepts a JSON string or dict describing a documentation document.  The
-    file is written under the project's primary docs directory and
+    file is written under the project's primary docs directory — or under
+    ``docs_root`` when a different configured root is requested — and
     immediately indexed.
 
     **Important:** the ``id`` key (if present) is treated as a *path-slug
@@ -61,12 +62,16 @@ def axiom_graph_write_doc(project_root: str, doc_json: str | dict) -> str:
             ``adrs/016-my-adr``) and stripped before writing.  Each section
             needs ``id``, ``heading`` and optionally ``content``, ``links``
             (list of ``{node_id: ...}``), ``tags``, and nested ``sections``.
+        docs_root: Which configured documentation root to write under.  Must
+            match an entry of ``[axiom_graph.scan].docs_dirs``; an unknown
+            value is an error listing the valid roots.  Defaults to the first
+            entry — the primary root.
 
     Returns:
         Summary: sections written, links registered, and any unknown node_ids.
         Or an ``ERROR: ...`` string when validation fails.
     """
-    return _api_write_doc(project_root, doc_json)
+    return _api_write_doc(project_root, doc_json, docs_root)
 
 
 def axiom_graph_read_doc(

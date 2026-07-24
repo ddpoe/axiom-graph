@@ -130,7 +130,9 @@ If the Builder's work created a new subsystem, feature area, or significant capa
 
 ## Staleness & Clean Review
 
-**Only the Auditor marks nodes clean.** `axiom_graph_mark_clean` is exclusively an Auditor tool. Every `mark_clean` call is a deliberate, evidence-backed judgment. For **residual and doc nodes** the evidence is your own diff read; for **reconciled code/test nodes** (see the reconciliation paragraph below) the evidence is the Reviewer's pass plus the clean pre-merge bracket — those are batch-cleaned without a per-node read.
+**Only the Auditor clears staleness.** `axiom_graph_mark_clean` and `axiom_graph_reverify` are exclusively Auditor tools. Every clean call is a deliberate, evidence-backed judgment. For **residual and doc nodes** the evidence is your own diff read; for **reconciled code/test nodes** (see the reconciliation paragraph below) the evidence is the Reviewer's pass plus the clean pre-merge bracket — those are batch-cleaned without a per-node read.
+
+`mark_clean` names each node the evidence covers; `reverify` names a *source* and asserts the change to it was inconsequential to its dependents, clearing the LINKED_STALE rooted at it. That assertion is about the change, not a per-dependent review — which is exactly why it demands care: skim the cascade for dependents describing the changed aspect before calling it, and handle those individually first (`update_section` + `mark_clean`). Under-clearing is recoverable; a wrong blanket silently buries a doc that needed updating.
 
 **Scope determination:** The Auditor determines review scope empirically:
 
@@ -140,7 +142,7 @@ If the Builder's work created a new subsystem, feature area, or significant capa
 
 The Auditor does NOT use the Architect's pitch to enumerate individual nodes for review. The staleness engine answers "what changed and needs review" mechanically.
 
-**Reviewer-validated reconciliation.** When the cycle's `review` verdict is `PASS`/`PASS_WITH_CONCERNS` and the manifest's pre-merge baseline check is `clean`, the changed **code and test** nodes were already validated by the Reviewer (full suite + reverse-map). Partition the in-scope code/test nodes: **reconciled** (staleness change-set-explained — own-`CONTENT_UPDATED` in the change-set, or `LINKED_STALE` whose `via` trigger is in the change-set; minus any Reviewer-flagged node) go straight to **batch `mark_clean`** with a reason citing the Reviewer pass; **residual** (staleness the change-set can't explain, or a flagged node) get hand-reviewed. Docs are always hand-reviewed — never reconciled. If the verdict is `FAIL` or the pre-merge check shows `unexplained-drift`, there is no blanket — hand-review everything. The sticky-`LINKED_STALE` invariant holds either way: nodes clear only via this explicit `mark_clean`.
+**Reviewer-validated reconciliation.** When the cycle's `review` verdict is `PASS`/`PASS_WITH_CONCERNS` and the manifest's pre-merge baseline check is `clean`, the changed **code and test** nodes were already validated by the Reviewer (full suite + reverse-map). Partition the in-scope code/test nodes: **reconciled** (staleness change-set-explained — own-`CONTENT_UPDATED` in the change-set, or `LINKED_STALE` whose `via` trigger is in the change-set; minus any Reviewer-flagged node) go straight to **batch `mark_clean`** with a reason citing the Reviewer pass; **residual** (staleness the change-set can't explain, or a flagged node) get hand-reviewed. Docs are always hand-reviewed — never reconciled. If the verdict is `FAIL` or the pre-merge check shows `unexplained-drift`, there is no blanket — hand-review everything. The sticky-`LINKED_STALE` invariant holds either way: nodes clear only via an explicit clean action (`mark_clean`, or a guarded `reverify` on a source).
 
 After `axiom_graph_build` + `axiom_graph_check`, review every **residual** stale node and every **doc** node (reconciled code/test nodes were batch-cleaned per the paragraph above):
 

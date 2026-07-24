@@ -59,7 +59,7 @@ _JS_TS_EXTENSIONS = frozenset({".js", ".jsx", ".ts", ".tsx"})
 # ``code_hash``: Python / JS-TS modules (``module``), DocJSON composites
 # (``docjson``), and config files (``config``).  Selecting the anchor by this
 # set avoids any ``subtype is None`` test.
-_ANCHOR_SUBTYPES = frozenset({"module", "docjson", "config"})
+_ANCHOR_SUBTYPES = frozenset({"module", "docjson", "docjson_doc", "config"})
 
 
 def _file_content_matches_anchor(abs_path: "Path", loc_nodes: list) -> bool:
@@ -416,30 +416,56 @@ def apply_composite_inheritance(
     口 = Step(
         step_num=4,
         name="Load node types for inheritance mode",
-        purpose="Fetch node_type for each parent so atomic_process parents get LINKED_STALE cap",
-        outputs="node_types dict",
+        purpose="Fetch node_type and subtype for each parent so atomic_process parents get LINKED_STALE cap and docjson_doc envelopes aggregate over their subtree",
+        outputs="node_types dict, subtypes dict",
     )
     node_types: dict[str, str] = {}
+    subtypes: dict[str, str | None] = {}
     with db._connect(db_path) as conn:
         placeholders = ",".join("?" * len(all_parents))
         rows = conn.execute(
-            f"SELECT id, node_type FROM nodes WHERE id IN ({placeholders})",
+            f"SELECT id, node_type, subtype FROM nodes WHERE id IN ({placeholders})",
             list(all_parents),
         ).fetchall()
         node_types = {r["id"]: r["node_type"] for r in rows}
+        subtypes = {r["id"]: r["subtype"] for r in rows}
 
     口 = Step(
         step_num=5,
         name="Propagate worst child severity per dimension",
         purpose="Walk topo order assigning each parent the worst-child status per dimension independently",
-        inputs="topo_order, children map, statuses dict, node_types",
+        inputs="topo_order, children map, statuses dict, node_types, subtypes",
         outputs="statuses dict updated in-place",
         critical="Missing children default to VERIFIED",
     )
 
-    _propagate_two_column(statuses, topo_order, children, node_types)
+    _propagate_two_column(statuses, topo_order, children, node_types, subtypes)
 
     return statuses
+
+
+def _subtree_ids(root: str, children: dict[str, list[str]]) -> set[str]:
+    """Return the transitive ``composes`` closure below *root* (root excluded).
+
+    Cycle-safe: a visited set guards against malformed edge data (including
+    self-loops), so traversal always terminates.
+
+    Args:
+        root: Node ID to start from.
+        children: Forward adjacency map (parent -> child IDs).
+
+    Returns:
+        Set of every node ID reachable from *root* via composes edges.
+    """
+    seen: set[str] = set()
+    stack = list(children.get(root, []))
+    while stack:
+        nid = stack.pop()
+        if nid in seen or nid == root:
+            continue
+        seen.add(nid)
+        stack.extend(children.get(nid, []))
+    return seen
 
 
 def _propagate_two_column(
@@ -447,8 +473,16 @@ def _propagate_two_column(
     topo_order: list[str],
     children: dict[str, list[str]],
     node_types: dict[str, str],
+    subtypes: dict[str, str | None] | None = None,
 ) -> None:
-    """Two-column composite inheritance: worst per dimension independently."""
+    """Two-column composite inheritance: worst per dimension independently.
+
+    DocJSON envelopes (``subtype='docjson_doc'``) aggregate over their whole
+    ``composes`` subtree rather than direct children only: mid-tree sections
+    are atomic and do not relay child own-status upward the way composite
+    parents do, so the envelope must look at every descendant itself.
+    """
+    subtypes = subtypes or {}
     for composite_id in topo_order:
         # Start from the composite's current status so upstream passes
         # (e.g. annotates/delegates_to LINKED_STALE) are never regressed
@@ -456,7 +490,11 @@ def _propagate_two_column(
         cur_own, cur_link = statuses.get(composite_id, (VERIFIED, VERIFIED))
         worst_own = _OWN_SEVERITY.get(cur_own, 0)
         worst_link = _LINK_SEVERITY.get(cur_link, 0)
-        for child_id in children.get(composite_id, []):
+        if subtypes.get(composite_id) == "docjson_doc":
+            scope: list[str] | set[str] = _subtree_ids(composite_id, children)
+        else:
+            scope = children.get(composite_id, [])
+        for child_id in scope:
             c_own, c_link = statuses.get(child_id, (VERIFIED, VERIFIED))
             worst_own = max(worst_own, _OWN_SEVERITY.get(c_own, 0))
             worst_link = max(worst_link, _LINK_SEVERITY.get(c_link, 0))
@@ -658,6 +696,145 @@ def _get_linked_stale_ids(
     return stale_map
 
 
+# ---------------------------------------------------------------------------
+# Reusable staleness-attribution helpers (mark_clean honesty + reverify)
+# ---------------------------------------------------------------------------
+
+
+def _composes_children_map(db_path: Path) -> dict[str, list[str]]:
+    """Load the forward ``composes`` adjacency map (parent -> child IDs).
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+
+    Returns:
+        Dict mapping each composes parent to its direct child IDs.
+    """
+    children: dict[str, list[str]] = {}
+    with db._connect(db_path) as conn:
+        rows = conn.execute("SELECT from_id, to_id FROM edges WHERE edge_type = 'composes'").fetchall()
+    for r in rows:
+        children.setdefault(r["from_id"], []).append(r["to_id"])
+    return children
+
+
+def expand_composes_subtree(
+    db_path: Path,
+    node_id: str,
+    children_map: dict[str, list[str]] | None = None,
+) -> set[str]:
+    """Return every descendant of *node_id* via ``composes`` edges.
+
+    Expands a composite source (doc envelope, module, or section with
+    child sections) to its full descendant set — leaves AND intermediate
+    composites.  Intermediates are included because a staleness root can
+    itself be an aggregate (e.g. an edited section that has child
+    sections).  Cycle-guarded; a leaf node returns an empty set.
+
+    Node_type-agnostic: any node with outbound ``composes`` edges is
+    treated as an aggregate, whatever its node_type.
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+        node_id: Node to expand.  Not included in the returned set.
+        children_map: Optional pre-loaded forward composes adjacency map
+            (from :func:`_composes_children_map`); loaded on demand when
+            omitted.
+
+    Returns:
+        Set of descendant node IDs (excluding *node_id* itself).
+    """
+    if children_map is None:
+        children_map = _composes_children_map(db_path)
+    return _subtree_ids(node_id, children_map)
+
+
+def resolve_root_offenders(stale_map: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Resolve each live stale-map entry to its leaf root offenders.
+
+    Takes the live stale map from :func:`_get_linked_stale_ids`
+    (``{stale_id: [via_ids]}``) and follows via entries that are
+    themselves in the map until it reaches nodes that are NOT in the map
+    — the leaf root offenders whose change originally caused the
+    staleness.  Transitive doc-to-doc chains therefore resolve past
+    their one-hop vias back to the originating node.
+
+    Pure function over the passed map — issues no SQL and changes no
+    pass semantics.  Cycle-safe: via cycles are collapsed by a visited
+    set; a chain that terminates in a pure cycle with no external root
+    contributes no roots (callers should treat an empty root list as
+    unattributable and act conservatively).
+
+    Args:
+        stale_map: Live LINKED_STALE map (stale node ID -> via IDs).
+
+    Returns:
+        Dict mapping each stale node ID to its sorted list of root
+        offender IDs.
+    """
+    result: dict[str, list[str]] = {}
+    for nid in stale_map:
+        roots: set[str] = set()
+        visited: set[str] = set()
+        stack = [nid]
+        while stack:
+            cur = stack.pop()
+            if cur in visited:
+                continue
+            visited.add(cur)
+            for via_id in stale_map.get(cur, []):
+                if via_id in stale_map:
+                    if via_id not in visited:
+                        stack.append(via_id)
+                else:
+                    roots.add(via_id)
+        result[nid] = sorted(roots)
+    return result
+
+
+def classify_inherited_link(
+    db_path: Path,
+    node_id: str,
+    stale_map: dict[str, list[str]],
+    children_map: dict[str, list[str]] | None = None,
+    exclude: set[str] | None = None,
+) -> tuple[bool, list[str]]:
+    """Classify whether a node's LINKED_STALE is inherited from descendants.
+
+    A node's LINKED_STALE is *inherited* when the node has no own stale
+    source (it is absent from the live stale map) while descendants in
+    its ``composes`` subtree do.  Marking such a node clean has no
+    direct effect: the next recompute re-derives the parent's
+    link_status from its children.
+
+    Keys on outbound ``composes`` edges only — never on node_type — so
+    doc envelopes (composite_process) and section nodes with child
+    sections (atomic_process) classify identically.
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+        node_id: Node to classify.
+        stale_map: Live LINKED_STALE map from
+            :func:`_get_linked_stale_ids` (computed with the same
+            transitive/frozen tag config as ``check``).
+        children_map: Optional pre-loaded forward composes adjacency map.
+        exclude: Descendant IDs to omit from the stale-descendant hint
+            (e.g. nodes being cleared in the same batch).
+
+    Returns:
+        Tuple ``(has_own_signal, stale_descendants)``.  *has_own_signal*
+        is True when the node itself is in the stale map (mark_clean
+        genuinely clears that portion).  *stale_descendants* lists
+        subtree members that ARE in the stale map — the actionable
+        nodes an honest report should name.
+    """
+    has_own_signal = node_id in stale_map
+    descendants = expand_composes_subtree(db_path, node_id, children_map)
+    excluded = exclude or set()
+    stale_descendants = sorted(d for d in descendants if d in stale_map and d not in excluded)
+    return has_own_signal, stale_descendants
+
+
 @workflow(
     purpose="Compute per-node staleness via file re-parsing — single authoritative writer",
     inputs="db_path, project_root, list of all indexed nodes",
@@ -782,6 +959,7 @@ def compute_staleness(
             # unset for them.
             if n.node_type == "composite_process" and subtype not in (
                 "docjson",
+                "docjson_doc",
                 "workflow",
                 "task",
             ):

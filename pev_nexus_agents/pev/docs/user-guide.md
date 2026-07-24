@@ -1,4 +1,4 @@
-<!-- generated from axiom_graph::docs.consumer.plugins.pev.user-guide @ c861ddce32e2; do not edit -->
+<!-- generated from axiom_graph::docs.consumer.plugins.pev.user-guide @ 0cc90c955938; do not edit -->
 
 # PEV User Guide
 
@@ -59,6 +59,25 @@ Three optional DocJSON files under `<project_root>/.pev/`:
 - **`.pev/review-criteria.json`** (optional) — project-specific code-review emphasis (logging correlation IDs, typed exceptions, anti-patterns) with per-check severity guidance.
 
 The files are DocJSON (JSON with a `sections` array; each section's `content` is markdown). Only the structure is JSON; the content is markdown you can read directly.
+
+### Letting axiom-graph index your SOPs
+
+Add `.pev` to `docs_dirs` in `axiom-graph.toml` and rebuild:
+
+```toml
+[axiom_graph.scan]
+docs_dirs = ["docs", ".pev"]
+```
+
+The key is `docs_dirs`, not `doc_dirs` — an unrecognized key is ignored silently, so a typo leaves `.pev` unindexed with no error to tell you. Indexing is not required for the skills to work (they read the files directly), but it gives every agent a second route to your SOPs when a path lookup fails.
+
+Once indexed, note how SOPs are named. **Every configured docs root flattens into one `docs.` namespace**, so `.pev/test-policy.json` is `{project_id}::docs.test-policy` — not `docs.pev.test-policy`. The root a doc lives under never appears in its id. Two things follow:
+
+- A listing with no `.pev` in it is not evidence that `.pev` went unindexed. `axiom_graph_list` and `read_doc("list")` print each doc's file path so you can confirm directly.
+- `docs/test-policy.json` and `.pev/test-policy.json` would resolve to the same id and silently overwrite each other. The build warns when two roots derive one id, naming both files.
+
+To author a new doc into a non-primary root, pass `docs_root` to `axiom_graph_write_doc` (e.g. `docs_root=".pev"`); it defaults to the first entry of `docs_dirs`.
+
 
 ## Friction logs
 

@@ -23,5 +23,5 @@ For the full setup including directory creation, SOP templates, and per-version 
 - **Using PEV in your project** → [`pev_nexus_agents/pev/USER_GUIDE.md`](./pev_nexus_agents/pev/USER_GUIDE.md)
 - **Modifying PEV** → [`pev_nexus_agents/pev/DESIGN.md`](./pev_nexus_agents/pev/DESIGN.md)
 - **Debugging plugin hooks** → [`pev_nexus_agents/hook-spike/TROUBLESHOOTING.md`](./pev_nexus_agents/hook-spike/TROUBLESHOOTING.md)
-- **Release history** → [`CHANGELOG.md`](./CHANGELOG.md)
+- **Release history** → [`pev/CHANGELOG.md`](./pev/CHANGELOG.md)
 - **Working ON this marketplace** (extending the plugins, authoring PRs) → [`AGENTS.md`](./AGENTS.md)

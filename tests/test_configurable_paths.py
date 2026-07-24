@@ -7,6 +7,8 @@ Covers:
   node IDs under default config.
 - Tier 3: multi-root docs build, DB path end-to-end override,
   multi-root doc listing.
+- Multi-root doc tooling: listing path visibility, ``write_doc`` root
+  targeting, and the build's duplicate-doc-id warning.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import json
 from pathlib import Path
 
 import pytest
+from axiom_annotations import workflow
 
 from axiom_graph.config import AxiomGraphConfig, db_path_for
 from axiom_graph.index import db as db_mod
@@ -163,7 +166,9 @@ def test_multi_root_docs_build_indexes_both_roots(tmp_path):
     db_path = db_path_for(tmp_path)
     # All doc node IDs from the DB
     with db_mod._connect(db_path) as conn:
-        rows = conn.execute("SELECT id FROM nodes WHERE subtype='docjson'").fetchall()
+        rows = conn.execute(
+            "SELECT id FROM nodes WHERE subtype IN ('docjson','docjson_doc','docjson_section')"
+        ).fetchall()
         all_ids = {r[0] for r in rows}
         rows2 = conn.execute("SELECT id FROM nodes WHERE source='doc_scanner'").fetchall()
         all_md_ids = {r[0] for r in rows2}
@@ -191,7 +196,12 @@ def test_backward_compat_default_config_node_ids(tmp_path):
     result = builder.build(tmp_path)
     db_path = db_path_for(tmp_path)
     with db_mod._connect(db_path) as conn:
-        ids = {r[0] for r in conn.execute("SELECT id FROM nodes WHERE subtype='docjson'").fetchall()}
+        ids = {
+            r[0]
+            for r in conn.execute(
+                "SELECT id FROM nodes WHERE subtype IN ('docjson','docjson_doc','docjson_section')"
+            ).fetchall()
+        }
     # These IDs match the pre-change canonical derivation.
     assert "proj::docs.foo" in ids
     assert "proj::docs.foo::intro" in ids
@@ -392,3 +402,234 @@ def test_list_doc_subdirs_multi_root(tmp_path):
     assert "specs" in dirs, f"secondary root 'specs' missing: {dirs}"
     assert "docs/prds" in dirs, f"docs/prds subdir missing: {dirs}"
     assert "specs/adrs" in dirs, f"specs/adrs subdir missing: {dirs}"
+
+
+# ---------------------------------------------------------------------------
+# Multi-root project fixture — shared by the listing / authoring / collision
+# tests below.
+# ---------------------------------------------------------------------------
+
+
+def _multi_root_project(tmp_path: Path, roots: str = '["docs", "specs"]') -> Path:
+    """Build an indexed project with two configured docs roots."""
+    _write_toml(
+        tmp_path / "axiom-graph.toml",
+        f'[axiom_graph]\nproject_id = "proj"\n[axiom_graph.scan]\ndocs_dirs = {roots}\n',
+    )
+    for rel in ("docs", "specs"):
+        (tmp_path / rel).mkdir(exist_ok=True)
+    from axiom_graph.index import builder
+
+    builder.build(tmp_path)
+    return tmp_path
+
+
+def _write_docjson(path: Path, title: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"title": title, "sections": [{"id": "s1", "heading": "H", "content": "c"}]}),
+        encoding="utf-8",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 -- Listing rows carry the docs root a node lives under
+# ---------------------------------------------------------------------------
+
+
+def test_render_level_1_appends_location_for_doc_nodes():
+    """Doc nodes show their path; function nodes keep #L; modules stay bare."""
+    from axiom_graph.models import AxiomNode
+    from axiom_graph.renderers.agent import render_level_1
+
+    def _node(node_id, subtype, level_3):
+        return AxiomNode(
+            id=node_id,
+            node_type="atomic_process",
+            title="t",
+            location=level_3.split("#")[0],
+            source="ast",
+            code_hash="h",
+            level_0="l0",
+            level_1="summary",
+            subtype=subtype,
+            level_3_location=level_3,
+        )
+
+    out = render_level_1(
+        [
+            _node("proj::docs.test-policy", "docjson_doc", "specs/test-policy.json"),
+            _node("proj::docs.test-policy::budget", "docjson_section", "specs/test-policy.json"),
+            _node("proj::mod::fn", "function", "src/mod.py#L10-L45"),
+            _node("proj::mod", "module", "src/mod.py"),
+        ]
+    )
+    lines = out.splitlines()
+    assert "@ specs/test-policy.json" in lines[0], f"doc envelope must show its root: {lines[0]}"
+    assert "@ specs/test-policy.json" in lines[1], f"doc section must show its root: {lines[1]}"
+    assert "@ src/mod.py#L10-L45" in lines[2], f"function location regressed: {lines[2]}"
+    assert "@" not in lines[3], f"module rows must stay bare: {lines[3]}"
+
+
+@workflow(
+    purpose="Verify a doc authored in a non-primary docs root is visibly attributed to that root in read_doc('list')",
+)
+def test_doc_listing_shows_which_docs_root_each_doc_lives_in(tmp_path):
+    """`read_doc("list")` names the file, so non-primary roots are visible."""
+    from axiom_graph.docjson.api import axiom_graph_read_doc
+    from axiom_graph.index import builder
+
+    project = _multi_root_project(tmp_path)
+    _write_docjson(project / "docs" / "primary.json", "Primary")
+    _write_docjson(project / "specs" / "secondary.json", "Secondary")
+    builder.build(project)
+
+    listing = axiom_graph_read_doc(str(project), "list")
+    assert "specs/secondary.json" in listing, f"secondary root not visible in listing: {listing}"
+    assert "docs/primary.json" in listing, f"primary root path missing from listing: {listing}"
+
+
+# ---------------------------------------------------------------------------
+# Tier 1/2 -- write_doc targets a chosen docs root
+# ---------------------------------------------------------------------------
+
+
+def test_write_doc_without_docs_root_writes_under_primary(tmp_path):
+    """Omitting docs_root keeps the historical primary-root destination."""
+    from axiom_graph.docjson.api import axiom_graph_write_doc
+
+    project = _multi_root_project(tmp_path)
+    res = axiom_graph_write_doc(str(project), {"id": "alpha", "title": "Alpha", "sections": []})
+    assert "Wrote" in res, res
+    assert (project / "docs" / "alpha.json").is_file()
+    assert not (project / "specs" / "alpha.json").exists()
+
+
+@workflow(
+    purpose="Verify a doc written into a non-primary docs root gets the same node id a full build derives for that file",
+)
+def test_write_doc_into_secondary_root_matches_scanner_derived_id(tmp_path):
+    """Authoring into a secondary root does not fork the doc's identity."""
+    from axiom_graph.docjson.api import axiom_graph_write_doc
+    from axiom_graph.index import builder
+
+    project = _multi_root_project(tmp_path)
+    res = axiom_graph_write_doc(
+        str(project),
+        {"id": "policy", "title": "Policy", "sections": [{"id": "s1", "heading": "H", "content": "c"}]},
+        docs_root="specs",
+    )
+    assert "Wrote" in res, res
+    assert (project / "specs" / "policy.json").is_file(), "file must land under the requested root"
+
+    builder.build(project)
+    db_path = db_path_for(project)
+    with db_mod._connect(db_path) as conn:
+        rows = conn.execute("SELECT id, file_path FROM docs WHERE id = 'proj::docs.policy'").fetchall()
+    assert len(rows) == 1, f"write_doc id must match the scanner's derivation exactly, got {rows}"
+    assert rows[0][1] == "specs/policy.json"
+
+
+def test_write_doc_docs_root_composes_with_subdir_slug(tmp_path):
+    """A slug with subdirectories nests under the selected root."""
+    from axiom_graph.docjson.api import axiom_graph_write_doc
+
+    project = _multi_root_project(tmp_path)
+    axiom_graph_write_doc(
+        str(project),
+        {"id": "sops/nested", "title": "Nested", "sections": []},
+        docs_root="specs",
+    )
+    assert (project / "specs" / "sops" / "nested.json").is_file()
+
+
+def test_write_doc_unknown_docs_root_errors_and_writes_nothing(tmp_path):
+    """An unconfigured root is rejected, naming the roots that are valid."""
+    from axiom_graph.docjson.api import axiom_graph_write_doc
+
+    project = _multi_root_project(tmp_path)
+    res = axiom_graph_write_doc(
+        str(project),
+        {"id": "stray", "title": "Stray", "sections": []},
+        docs_root="nope",
+    )
+    assert res.startswith("ERROR"), res
+    assert "docs" in res and "specs" in res, f"error must list the configured roots: {res}"
+    assert not (project / "nope").exists()
+    assert not (project / "docs" / "stray.json").exists()
+
+
+def test_write_doc_overwrites_existing_doc_in_secondary_root(tmp_path):
+    """Re-writing a doc in a non-primary root replaces it in place."""
+    from axiom_graph.docjson.api import axiom_graph_write_doc
+
+    project = _multi_root_project(tmp_path)
+    for content in ("first", "second"):
+        axiom_graph_write_doc(
+            str(project),
+            {
+                "id": "mutable",
+                "title": "Mutable",
+                "sections": [{"id": "s1", "heading": "H", "content": content}],
+            },
+            docs_root="specs",
+        )
+    on_disk = json.loads((project / "specs" / "mutable.json").read_text(encoding="utf-8"))
+    assert on_disk["sections"][0]["content"] == "second"
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 -- Build warns when two roots derive the same doc id
+# ---------------------------------------------------------------------------
+
+
+@workflow(
+    purpose="Verify the build surfaces a warning when two configured docs roots derive the same doc id",
+)
+def test_duplicate_doc_id_across_roots_emits_warning(tmp_path):
+    """Same filename in two roots collapses to one id — the build says so."""
+    _write_toml(
+        tmp_path / "axiom-graph.toml",
+        '[axiom_graph]\nproject_id = "proj"\n[axiom_graph.scan]\ndocs_dirs = ["docs", "specs"]\n',
+    )
+    _write_docjson(tmp_path / "docs" / "collide.json", "From docs")
+    _write_docjson(tmp_path / "specs" / "collide.json", "From specs")
+    from axiom_graph.index import builder
+
+    result = builder.build(tmp_path)
+    collisions = [w for w in result["warnings"] if "proj::docs.collide" in w]
+    assert collisions, f"duplicate doc id must warn, got: {result['warnings']}"
+    assert "docs/collide.json" in collisions[0] and "specs/collide.json" in collisions[0], (
+        f"warning must name both source files: {collisions[0]}"
+    )
+
+
+def test_distinct_doc_ids_across_roots_emit_no_collision_warning(tmp_path):
+    """A normal multi-root tree produces no false-positive collision warning."""
+    _write_toml(
+        tmp_path / "axiom-graph.toml",
+        '[axiom_graph]\nproject_id = "proj"\n[axiom_graph.scan]\ndocs_dirs = ["docs", "specs"]\n',
+    )
+    _write_docjson(tmp_path / "docs" / "alpha.json", "Alpha")
+    _write_docjson(tmp_path / "specs" / "beta.json", "Beta")
+    from axiom_graph.index import builder
+
+    result = builder.build(tmp_path)
+    assert not [w for w in result["warnings"] if "duplicate" in w.lower()], (
+        f"distinct ids must not warn: {result['warnings']}"
+    )
+
+
+def test_repeated_docs_dirs_entry_does_not_warn_about_itself(tmp_path):
+    """One directory listed twice is deduped by root, not reported as a collision."""
+    _write_toml(
+        tmp_path / "axiom-graph.toml",
+        '[axiom_graph]\nproject_id = "proj"\n[axiom_graph.scan]\ndocs_dirs = ["docs", "docs"]\n',
+    )
+    _write_docjson(tmp_path / "docs" / "solo.json", "Solo")
+    from axiom_graph.index import builder
+
+    result = builder.build(tmp_path)
+    assert not [w for w in result["warnings"] if "duplicate" in w.lower()], (
+        f"repeated docs_dirs entry must not warn: {result['warnings']}"
+    )

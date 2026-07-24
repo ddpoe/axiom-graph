@@ -375,6 +375,15 @@ def cmd_mark_clean(node_id: str, project_root: str, reason: str) -> None:
     if result.not_found:
         raise click.ClickException(f"Node '{node_id}' not found.")
     click.echo(f"Marked '{node_id}' as MANUAL_VERIFIED.")
+    if node_id in result.inherited:
+        click.echo("Warning: LINKED_STALE on this node is inherited — marking it clean has no direct effect.")
+        click.echo("Stale descendants to mark clean:")
+        for desc in result.inherited[node_id]:
+            click.echo(f"  - {desc}")
+    elif node_id in result.mixed:
+        click.echo("Own stale signal cleared; LINKED_STALE inherited from stale descendants remains:")
+        for desc in result.mixed[node_id]:
+            click.echo(f"  - {desc}")
     if reason:
         click.echo(f"Reason: {reason}")
 

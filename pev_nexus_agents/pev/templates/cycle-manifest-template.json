@@ -4,7 +4,7 @@
     {
       "id": "purpose",
       "heading": "Purpose",
-      "content": "This template is copied by the orchestrator when creating a new PEV cycle manifest at `docs/pev/cycles/{cycle-id}.json`. Each section contains instructions the agent replaces with real content. The orchestrator creates the doc from this template, fills `status` and `request`, then dispatches the Architect to fill `scope` and `architect`.\n\nCycle ID format: `pev-YYYY-MM-DD-{slugified-purpose}` (e.g., `pev-2026-03-21-add-history-filtering`). Slug: lowercase, hyphens, truncated to 40 chars. Orchestrator checks `docs/pev/cycles/` for collisions; appends `-2`, `-3` if needed."
+      "content": "**TEMPLATE-ONLY — the orchestrator OMITS this `purpose` section when creating a cycle manifest; every other section is copied as-is.**\n\nThe orchestrator creates a new PEV cycle manifest at `docs/pev/cycles/{cycle-id}.json` by copying this template **near-verbatim** (it does NOT hand-reconstruct the section list), then filling `status` and `request`. The Architect, Builder, Reviewer, Auditor, and Doc Reviewer fill the remaining sections as the cycle runs. **Every section the workflow writes to is pre-seeded below** — `axiom_graph_update_section` returns an error for a missing section rather than creating one, so any section an agent writes must already exist here.\n\nCycle ID format: `pev-YYYY-MM-DD-{slugified-purpose}` (e.g., `pev-2026-03-21-add-history-filtering`). Slug: lowercase, hyphens, truncated to 40 chars. Orchestrator checks `docs/pev/cycles/` for collisions; appends `-2`, `-3` if needed."
     },
     {
       "id": "status",
@@ -75,8 +75,18 @@
           "id": "source-documents",
           "heading": "Source Documents",
           "content": "(Architect replaces this with referenced ADRs, PRDs, design specs, and prior cycle docs that informed this pitch)"
+        },
+        {
+          "id": "friction",
+          "heading": "Friction",
+          "content": "(Empty — the Architect appends friction observations here as it works; honest emptiness is fine. Entry format is in the skill's Friction log section and the manifest's friction-logs section.)"
         }
       ]
+    },
+    {
+      "id": "decisions",
+      "heading": "Decisions",
+      "content": "**Filled by:** Architect and Builder — cycle-wide decision log, appended as decisions are made during planning and implementation.\n\nEach entry records a design or implementation decision: what was chosen, the alternatives considered, and why. The Reviewer reads this to understand Builder/Architect judgment calls.\n\n**Entry format:**\n```\n### D-1 (Architect): {title}\n**Phase:** plan\n**Choice:** {what was decided}\n**Alternatives:** {what was considered}\n**Reason:** {why}\n```\n\nRead the existing section before appending so you don't overwrite prior entries.\n\n(Empty until the first decision is recorded.)"
     },
     {
       "id": "change-set",
@@ -86,22 +96,112 @@
     {
       "id": "builder",
       "heading": "Builder Manifest",
-      "content": "**Filled by:** Orchestrator — writes the Builder's returned manifest after implementation.\n\nThe Builder returns this as structured data in its subagent completion message. The orchestrator writes it here verbatim.\n\n**Example:**\n```json\n{\n  \"deviations\": [],\n  \"files_changed\": [\"axiom_graph/history.py\", \"axiom_graph/mcp_server.py\"],\n  \"tests_added\": [\"tests/test_history_filtering.py\"],\n  \"tests_passed\": true,\n  \"env_gaps\": []\n}\n```\n\n**Instructions:** If the Builder reports deviations, each has: `spec_requirement` (what was planned), `actual` (what was built), `reason` (why it changed), `affected_nodes` (axiom-graph node IDs). If tests failed, include failure details. `env_gaps` lists tests that couldn't run because a dependency main declares was missing from the worktree (distinct from failures) — the orchestrator restores parity before Phase 5.\n\n### Continuation Checkpoint\n**Only present if the Builder hit the context leash.** Written by the orchestrator from the Builder's return. The fresh incarnation is dispatched to the same worktree — code on disk is the state.\n\n**Example:**\n```\n### Continuation (incarnation 1)\nCompleted:\n- Capability 1: Date range filter — Done, tests pass (test_date_range_filter)\n- Capability 2: MCP tool params — Done, tests pass (test_mcp_date_params)\n\nIn progress:\n- Capability 3: CLI flags — test written (test_cli_date_flags), implementation started in cli.py\n\nRemaining:\n- (none — all capabilities addressed)\n\nDecisions:\n- Used stdlib datetime.fromisoformat, not dateutil — per constraints\n- Validation lives in get_history_since, not MCP layer — single validation point\n```"
+      "content": "**Filled by:** Orchestrator — writes the Builder's returned manifest after implementation.\n\nThe Builder returns this as structured data in its subagent completion message. The orchestrator writes it here verbatim.\n\n**Example:**\n```json\n{\n  \"deviations\": [],\n  \"files_changed\": [\"axiom_graph/history.py\", \"axiom_graph/mcp_server.py\"],\n  \"tests_added\": [\"tests/test_history_filtering.py\"],\n  \"tests_passed\": true,\n  \"env_gaps\": []\n}\n```\n\n**Instructions:** If the Builder reports deviations, each has: `spec_requirement` (what was planned), `actual` (what was built), `reason` (why it changed), `affected_nodes` (axiom-graph node IDs). If tests failed, include failure details. `env_gaps` lists tests that couldn't run because a dependency main declares was missing from the worktree (distinct from failures) — the orchestrator restores parity before Phase 5.\n\n### Continuation Checkpoint\n**Only present if the Builder hit the context leash.** Written by the orchestrator from the Builder's return. The fresh incarnation is dispatched to the same worktree — code on disk is the state.\n\n**Example:**\n```\n### Continuation (incarnation 1)\nCompleted:\n- Capability 1: Date range filter — Done, tests pass (test_date_range_filter)\n- Capability 2: MCP tool params — Done, tests pass (test_mcp_date_params)\n\nIn progress:\n- Capability 3: CLI flags — test written (test_cli_date_flags), implementation started in cli.py\n\nRemaining:\n- (none — all capabilities addressed)\n\nDecisions:\n- Used stdlib datetime.fromisoformat, not dateutil — per constraints\n- Validation lives in get_history_since, not MCP layer — single validation point\n```",
+      "sections": [
+        {
+          "id": "build-plan",
+          "heading": "Build Plan",
+          "content": "(Builder replaces this with its build plan — task decomposition, order, and approach. Persisted across incarnations so a fresh Builder picks up where the last left off.)"
+        },
+        {
+          "id": "progress",
+          "heading": "Progress",
+          "content": "(Builder updates this as it works — which tasks are done, in progress, and remaining. The next incarnation reads it to know where to continue.)"
+        },
+        {
+          "id": "manifest",
+          "heading": "Manifest",
+          "content": "(Orchestrator writes the Builder's returned manifest here — deviations, files_changed, tests_added, tests_passed, env_gaps. See the Builder Manifest guidance above for the shape.)"
+        },
+        {
+          "id": "friction",
+          "heading": "Friction",
+          "content": "(Empty — the Builder appends friction observations here as it works; honest emptiness is fine. Distinct from builder.deviations and the decisions log — see the skill's Friction log section.)"
+        }
+      ]
+    },
+    {
+      "id": "review",
+      "heading": "Review",
+      "content": "**Filled by:** Orchestrator — writes the Reviewer's returned verdict after Phase 5 (Review).\n\nThe Reviewer returns structured findings: `status` (PASS / PASS_WITH_CONCERNS / FAIL), `test_coverage` (user story → test mapping), `reverse_mapping`, `deviation_tribunal`, and `concerns`. The orchestrator writes them here verbatim.\n\n(Empty until the Reviewer phase completes.)"
+    },
+    {
+      "id": "reviewer",
+      "heading": "Reviewer Working Notes",
+      "content": "**Filled by:** Reviewer — its own working sub-sections across the six-pass review. The Reviewer's final verdict is written by the orchestrator to the top-level `review` section; the sub-sections here hold the Reviewer's own progress and friction.",
+      "sections": [
+        {
+          "id": "progress",
+          "heading": "Progress",
+          "content": "(Reviewer updates this as it works through the six passes — which passes are done and findings so far. The next incarnation reads it to skip completed passes.)"
+        },
+        {
+          "id": "friction",
+          "heading": "Friction",
+          "content": "(Empty — the Reviewer appends friction observations here as it works; honest emptiness is fine. See the skill's Friction log section.)"
+        }
+      ]
     },
     {
       "id": "auditor",
       "heading": "Auditor Impact Report",
-      "content": "**Filled by:** Orchestrator — writes the Auditor's returned Impact Report after the audit, plus a machine-rendered changes summary at Phase 8.\n\nTwo sub-sections live here:\n\n- `auditor.impact-report` — the Auditor's narrative (`findings`, `needs_fix`, advisory `counts`, `skipped_nodes`, `summary`).\n- `auditor.changes-summary` — written by the orchestrator at Phase 8 from `axiom_graph_report(since_sha=baseline_sha)`. This is the authoritative, mechanically-derived list of every doc section update, `mark_clean`, link addition/removal, and `AGENT_VERIFIED` event during the audit. The Auditor does NOT write a hand-typed change ledger.\n\n**Example Impact Report:**\n```json\n{\n  \"status\": \"DONE\",\n  \"findings\": [\n    {\n      \"area\": \"History tool params\",\n      \"nodes\": [\"axiom_graph::axiom_graph.history::get_history_since\"],\n      \"disposition\": \"clean\",\n      \"narrative\": \"New params added per spec; capabilities table updated to Done.\"\n    }\n  ],\n  \"needs_fix\": [],\n  \"skipped_nodes\": [],\n  \"counts\": {\"nodes_reviewed\": 5, \"nodes_marked_clean\": 5, \"nodes_skipped\": 0},\n  \"summary\": \"5 stale nodes reviewed, all marked clean. PRD capabilities updated.\"\n}\n```\n\n**Instructions:** `counts` is advisory only — the authoritative record is `auditor.changes-summary`. `needs_fix` categories: `code_bug`, `needs_new_tests`.\n\n### Continuation Checkpoint\n**Only present if the Auditor hit the context leash.** The Auditor writes partial progress to its own `auditor` section (nodes reviewed, remaining work) when returning `CONTINUING`. Already-marked-clean nodes won't appear stale on the next `axiom_graph_check`, so the fresh incarnation naturally skips them.\n\n**Example:**\n```\n### Continuation (incarnation 1)\nReviewed (12 of 20 stale nodes):\n- marked_clean: [node_id_1, node_id_2, ..., node_id_9]\n- needs_fix: [{node_id_10, category: logging, reason: \"missing tool entry/exit timing\"}]\n\nRemaining stale nodes:\n- node_id_13 through node_id_20\n\nPost-implementation updates completed:\n- [x] Capabilities table updated\n- [x] Interface spec updated\n- [ ] Doc-to-code links (not started)\n```"
+      "content": "**Filled by:** Orchestrator — writes the Auditor's returned Impact Report after the audit, plus a machine-rendered changes summary at Phase 8.\n\nTwo sub-sections live here:\n\n- `auditor.impact-report` — the Auditor's narrative (`findings`, `needs_fix`, advisory `counts`, `skipped_nodes`, `summary`).\n- `auditor.changes-summary` — written by the orchestrator at Phase 8 from `axiom_graph_report(since_sha=baseline_sha)`. This is the authoritative, mechanically-derived list of every doc section update, `mark_clean`, link addition/removal, and `AGENT_VERIFIED` event during the audit. The Auditor does NOT write a hand-typed change ledger.\n\n**Example Impact Report:**\n```json\n{\n  \"status\": \"DONE\",\n  \"findings\": [\n    {\n      \"area\": \"History tool params\",\n      \"nodes\": [\"axiom_graph::axiom_graph.history::get_history_since\"],\n      \"disposition\": \"clean\",\n      \"narrative\": \"New params added per spec; capabilities table updated to Done.\"\n    }\n  ],\n  \"needs_fix\": [],\n  \"skipped_nodes\": [],\n  \"counts\": {\"nodes_reviewed\": 5, \"nodes_marked_clean\": 5, \"nodes_skipped\": 0},\n  \"summary\": \"5 stale nodes reviewed, all marked clean. PRD capabilities updated.\"\n}\n```\n\n**Instructions:** `counts` is advisory only — the authoritative record is `auditor.changes-summary`. `needs_fix` categories: `code_bug`, `needs_new_tests`.\n\n### Continuation Checkpoint\n**Only present if the Auditor hit the context leash.** The Auditor writes partial progress to its own `auditor` section (nodes reviewed, remaining work) when returning `CONTINUING`. Already-marked-clean nodes won't appear stale on the next `axiom_graph_check`, so the fresh incarnation naturally skips them.\n\n**Example:**\n```\n### Continuation (incarnation 1)\nReviewed (12 of 20 stale nodes):\n- marked_clean: [node_id_1, node_id_2, ..., node_id_9]\n- needs_fix: [{node_id_10, category: logging, reason: \"missing tool entry/exit timing\"}]\n\nRemaining stale nodes:\n- node_id_13 through node_id_20\n\nPost-implementation updates completed:\n- [x] Capabilities table updated\n- [x] Interface spec updated\n- [ ] Doc-to-code links (not started)\n```",
+      "sections": [
+        {
+          "id": "impact-report",
+          "heading": "Impact Report",
+          "content": "(Orchestrator writes the Auditor's returned Impact Report here — findings, needs_fix, advisory counts, skipped_nodes, summary. See the Auditor Impact Report guidance above for the shape.)"
+        },
+        {
+          "id": "changes-summary",
+          "heading": "Changes Summary",
+          "content": "(Orchestrator writes this at Phase 8 from axiom_graph_report(since_sha=baseline) — the authoritative, mechanically-derived list of every doc section update, mark_clean, link addition/removal, and AGENT_VERIFIED event during the audit. The Auditor does NOT hand-write a change ledger.)"
+        },
+        {
+          "id": "friction",
+          "heading": "Friction",
+          "content": "(Empty — the Auditor appends friction observations here as it works; honest emptiness is fine. See the skill's Friction log section.)"
+        }
+      ]
     },
     {
       "id": "doc-review",
       "heading": "Doc Review",
-      "content": "**Filled by:** Orchestrator — writes the Doc Reviewer's verdict after doc review.\n\nThe Doc Reviewer returns this as structured data in its subagent completion message. The orchestrator writes it here.\n\n**Example:**\n```json\n{\n  \"status\": \"PASS\",\n  \"prd_accuracy\": [{\"doc_id\": \"axiom_graph::docs.features.history.sub_features.filtering.prd\", \"verdict\": \"PASS\", \"note\": \"All capabilities correctly marked Done\"}],\n  \"interface_completeness\": [{\"doc_id\": \"axiom_graph::docs.features.history.interfaces.data-model\", \"verdict\": \"PASS\", \"note\": null, \"missing\": []}],\n  \"summary\": \"All doc changes verified against implementation and templates.\"\n}\n```\n\n**Instructions:** If the Doc Reviewer returns FAIL, the orchestrator redispatches the Auditor with targeted fix instructions. After the Auditor fixes, the Doc Reviewer is re-dispatched. Max 2 loops before escalating to user.\n\n### Continuation Checkpoint\n**Only present if the Doc Reviewer hit the context leash.** Written by the orchestrator from the Doc Reviewer's return."
+      "content": "**Filled by:** Orchestrator — writes the Doc Reviewer's verdict after doc review.\n\nThe Doc Reviewer returns this as structured data in its subagent completion message. The orchestrator writes it here.\n\n**Example:**\n```json\n{\n  \"status\": \"PASS\",\n  \"prd_accuracy\": [{\"doc_id\": \"axiom_graph::docs.features.history.sub_features.filtering.prd\", \"verdict\": \"PASS\", \"note\": \"All capabilities correctly marked Done\"}],\n  \"interface_completeness\": [{\"doc_id\": \"axiom_graph::docs.features.history.interfaces.data-model\", \"verdict\": \"PASS\", \"note\": null, \"missing\": []}],\n  \"summary\": \"All doc changes verified against implementation and templates.\"\n}\n```\n\n**Instructions:** If the Doc Reviewer returns FAIL, the orchestrator redispatches the Auditor with targeted fix instructions. After the Auditor fixes, the Doc Reviewer is re-dispatched. Max 2 loops before escalating to user.\n\n### Continuation Checkpoint\n**Only present if the Doc Reviewer hit the context leash.** Written by the orchestrator from the Doc Reviewer's return.",
+      "sections": [
+        {
+          "id": "progress",
+          "heading": "Progress",
+          "content": "(Doc Reviewer records which doc categories it will scan vs skip — with reasons — and per-doc progress here.)"
+        },
+        {
+          "id": "findings",
+          "heading": "Findings",
+          "content": "(Doc Reviewer records per-doc findings here as it scans each applicable category.)"
+        },
+        {
+          "id": "friction",
+          "heading": "Friction",
+          "content": "(Empty — the Doc Reviewer appends friction observations here as it works; honest emptiness is fine. See the skill's Friction log section.)"
+        }
+      ]
+    },
+    {
+      "id": "orchestrator",
+      "heading": "Orchestrator Notes",
+      "content": "**Filled by:** Orchestrator — its own friction log for the cycle. The orchestrator's phase transitions and timestamps live in `status`; this section holds friction it notices while coordinating dispatches, gates, and merges.",
+      "sections": [
+        {
+          "id": "friction",
+          "heading": "Friction",
+          "content": "(Empty — the orchestrator appends friction observations here as it works; honest emptiness is fine. See the orchestrator skill's Friction log section.)"
+        }
+      ]
     },
     {
       "id": "friction-logs",
       "heading": "Friction Logs",
-      "content": "**Filled by:** Each agent (and the orchestrator) as they work — append-as-you-go, not post-hoc summary.\n\nFriction sections live at:\n- `{cycle_doc_id}::architect.friction`\n- `{cycle_doc_id}::builder.friction`\n- `{cycle_doc_id}::reviewer.friction`\n- `{cycle_doc_id}::auditor.friction`\n- `{cycle_doc_id}::doc-review.friction`\n- `{cycle_doc_id}::orchestrator.friction`\n\nEach agent captures friction in its own section when something pinches — an instruction that didn't fit the situation, tool output that was awkward, role constraints that forced awkward workarounds, upstream inputs that required guessing, effort disproportionate to value. This is not the same as `builder.deviations` (plan-deviation) or `decisions` (what-was-chosen) — it's the phenomenological signal: what was hard or felt off, regardless of whether the agent deviated.\n\n**Entry format:**\n```\n- **{short tag}** — {one line: what felt off}\n  Context: {raw paste — tool call, output, instruction fragment, error}\n  Wish: {optional — what would've made this easier}\n```\n\nThe short tag is the searchable handle. Over many cycles, `axiom_graph_search` across friction sections surfaces recurring patterns (axiom-graph-staleness, instruction-ambiguity, role-pinch, etc.) that drive skill, tool, and process evolution.\n\n**Empty is fine.** Agents do not invent friction to look thorough — honest emptiness beats fabricated observations.\n\nSections are created lazily on first write via `axiom_graph_update_section` (same pattern as `reviewer.progress`, `builder.build-plan`, `auditor.changes-summary`). Agents read the existing section before each append to avoid overwriting prior entries."
+      "content": "**Filled by:** Each agent (and the orchestrator) as they work — append-as-you-go, not post-hoc summary.\n\nFriction sections live at:\n- `{cycle_doc_id}::architect.friction`\n- `{cycle_doc_id}::builder.friction`\n- `{cycle_doc_id}::reviewer.friction`\n- `{cycle_doc_id}::auditor.friction`\n- `{cycle_doc_id}::doc-review.friction`\n- `{cycle_doc_id}::orchestrator.friction`\n\nEach agent captures friction in its own section when something pinches — an instruction that didn't fit the situation, tool output that was awkward, role constraints that forced awkward workarounds, upstream inputs that required guessing, effort disproportionate to value. This is not the same as `builder.deviations` (plan-deviation) or `decisions` (what-was-chosen) — it's the phenomenological signal: what was hard or felt off, regardless of whether the agent deviated.\n\n**Entry format:**\n```\n- **{short tag}** — {one line: what felt off}\n  Context: {raw paste — tool call, output, instruction fragment, error}\n  Wish: {optional — what would've made this easier}\n```\n\nThe short tag is the searchable handle. Over many cycles, `axiom_graph_search` across friction sections surfaces recurring patterns (axiom-graph-staleness, instruction-ambiguity, role-pinch, etc.) that drive skill, tool, and process evolution.\n\n**Empty is fine.** Agents do not invent friction to look thorough — honest emptiness beats fabricated observations.\n\nAll friction sub-sections (and `builder.build-plan`, `builder.progress`, `reviewer.progress`, `auditor.changes-summary`, etc.) are **pre-seeded by this template**, so agents fill them with `axiom_graph_update_section` directly. `axiom_graph_update_section` errors on a missing section — it does NOT create one — which is exactly why the template seeds every section the workflow writes to. Agents read the existing section before each append to avoid overwriting prior entries. (The only sections created at runtime are the incarnation-numbered continuation checkpoints, added with `axiom_graph_add_section`.)"
     }
   ]
 }

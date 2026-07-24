@@ -11,6 +11,8 @@ from axiom_graph.index import db
 from axiom_graph.models import AxiomNode
 from axiom_annotations import Step, workflow
 
+from tests.conftest import seed_section_node
+
 from axiom_graph.docjson.render_consumer import (
     render_doc_consumer,
     load_site_nav,
@@ -257,7 +259,6 @@ def _setup_doc_in_db(db_path: Path, doc_id: str, title: str, sections: list[dict
     )
     db.upsert_node(db_path, node, discovery_only=False)
     with db._connect(db_path) as conn:
-        # Insert into docs table first (foreign key target for doc_sections)
         doc_row = {
             "id": doc_id,
             "title": title,
@@ -268,20 +269,15 @@ def _setup_doc_in_db(db_path: Path, doc_id: str, title: str, sections: list[dict
         }
         db.upsert_doc(conn, doc_row)
         for i, sec in enumerate(sections):
-            sec_row = {
-                "id": f"{doc_id}::{sec['id']}",
-                "doc_id": doc_id,
-                "heading": sec["heading"],
-                "level": sec.get("level", 2),
-                "tags": json.dumps(sec.get("tags", [])),
-                "content": sec.get("content", ""),
-                "desc_hash": "hash",
-                "parent_id": None,
-                "depth": 0,
-                "position": i,
-                "updated_at": "2026-01-01T00:00:00Z",
-            }
-            db.upsert_doc_section(conn, sec_row)
+            seed_section_node(
+                conn,
+                f"{doc_id}::{sec['id']}",
+                heading=sec["heading"],
+                content=sec.get("content", ""),
+                level=sec.get("level", 2),
+                position=i,
+                tags=sec.get("tags", []),
+            )
 
 
 def _project(mini_project: Path, project_id: str = "test") -> Path:

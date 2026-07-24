@@ -341,8 +341,9 @@ def current_node_hash(
             return node.code_hash, node.desc_hash
         return js_map.get(node.id, (node.code_hash, node.desc_hash))
 
-    # DocJSON composite (file-level).
-    if subtype == "docjson" and node_type == "composite_process":
+    # DocJSON composite (file-level).  'docjson_doc' is the ADR-021 envelope
+    # subtype; legacy 'docjson' also covers markdown doc file nodes.
+    if subtype in ("docjson", "docjson_doc") and node_type == "composite_process":
         try:
             raw_text = abs_path.read_text(encoding="utf-8", errors="replace")
             file_hash = hash16(raw_text)
@@ -352,7 +353,7 @@ def current_node_hash(
             return node.code_hash, node.desc_hash
 
     # DocJSON atomic (section).
-    if subtype == "docjson" and node_type == "atomic_process":
+    if subtype in ("docjson", "docjson_section") and node_type == "atomic_process":
         proj_id = node.id.split("::")[0]
         scanned_map = _scan_docjson_sections(abs_path, project_root, proj_id)
         sn = scanned_map.get(node.id)
@@ -476,9 +477,9 @@ def current_node_hashes_for_file(
             ):
                 js_nodes.append(n)
             continue
-        if subtype == "docjson" and node_type == "composite_process":
+        if subtype in ("docjson", "docjson_doc") and node_type == "composite_process":
             docjson_composite_nodes.append(n)
-        elif subtype == "docjson" and node_type == "atomic_process":
+        elif subtype in ("docjson", "docjson_section") and node_type == "atomic_process":
             docjson_section_nodes.append(n)
         elif subtype in ("workflow", "task") and node_type == "composite_process":
             envelope_nodes.append(n)

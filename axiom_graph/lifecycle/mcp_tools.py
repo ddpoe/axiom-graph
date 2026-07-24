@@ -168,10 +168,8 @@ def axiom_graph_check(project_root: str, include_frozen: bool = False) -> str:
     )
     if cs.doc_quality_count:
         summary += f" · {cs.doc_quality_count} DOC_SECTION_LONG"
-    if cs.invariant_violations:
-        summary += f" · {cs.invariant_violations} INVARIANT_VIOLATION"
 
-    if cs.all_clean and not cs.doc_quality_count and not cs.invariant_violations:
+    if cs.all_clean and not cs.doc_quality_count:
         return summary + "\n(all nodes VERIFIED)"
     return summary
 
@@ -749,6 +747,19 @@ def axiom_graph_mark_clean(
         parts = [f"Marked {len(result.marked)} nodes as AGENT_VERIFIED.\nReason: {reason}"]
         if result.marked:
             parts.append("\nNodes:\n" + "\n".join(f"- {nid}" for nid in result.marked))
+        if result.inherited:
+            parts.append(
+                f"\n\nInherited LINKED_STALE — no direct effect ({len(result.inherited)}):\n"
+                + "\n".join(
+                    f"- {nid} (stale descendants: {', '.join(descs)})" for nid, descs in result.inherited.items()
+                )
+                + "\nMark the stale descendants clean to clear these aggregates."
+            )
+        if result.mixed:
+            parts.append(
+                f"\n\nOwn signal cleared; inherited LINKED_STALE remains ({len(result.mixed)}):\n"
+                + "\n".join(f"- {nid} (stale descendants: {', '.join(descs)})" for nid, descs in result.mixed.items())
+            )
         if result.not_found:
             parts.append(
                 f"\n\nNot found ({len(result.not_found)}):\n" + "\n".join(f"- {nid}" for nid in result.not_found)
@@ -759,7 +770,84 @@ def axiom_graph_mark_clean(
     result = _api.mark_clean_nodes(db_path, root, [node_id], reason, verified_by=verified_by)
     if result.not_found:
         return f"ERROR: Node '{node_id}' not found."
+    if node_id in result.inherited:
+        descs = result.inherited[node_id]
+        return (
+            f"Marked '{node_id}' as AGENT_VERIFIED, but its LINKED_STALE is "
+            f"inherited — no direct effect.\n"
+            f"LINKED_STALE is inherited from stale descendants:\n"
+            + "\n".join(f"- {d}" for d in descs)
+            + "\nMark those descendants clean (or reverify the node they depend on) to clear it.\n"
+            f"Reason: {reason}"
+        )
+    if node_id in result.mixed:
+        descs = result.mixed[node_id]
+        return (
+            f"Marked '{node_id}' as AGENT_VERIFIED.\n"
+            f"Own stale signal cleared; LINKED_STALE inherited from stale descendants remains:\n"
+            + "\n".join(f"- {d}" for d in descs)
+            + f"\nReason: {reason}"
+        )
     return f"Marked '{node_id}' as AGENT_VERIFIED.\nReason: {reason}"
+
+
+def axiom_graph_reverify(
+    project_root: str,
+    node_id: str,
+    reason: str,
+    verified_by: str = "agent",
+) -> str:
+    """Verify a node and clear the LINKED_STALE it caused, in one operation.
+
+    Assertion semantics: "I verified this node; my change to it does not
+    invalidate its dependents."  Composite sources (doc envelopes,
+    modules, sections with child sections) are expanded to their full
+    subtree; transitive doc-to-doc chains are resolved back to their
+    root offender before clearing.
+
+    Skip rule: a dependent that is also stale via *other* root offenders
+    is conservatively left LINKED_STALE and reported as skipped — clear
+    it by reverifying the other offenders (or an explicit mark_clean).
+
+    The operation finishes with a full staleness recompute, so
+    aggregates that clear by inheritance (e.g. a doc envelope whose
+    sections were cascade-cleared) read VERIFIED in this call's own
+    report.  Cascade-cleared nodes carry ``[reverify:<source>]``
+    provenance in their history rows.
+
+    Args:
+        project_root: Absolute path to the indexed project.
+        node_id: The node you verified (the staleness root).
+        reason: Brief explanation of why dependents remain accurate.
+        verified_by: Identifier for the verifier.  Defaults to
+            ``'agent'``; pass the model name for traceability.
+    """
+    logger.debug("axiom_graph_reverify: node_id=%s", node_id)
+
+    db_path = _require_db(project_root)
+    root = Path(project_root).resolve()
+
+    result = _api.reverify_node(db_path, root, node_id, reason, verified_by=verified_by)
+    if result.not_found:
+        return f"ERROR: Node '{node_id}' not found."
+
+    cascade_count = len(result.verified) - 1
+    parts = [
+        f"Reverified '{node_id}' — source verified"
+        + (f", {cascade_count} dependent(s) cascade-verified." if cascade_count else "."),
+        f"LINKED_STALE before: {result.before_linked_stale} -> after: {result.after_linked_stale}",
+    ]
+    if result.cleared:
+        parts.append(f"\nCleared ({len(result.cleared)}):\n" + "\n".join(f"- {nid}" for nid in result.cleared))
+    else:
+        parts.append("\nNothing to clear — no LINKED_STALE rooted at this node.")
+    if result.skipped:
+        parts.append(
+            f"\nSkipped — also stale via other offenders ({len(result.skipped)}):\n"
+            + "\n".join(f"- {nid} (other offenders: {', '.join(offs)})" for nid, offs in sorted(result.skipped.items()))
+        )
+    parts.append(f"Reason: {reason}")
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------

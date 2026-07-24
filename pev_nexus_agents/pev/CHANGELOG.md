@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the PEV / hook-spike Claude Code plugins. Versions loosely follow [Semantic Versioning](https://semver.org/) — major bumps mark breaking changes in doc layout or required consumer migration; minor bumps add features; patch bumps are fixes or docs.
+All notable changes to the **PEV** Claude Code plugin (and its sibling `hook-spike` spike harness, which shares this tag lineage). Versions loosely follow [Semantic Versioning](https://semver.org/) — major bumps mark breaking changes in doc layout or required consumer migration; minor bumps add features; patch bumps are fixes or docs.
 
 ## Compatibility
 
@@ -8,14 +8,38 @@ The PEV plugin drives the `axiom-graph` MCP server, so each plugin release has a
 
 | PEV plugin     | Requires axiom-graph |
 |----------------|----------------------|
-| 1.2.0 and up   | ≥ 2.1.0              |
+| 1.4.0 and up   | ≥ 2.2.0              |
+| 1.2.0 – 1.3.0  | ≥ 2.1.0              |
 | 1.0.0 – 1.1.1  | 2.0.x                |
+
+**Why 1.4.0 needs ≥ 2.2.0:** the clean-action toolsets now include `axiom_graph_reverify`, an MCP tool first shipped by the server in 2.2.0. Running PEV 1.4.0 against a 2.1.x server will fail the moment the Auditor or dev-shard attempts a `reverify` call.
 
 **Why 1.2.0 needs ≥ 2.1.0:** the agents now call `axiom_graph_patch_section`, an MCP tool first shipped by the server in 2.1.0. Running PEV 1.2.0 against the public 2.0.x server will fail the moment an agent attempts a `patch_section` edit.
 
-## [Unreleased]
+## [1.4.0] — 2026-07-24
 
-Nothing pending.
+> **Requires axiom-graph ≥ 2.2.0** (see [Compatibility](#compatibility)) — this release adds `axiom_graph_reverify` to the clean-action toolsets, and that MCP tool first ships in server 2.2.0. Minor: new capabilities (reverify wiring, Architect read tools, self-contained marker-reference skill), no consumer migration.
+
+### Fixed
+
+- **Setup docs named the wrong config key, silently leaving `.pev/` unindexed.** `SETUP.md` and `USER_GUIDE.md` both told consumers to add `.pev` to `doc_dirs` under `[axiom_graph.scan]`. The real key is `docs_dirs` — and axiom-graph ignores unrecognized keys without complaint, so a project that followed the instructions verbatim ended up with an unindexed `.pev/` and no error explaining why. Both files now name `docs_dirs` and call out the silent-ignore trap.
+
+### Added
+
+- **`axiom_graph_reverify` joins the clean-action toolset.** The server's new scoped-reverify verb — "I verified this node; my change to it does not invalidate its dependents", cascade-clearing the `LINKED_STALE` rooted at a source while conservatively skipping nodes also stale via other offenders — is wired into the two roles that clear staleness: the **cycle Auditor** (frontmatter grant, Step 4b verb-choice guidance, budget-gate overflow allowlist in `pev-tool-gate.sh`, Auditor Reference Protocol) and the **dev-docs audit shard** (frontmatter grant; Pass-2/backlog plans may propose `reverify` for `LINKED_STALE` clusters sharing one root offender, with the absorbed entries listed at the plan gate). `/pev-instance`'s "Close the staleness loop" step points to it for source-rooted cascades. The verb-choice rule is the same everywhere: `reverify` is for changes *inconsequential to dependents* (the test-assertion-tweak-flips-20-nodes case), guarded by a pre-flight cascade skim — dependents describing the changed aspect are prose-updated and `mark_clean`ed individually before the blanket sweeps the remainder. Clean-action exclusivity is unchanged — Builder/Reviewer/Architect don't get it, the Doc Reviewer stays flag-only. The sticky-`LINKED_STALE` prose is reworded plugin-wide from "only `mark_clean` clears it" to "only an explicit verification clears it" (`mark_clean` on the dependent, or `reverify` on the root offender); the invariant itself — never auto-clear on edit; cascade-cleared nodes carry `[reverify:<source>]` provenance — holds.
+- **The Architect can now read files directly (`Read`, `Grep`, `Glob`).** It was previously confined to axiom-graph tools, which left it blind to files the graph doesn't index well — configs, raw test files, git-ignored sources. The three read-only filesystem tools are added to its grant; mutation stays out (no `Edit`/`Write`/`Bash`), so the plan-only guarantee is unchanged. This aligns the implementation with the `DESIGN.md` capability table, whose "Read code" row already listed `Read`/`Grep` for the Architect. The "no Bash" assertions in `agents/pev-architect.md` and `skills/pev-architect/SKILL.md` are updated to note the new read-only access. No hook changes: the budget gate still clamps the Architect to doc-write tools past its call limit, and `Bash` remains ungranted (so the un-read-only-gated `pev-bash-scope.sh` is not a concern for this agent).
+- **The annotation marker reference is wired into the agents that write, review, and audit markers — and is now self-contained.** The `axiom-annotations-markers` skill was orphaned: no PEV agent declared it, and it was a thin pointer that rendered a doc (`axiom_graph::docs.references.axiom-annotations-markers`) living only in the cortex graph, so it broke when the plugin ran in any other project. The skill now **inlines the full reference** (core rule, decorators, `Step`/`AutoStep` numbering, common-mistakes, pattern summary) and is granted to the **Builder**, **Reviewer**, **Architect**, and **annotations-fixer** agents (frontmatter `skills:`) plus pointed to from `/pev-instance`. The skill is now the single canonical home for the marker reference; the former cortex DocJSON `docs/references/axiom-annotations-markers.json` is superseded and no longer maintained. The Architect's prose gains two related additions: (a) it **flags affected workflows as candidates for marker/step updates** for the Builder to work out (orientation, not prescription), and (b) a required **Existing coverage?** column in `architect.test-plan`, so a proposed test that cites existing coverage — or only re-checks unchanged behavior — self-eliminates as redundant at the approval gate.
+
+### Fixed
+
+- **Auditor budget-gate prose now matches the hook's actual allowlist.** The pev-auditor skill's Budget Management section listed `axiom_graph_add_link` as available past the gate and omitted `patch_section`, `delete_link`, `update_doc_meta`, and `purge_node` — none of which matched the `pev-tool-gate.sh` allowlist. The listed toolset is aligned with the hook (and both now include `reverify`).
+- **Cycle manifest is now seeded with every section the workflow writes to.** PEV subagents and the orchestrator persist phase output with `axiom_graph_update_section`, which **errors on a missing section** (it does not create one) — yet the cycle-manifest template omitted many sections the workflow targets: `decisions`, `review`, `builder.build-plan` / `builder.progress` / `builder.manifest`, `reviewer.progress`, `auditor.impact-report` / `auditor.changes-summary`, `doc-review.progress` / `doc-review.findings`, and every `{agent}.friction` sub-section. Agents hit "section not found", and the orchestrator silently dropped still more sections because it *hand-reconstructed* the manifest from a prose description instead of copying the template. Fix: the template (`templates/cycle-manifest-template.json`) now pre-seeds all 35 written-to sections, and the orchestrator creates the manifest by **copying the template verbatim** (`templates/pev-orchestrator-reference.md` → Manifest Creation), filling only `status` and `request` and omitting the template-only `purpose` section. The incorrect "sections are created lazily on first write via `axiom_graph_update_section`" claim is corrected in the template's `friction-logs` note and in `DESIGN.md` — only the incarnation-numbered continuation checkpoints are created at runtime (via `axiom_graph_add_section`).
+
+### Changed
+
+- **This changelog now lives inside the `pev` plugin** (`pev_nexus_agents/pev/CHANGELOG.md`) instead of at the nexus/marketplace root, so the plugin's release history ships with the plugin.
+- **Agents can find a project SOP when the file path doesn't resolve.** Doc ids flatten every configured `docs_dirs` root into a single `docs.` namespace, so `.pev/test-policy.json` is indexed as `{project_id}::docs.test-policy` — `.pev` never appears in a doc id. Reading a listing that doesn't mention `.pev` as "the root isn't indexed" is a wrong inference that has already cost a session. The Architect, Builder, Reviewer, Auditor, Doc Reviewer, `/pev-cycle`, and `/pev-instance` skills now each state the flattening rule and give the graph route (`axiom_graph_read_doc` on the flattened id, or `axiom_graph_search`) as a fallback after the path lookups. With server ≥ 2.2.0 — this plugin's floor — `axiom_graph_list` and `read_doc("list")` also print each doc's file path, so the root a doc came from is visible directly.
+- **User guide documents the multi-root doc model.** `docs.consumer.plugins.pev.user-guide` gains an indexing subsection covering the `docs_dirs` key and its silent-ignore trap, the flattened namespace, the cross-root id collision (and the build warning for it), and `write_doc(docs_root=...)` for authoring into `.pev/`.
 
 ## [1.3.0] — 2026-06-14
 

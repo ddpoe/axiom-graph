@@ -226,7 +226,7 @@ For code that already had logging, check if the logging was updated to reflect t
 
 #### 5b. Test annotation audit (against Architect's test plan)
 
-Read the project's test policy at `{worktree_path}/.pev/test-policy.json` for the tier decision rule and annotation contract — fall back to `${CLAUDE_PLUGIN_ROOT}/templates/test-policy.json` if the project file doesn't exist. Then compare the Builder's actual tests against the Architect's `test-plan` table row by row.
+Read the project's test policy at `{worktree_path}/.pev/test-policy.json` for the tier decision rule and annotation contract — fall back to `${CLAUDE_PLUGIN_ROOT}/templates/test-policy.json` if the project file doesn't exist. If neither path resolves, try the graph: SOPs under a configured `.pev` docs root are indexed as `{project_id}::docs.test-policy` (every `docs_dirs` root flattens into the one `docs.` namespace), so `axiom_graph_read_doc` reaches them even though no listing ever prints `.pev` in a doc id. Then compare the Builder's actual tests against the Architect's `test-plan` table row by row.
 
 **Also read the project's review criteria** at `{worktree_path}/.pev/review-criteria.json` if present — this file is optional but, when it exists, encodes project-specific emphasis (logging conventions, error-handling patterns, anti-patterns). Apply its checks in Pass 4 alongside generic code-quality review. Each finding takes the severity from the review-criteria file (`critical` / `important` / `minor`).
 
@@ -273,6 +273,7 @@ For each workflow-marked function the Builder modified:
 - Compare the step sequence against current code via `axiom_graph_source`
 - Flag: missing steps, out-of-order steps, ghost steps (describe removed behavior), wrong marker types, minor steps outside loops
 - If the Builder changed the function's behavior without updating the step markers, that's a **Pass 5c failure**, not just a Pass 4 style note
+- For the canonical rules behind these flags — minor-step-in-loop, `AutoStep`-vs-`Step` delegation, valid marker fields — use the `axiom-annotations-markers` skill rather than judging from memory
 
 #### 5d. Workflow taxonomy hygiene — suggesting additions / modifications
 

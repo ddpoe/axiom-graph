@@ -48,6 +48,8 @@ Read({project_root}/.pev/doc-topology.json)
 Read(${CLAUDE_PLUGIN_ROOT}/templates/doc-topology.json)
 ```
 
+**Second fallback:** if neither path resolves, read it from the graph — `axiom_graph_read_doc(project_root, "{project_id}::docs.doc-topology")`. A `.pev` root configured in `docs_dirs` is indexed under the flattened `docs.` namespace like every other root, so `.pev` never appears in a doc id. Don't read the absence of `.pev` from a listing as proof the root isn't indexed.
+
 The guide tells you:
 - Which doc categories exist in this project (PRD, interface spec, ADR, design spec, README, etc.)
 - Where each lives (path glob)

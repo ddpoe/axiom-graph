@@ -127,14 +127,18 @@ Only the structure is JSON; the content is markdown you can read directly in any
 
 ### axiom-graph indexing (optional)
 
-If you want `axiom_graph_search` / `axiom_graph_history` over your SOPs, add `.pev` to `doc_dirs` in your `axiom-graph.toml`:
+If you want `axiom_graph_search` / `axiom_graph_history` over your SOPs, add `.pev` to `docs_dirs` in your `axiom-graph.toml`:
 
 ```toml
 [axiom_graph.scan]
-doc_dirs = ["docs", ".pev"]
+docs_dirs = ["docs", ".pev"]
 ```
 
-Then run `axiom-graph build .`. Not required for skills to function — they read files directly via the Read tool.
+The key is `docs_dirs`, not `doc_dirs` — a misspelled key is ignored silently and `.pev` stays unindexed with no error.
+
+Then run `axiom-graph build .`. Not required for skills to function — they read the files directly — but it gives every agent a second route to your SOPs when a path lookup fails, and makes them searchable.
+
+Once indexed, SOPs are addressed by doc id, and every configured root flattens into a single `docs.` namespace: `.pev/test-policy.json` is `{project_id}::docs.test-policy`, not `docs.pev.test-policy`. The root never appears in the id — so a listing without `.pev` in it tells you nothing about whether `.pev` was indexed. Use `axiom_graph_read_doc(project_root, "{project_id}::docs.test-policy")` to reach it directly, or read the file path that `axiom_graph_list` prints beside each doc row.
 
 ## Typical walk-through
 

@@ -241,6 +241,34 @@ def run():
     assert any(e.from_id == "proj::pipe::run::step-1" and e.to_id == "proj::tasks::do_it" for e in delegates)
 
 
+@workflow(purpose="AutoStep delegating to a same-file function emits delegates_to")
+def test_autostep_emits_delegates_to_local_function(tmp_path):
+    """AutoStep, then a bare call to a function defined later in the SAME file.
+
+    The delegate is defined *after* the workflow, so resolution must see
+    forward references — the local-function map is a whole-module pre-pass.
+    """
+    f = _write(
+        tmp_path / "cli.py",
+        """
+from axiom_annotations import workflow, task, AutoStep
+
+@workflow(purpose="runs a step")
+def run_step():
+    口 = AutoStep(step_num=6, name="Complete run")
+    complete_run(run_id=1)
+
+@task(purpose="finish the run")
+def complete_run(run_id):
+    return None
+""".lstrip(),
+    )
+    nodes, edges = module_scanner.scan_module(f, tmp_path, "proj")
+    delegates = [e for e in edges if e.edge_type == "delegates_to"]
+    assert delegates, "expected a delegates_to edge to the same-file function"
+    assert any(e.from_id == "proj::cli::run_step::step-6" and e.to_id == "proj::cli::complete_run" for e in delegates)
+
+
 @workflow(purpose="AutoStep without a following task call emits no delegates_to")
 def test_autostep_no_call_emits_no_delegates(tmp_path):
     """AutoStep followed only by print(...) → step node emitted, no delegates_to."""

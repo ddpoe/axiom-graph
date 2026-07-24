@@ -37,8 +37,6 @@ def _write_doc(project_root: Path, slug: str, title: str, sections: list[dict], 
     with db._connect(db_path) as conn:
         for rec in doc_recs:
             db.upsert_doc(conn, rec)
-        for rec in sec_recs:
-            db.upsert_doc_section(conn, rec)
     return doc_path
 
 

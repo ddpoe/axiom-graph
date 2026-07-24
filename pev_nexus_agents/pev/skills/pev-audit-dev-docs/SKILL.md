@@ -8,7 +8,7 @@ user-invocable: true
 
 You orchestrate a backlog audit of dev-doc graph-staleness drift by dispatching `pev-audit-dev-shard` subagents sequentially across feature subtrees. Each shard produces a whole-slice plan covering two passes (ghost → backlog); execute is dispatched once per pass per shard. All mutation is gated by user approval at the plan-review step.
 
-**LINKED_STALE is sticky.** It is set when an upstream node has a CONTENT-class history event and only clears via explicit `mark_clean` on the consumer (which writes `node_verification.verified_at`). Editing the consumer doesn't verify it; Pass-1 actions don't auto-cascade-clear consumer LS. Every LS / CU / DU node in scope is walked individually in Pass 2.
+**LINKED_STALE is sticky.** It is set when an upstream node has a CONTENT-class history event and only clears via explicit verification — `mark_clean` on the consumer, or `reverify` on the root offender (which cascade-clears the LINKED_STALE rooted there through the same verification machinery, with `[reverify:<source>]` provenance). Editing the consumer doesn't verify it; Pass-1 actions don't auto-cascade-clear consumer LS. Every LS / CU / DU node in scope is walked individually in Pass 2 — a planned `reverify` just lets one walked cluster resolve with one call.
 
 `${CLAUDE_PROJECT_DIR}` is the consumer project root. `${CLAUDE_PLUGIN_ROOT}` is the PEV plugin's install directory.
 
@@ -153,11 +153,11 @@ Read your slice from the manifest: axiom_graph_read_doc(project_root, "{audit-ma
 Walk every node in your slice. Produce a whole-slice plan covering two passes:
 
   Pass 1 (ghost): every NOT_FOUND / BROKEN_LINK node — classify and propose action (purge / repoint / delete_link / friction-flag).
-  Pass 2 (backlog): every LINKED_STALE / CONTENT_UPDATED / DESC_UPDATED node — classify as refactor-noise (mark_clean) or semantic-shift (update_section). LINKED_STALE is sticky; do NOT assume Pass 1 actions will auto-clear any Pass-2 entries. Every LS / CU / DU node in your slice must be walked individually.
+  Pass 2 (backlog): every LINKED_STALE / CONTENT_UPDATED / DESC_UPDATED node — classify as refactor-noise (mark_clean; or reverify on the root offender when a cluster of LINKED_STALE entries trace to one source whose change is inconsequential to all of them — list the entries the reverify will absorb so the gate reviews the blanket, and if even one entry in the cluster is semantic-shift, plan its update_section + mark_clean first and reverify only the remainder) or semantic-shift (update_section). LINKED_STALE is sticky; do NOT assume Pass 1 actions will auto-clear any Pass-2 entries. Every LS / CU / DU node in your slice must be walked individually — a planned reverify is one action absorbing a walked cluster, not a skipped walk.
 
 Write each pass's plan to shard-{shard-id}.plan-{pass-id} (pass-id ∈ ghost, backlog) via axiom_graph_update_section. The orchestrator has pre-created these placeholder sections; you only need update_section.
 
-Each plan entry should include: node-id, current staleness, proposed action (mark_clean / update_section / delete_link / update_doc_meta / friction-flag), and a one-line rationale. For update_section actions, include the current-vs-proposed diff inline so the user can review at the gate.
+Each plan entry should include: node-id, current staleness, proposed action (mark_clean / reverify / update_section / delete_link / update_doc_meta / friction-flag), and a one-line rationale. For update_section actions, include the current-vs-proposed diff inline so the user can review at the gate. For reverify actions, the entry's node-id is the root offender — list every LINKED_STALE entry the cascade will absorb so the user approves the blanket knowingly.
 
 If you encounter a node where ghost-resolution reveals missing code wiring (the doc references a function that should still exist but is genuinely missing), do NOT plan a code edit. Add a friction-flag entry with a suggested spawn-request payload: { "slug": "...", "summary": "...", "scope": "..." }.
 
@@ -187,7 +187,7 @@ Record findings (or "no unusual patterns") in `orchestrator.plans-review.cross-s
 ```
 Shard: {shard-id}  ({N} nodes total)
   Pass 1 ghost: {ghost-count} actions ({purge: P, delete_link: W, repoint: R, friction: F})
-  Pass 2 backlog: {backlog-count} actions ({mark_clean: M, update_section: U, update_doc_meta: D, friction: F2})
+  Pass 2 backlog: {backlog-count} actions ({mark_clean: M, reverify: R (absorbing A LS entries), update_section: U, update_doc_meta: D, friction: F2})
 ```
 
 For non-trivial `update_section` actions, render the proposed diff inline. For `friction`-flagged spawn-request candidates, render the suggested slug + summary.
@@ -207,7 +207,7 @@ axiom_graph_check(project_root="${CLAUDE_PROJECT_DIR}")
 axiom_graph_drift_query(project_root="${CLAUDE_PROJECT_DIR}", filter="links", format="counts", group_by="status")
 ```
 
-This confirms Pass 1's actions landed (NOT_FOUND / BROKEN_LINK counts should drop). It does NOT trim Pass 2: LINKED_STALE is sticky and only clears via per-node `mark_clean`, so every Pass-2 entry in the original plan remains actionable. The re-run is a sanity check, not a trimming step.
+This confirms Pass 1's actions landed (NOT_FOUND / BROKEN_LINK counts should drop). It does NOT trim Pass 2: LINKED_STALE is sticky and only clears via explicit verification (per-node `mark_clean`, or an approved `reverify` on a root offender), so every Pass-2 entry in the original plan remains actionable. The re-run is a sanity check, not a trimming step.
 
 **Before each per-pass dispatch**, pre-create the agent's execute output section for that pass via `axiom_graph_add_section`:
 
@@ -231,7 +231,8 @@ Read your assigned pass's plan from shard-{shard-id}.plan-{pass} via axiom_graph
 LINKED_STALE is sticky — Pass 1 actions do NOT auto-clear any Pass 2 entries. If you want to confirm an entry is still actionable, call axiom_graph_drift_query(filter="all", location_glob=YOUR_SLICE_GLOB, format="full") to enumerate your slice; skip only entries whose own_status changed (e.g., a node now NOT_FOUND that was CONTENT_UPDATED), not entries you assume "must have cleared by now."
 
 Perform the planned actions one at a time:
-  - mark_clean    → axiom_graph_mark_clean (per-node verification; only path to clear LINKED_STALE)
+  - mark_clean    → axiom_graph_mark_clean (per-node verification)
+  - reverify      → axiom_graph_reverify (root-offender verification; cascade-clears the LINKED_STALE rooted at the source per your approved plan entry; it skips and reports entries also stale via other offenders — those still need their own planned action)
   - update_section → axiom_graph_update_section (use the proposed-content from your plan entry)
   - update_doc_meta → axiom_graph_update_doc_meta
   - delete_link   → axiom_graph_delete_link

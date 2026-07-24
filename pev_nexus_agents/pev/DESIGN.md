@@ -52,12 +52,12 @@ Each agent's `tools:` frontmatter is a runtime-enforced allowlist. Agents cannot
 | Write cycle manifest (`axiom_graph_update_section`) | ✓ | ✓ | ✓ | (not used) | ✓ | ✓ |
 | Write live feature docs | ✗ | ✗ | ✗ | **✓** | ✗ | ✓¹ |
 | `axiom_graph_build` / `axiom_graph_check` | ✓ | ✓ | ✓ (check only) | ✓ | ✗ | ✓ |
-| `axiom_graph_mark_clean`, `axiom_graph_purge_node` | ✗ | ✗ | ✗ | **✓** | ✗ | ✓¹ |
+| `axiom_graph_mark_clean`, `axiom_graph_reverify`, `axiom_graph_purge_node` | ✗ | ✗ | ✗ | **✓** | ✗ | ✓¹ |
 | Commit in git | ✗ | ✓³ | ✗ | ✗ | ✗ | ✓ |
 | User interaction | Proxy⁴ | ✗ | Proxy⁴ | Proxy⁴ | Proxy⁴ | Direct |
 | Dispatch subagents | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 
-**¹ `/pev-instance`** runs in the user's main session — no subagent dispatch. Full tool access by design; the discipline comes from the skill's prompt, not tool restriction. This is precisely why it is the exception to the invariant above: the one agent both writes code *and* updates live docs (`mark_clean` included), folding the Auditor's doc-update role into itself for small tasks. See the `/pev-instance` skill's "Audit & doc update" step.
+**¹ `/pev-instance`** runs in the user's main session — no subagent dispatch. Full tool access by design; the discipline comes from the skill's prompt, not tool restriction. This is precisely why it is the exception to the invariant above: the one agent both writes code *and* updates live docs (`mark_clean`/`reverify` included), folding the Auditor's doc-update role into itself for small tasks. See the `/pev-instance` skill's "Audit & doc update" step.
 
 **² Reviewer has `Bash`** for read-only use (`git diff`, `pytest`, `git log`). `Edit` and `Write` are absent from its allowlist. It's expected to use Bash only for inspection.
 
@@ -133,7 +133,7 @@ This is distinct from the `decisions` log (cycle-wide record of what was chosen 
 
 Entries follow a short-tag + raw-context-paste format documented in each skill and in the cycle-manifest template's `friction-logs` section. Initiative-based, not gated — agents capture in-the-moment or not at all. Empty sections are expected and acceptable; the value compounds across cycles as `axiom_graph_search` surfaces recurring tags (e.g., `axiom-graph-staleness`, `instruction-ambiguity`, `role-pinch`) that drive skill and tool evolution.
 
-Sections are created lazily on first write via `axiom_graph_update_section` — same pattern as `reviewer.progress`, `builder.build-plan`, and `auditor.changes-summary`.
+All friction sub-sections — and the other agent-owned sections (`builder.build-plan`, `builder.progress`, `reviewer.progress`, `auditor.impact-report`, `auditor.changes-summary`, `doc-review.progress`, `doc-review.findings`) — are **pre-seeded by the cycle-manifest template** and filled with `axiom_graph_update_section`. (`axiom_graph_update_section` errors on a missing section rather than creating one, so the template must seed every section the workflow writes to; the orchestrator copies the template verbatim. The only sections created at runtime are the incarnation-numbered continuation checkpoints, added with `axiom_graph_add_section`.)
 
 ## Agent responsibilities (one-line each)
 

@@ -34,6 +34,8 @@ let _viewRaw = false;
 let _collapsedSections: Set<string> | null = null;
 let _expandedSubsections: Set<string> | null = null;
 let _scrollObserver: IntersectionObserver | null = null;
+let _savedScrollTop = 0;
+let _preserveScroll = false;
 
 // ── Getters ─────────────────────────────────────────────────────────────────
 
@@ -52,6 +54,8 @@ export function resetEditor(): void {
   _viewRaw = false;
   _collapsedSections = null;
   _expandedSubsections = null;
+  _savedScrollTop = 0;
+  _preserveScroll = false;
   destroyEditors();
   destroyScrollObserver();
   destroyRawMonaco();
@@ -903,7 +907,28 @@ export function setRerenderCallback(fn: () => void): void {
 }
 
 function _rerender(): void {
+  // Capture the doc scroll offset before the re-render replaces #doc-content
+  // (the overflow-y:auto scroll container) via innerHTML, which would otherwise
+  // reset scrollTop to 0. The flag gates restoration to re-renders only -- a
+  // fresh doc load runs resetEditor (clearing the flag), so it lands at the top.
+  const scrollEl = document.getElementById('doc-content');
+  if (scrollEl) {
+    _savedScrollTop = scrollEl.scrollTop;
+    _preserveScroll = true;
+  }
   if (_rerenderFn) _rerenderFn();
+}
+
+/**
+ * Reapply the scroll offset captured by _rerender to the freshly rebuilt
+ * #doc-content. No-op on a fresh doc load (flag not set), so new docs open at
+ * the top.
+ */
+function _restoreScroll(contentEl: HTMLElement): void {
+  if (!_preserveScroll) return;
+  const el = contentEl.querySelector('#doc-content') as HTMLElement | null;
+  if (el) el.scrollTop = _savedScrollTop;
+  _preserveScroll = false;
 }
 
 /**
@@ -979,6 +1004,7 @@ export function renderDocContent(contentEl: HTMLElement): void {
     contentEl.innerHTML = html;
     _wireRawSourceEvents(contentEl);
     _mountRawMonaco();
+    _restoreScroll(contentEl);
     return;
   }
 
@@ -1345,6 +1371,9 @@ export function renderDocContent(contentEl: HTMLElement): void {
 
   // Build TOC sidebar
   _renderTocSidebar(contentEl);
+
+  // Reapply the pre-re-render scroll offset (no-op on a fresh doc load).
+  _restoreScroll(contentEl);
 }
 
 function _renderLinkSearchResults(sectionIdx: number, existingLinks: any[]): string {

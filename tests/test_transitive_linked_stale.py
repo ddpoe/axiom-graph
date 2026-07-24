@@ -7,6 +7,8 @@ positives, via in CLI text output, via in JSON output.
 
 from __future__ import annotations
 
+from tests.conftest import seed_section_tuple
+
 import json
 import time
 from pathlib import Path
@@ -89,9 +91,8 @@ def _seed_doc_graph(db_path: Path, *, tags: str = '["consumer"]') -> None:
             "INSERT OR REPLACE INTO docs (id, title, tags, file_path, desc_hash, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
             ("proj::docs.spec", "Spec", "[]", "docs/spec.json", None, now),
         )
-        conn.execute(
-            "INSERT OR REPLACE INTO doc_sections (id, doc_id, heading, level, tags, content, desc_hash, parent_id, depth, position, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        seed_section_tuple(
+            conn,
             (
                 "proj::docs.spec::overview",
                 "proj::docs.spec",
@@ -110,9 +111,8 @@ def _seed_doc_graph(db_path: Path, *, tags: str = '["consumer"]') -> None:
             "INSERT OR REPLACE INTO docs (id, title, tags, file_path, desc_hash, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
             ("proj::docs.guide", "Guide", tags, "docs/guide.json", None, now),
         )
-        conn.execute(
-            "INSERT OR REPLACE INTO doc_sections (id, doc_id, heading, level, tags, content, desc_hash, parent_id, depth, position, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        seed_section_tuple(
+            conn,
             ("proj::docs.guide::intro", "proj::docs.guide", "Intro", 2, None, "guide content", None, None, 0, 0, now),
         )
 
@@ -236,20 +236,16 @@ class TestCycleDetection:
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 ("proj::docs.a", "Doc A", '["consumer"]', "docs/a.json", None, now),
             )
-            conn.execute(
-                "INSERT OR REPLACE INTO doc_sections (id, doc_id, heading, level, tags, content, desc_hash, parent_id, depth, position, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("proj::docs.a::sec", "proj::docs.a", "Sec A", 2, None, "a", None, None, 0, 0, now),
+            seed_section_tuple(
+                conn, ("proj::docs.a::sec", "proj::docs.a", "Sec A", 2, None, "a", None, None, 0, 0, now)
             )
             conn.execute(
                 "INSERT OR REPLACE INTO docs (id, title, tags, file_path, desc_hash, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 ("proj::docs.b", "Doc B", '["consumer"]', "docs/b.json", None, now),
             )
-            conn.execute(
-                "INSERT OR REPLACE INTO doc_sections (id, doc_id, heading, level, tags, content, desc_hash, parent_id, depth, position, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("proj::docs.b::sec", "proj::docs.b", "Sec B", 2, None, "b", None, None, 0, 0, now),
+            seed_section_tuple(
+                conn, ("proj::docs.b::sec", "proj::docs.b", "Sec B", 2, None, "b", None, None, 0, 0, now)
             )
 
             # doc_a -> code_fn (direct)
@@ -311,21 +307,15 @@ class TestMultipleCauses:
                 ("proj::docs.spec1::sec", "proj::docs.spec1"),
                 ("proj::docs.spec2::sec", "proj::docs.spec2"),
             ]:
-                conn.execute(
-                    "INSERT OR REPLACE INTO doc_sections (id, doc_id, heading, level, tags, content, desc_hash, parent_id, depth, position, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (sec_id, doc_id, "Sec", 2, None, "x", None, None, 0, 0, now),
-                )
+                seed_section_tuple(conn, (sec_id, doc_id, "Sec", 2, None, "x", None, None, 0, 0, now))
 
             conn.execute(
                 "INSERT OR REPLACE INTO docs (id, title, tags, file_path, desc_hash, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 ("proj::docs.guide", "Guide", '["consumer"]', "docs/guide.json", None, now),
             )
-            conn.execute(
-                "INSERT OR REPLACE INTO doc_sections (id, doc_id, heading, level, tags, content, desc_hash, parent_id, depth, position, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("proj::docs.guide::sec", "proj::docs.guide", "Sec", 2, None, "guide", None, None, 0, 0, now),
+            seed_section_tuple(
+                conn, ("proj::docs.guide::sec", "proj::docs.guide", "Sec", 2, None, "guide", None, None, 0, 0, now)
             )
 
             # edges: spec1 -> code_fn1, spec2 -> code_fn2
@@ -377,19 +367,15 @@ class TestNoFalsePositives:
                 "INSERT OR REPLACE INTO docs (id, title, tags, file_path, desc_hash, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                 ("proj::docs.spec", "Spec", "[]", "docs/spec.json", None, now),
             )
-            conn.execute(
-                "INSERT OR REPLACE INTO doc_sections (id, doc_id, heading, level, tags, content, desc_hash, parent_id, depth, position, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("proj::docs.spec::sec", "proj::docs.spec", "Sec", 2, None, "x", None, None, 0, 0, now),
+            seed_section_tuple(
+                conn, ("proj::docs.spec::sec", "proj::docs.spec", "Sec", 2, None, "x", None, None, 0, 0, now)
             )
             conn.execute(
                 "INSERT OR REPLACE INTO docs (id, title, tags, file_path, desc_hash, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                 ("proj::docs.guide", "Guide", '["consumer"]', "docs/guide.json", None, now),
             )
-            conn.execute(
-                "INSERT OR REPLACE INTO doc_sections (id, doc_id, heading, level, tags, content, desc_hash, parent_id, depth, position, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("proj::docs.guide::sec", "proj::docs.guide", "Sec", 2, None, "guide", None, None, 0, 0, now),
+            seed_section_tuple(
+                conn, ("proj::docs.guide::sec", "proj::docs.guide", "Sec", 2, None, "guide", None, None, 0, 0, now)
             )
 
             # spec -> code (documents), consumer -> spec (documents)
@@ -556,10 +542,8 @@ class TestFrozenTagsPropagation:
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 ("proj::docs.adr-001", "ADR-001", '["adr"]', "docs/adr-001.json", None, now),
             )
-            conn.execute(
-                "INSERT OR REPLACE INTO doc_sections (id, doc_id, heading, level, tags, content, "
-                "desc_hash, parent_id, depth, position, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            seed_section_tuple(
+                conn,
                 (
                     "proj::docs.adr-001::ctx",
                     "proj::docs.adr-001",
@@ -662,10 +646,8 @@ class TestFrozenTagsPropagation:
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 ("proj::docs.adr-001", "ADR-001", '["adr"]', "docs/adr-001.json", None, now),
             )
-            conn.execute(
-                "INSERT OR REPLACE INTO doc_sections (id, doc_id, heading, level, tags, content, "
-                "desc_hash, parent_id, depth, position, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            seed_section_tuple(
+                conn,
                 (
                     "proj::docs.adr-001::ctx",
                     "proj::docs.adr-001",

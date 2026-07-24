@@ -18,9 +18,9 @@ axiom-graph/                                  ← monorepo root (axiom_graph, ax
 ├── .claude-plugin/marketplace.json           ← plugin registry
 └── pev_nexus_agents/
     ├── AGENTS.md                             ← you are here
-    ├── CHANGELOG.md                          ← plugin release history (prefixed tags: pev-v*, hook-spike-v*)
     ├── README.md                             ← plugins landing
     ├── pev/
+    │   ├── CHANGELOG.md                      ← plugin release history (prefixed tags: pev-v*, hook-spike-v*)
     │   ├── README.md                         ← PEV plugin landing
     │   ├── USER_GUIDE.md                     ← how to use /pev-cycle + /pev-instance
     │   ├── DESIGN.md                         ← architecture, tool permissions, hook model
@@ -48,7 +48,7 @@ axiom-graph/                                  ← monorepo root (axiom_graph, ax
 | Using PEV in a consumer project (after setup) | `pev_nexus_agents/pev/USER_GUIDE.md` |
 | Adding a new hook to the `pev` plugin | `pev_nexus_agents/hook-spike/TROUBLESHOOTING.md` §9 (5-step checklist) then `pev_nexus_agents/pev/DESIGN.md` (hook invariants) |
 | Adding a new SOP file (`.pev/<new>.json`) | `pev_nexus_agents/pev/DESIGN.md` (SOP extension rules) |
-| Reasoning about a regression or comparing against a known-good version | `CHANGELOG.md` |
+| Reasoning about a regression or comparing against a known-good version | `pev/CHANGELOG.md` |
 | Testing a change to PEV's hook behavior | `pev_nexus_agents/pev/skills/pev-spike/SKILL.md` (11-test integration) |
 | Testing a change to plugin infrastructure broadly | `pev_nexus_agents/hook-spike/skills/*/SKILL.md` (hook-spike matrix + heartbeat) |
 

@@ -1,4 +1,4 @@
-<!-- generated from axiom_graph::docs.consumer.examples.docs-honesty-loop @ f10d512d9293; do not edit -->
+<!-- generated from axiom_graph::docs.consumer.examples.docs-honesty-loop @ 4b6969d300cf; do not edit -->
 
 # Tutorial: The Docs-Honesty Loop
 
@@ -177,6 +177,8 @@ axiom-graph render-site /path/to/project
 `render-site` walks the nav, renders each listed DocJSON section to clean Markdown (stripping the internal node-id links), prepends a provenance stamp, and writes the nested pages into `userdocs/guide/` for a static site generator (Sphinx/MyST) to build into HTML. Because the output tree mirrors the source tree one-to-one, the relative links between pages resolve without any per-page configuration. Commit the generated `userdocs/guide/**` alongside your DocJSON. The nav file location and render defaults live under `[axiom_graph.site]` -- see [configuration](../get-started/configuration.md).
 
 The corrected page is now live, and the loop is closed: code changed, the mesh flagged the downstream consumer doc, you reviewed and re-verified it, and the republished site reflects reality.
+
+**One nuance on grouping.** A section folder renders as an *expandable tree* under its landing page, not as a Sphinx `:caption:` header — `render-site` emits no `:caption:` directive in any flavor. And a bare leaf string is always one flat page even with a slash in it (`concepts/staleness` at the top level is a single leaf, not a `concepts` group); folders group only via the single-key mapping shown above. If you want bold caption groups — a Diátaxis Tutorials / How-to / Explanation sidebar, say — post-process the generated `index.md` into one captioned `{toctree}` per group yourself.
 
 ## This Site Is Built This Way
 

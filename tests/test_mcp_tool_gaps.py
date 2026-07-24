@@ -56,8 +56,6 @@ def _index_doc(db_path: Path, json_file: Path, root: Path, project_id: str = "pr
     with db._connect(db_path) as conn:
         for rec in doc_recs:
             db.upsert_doc(conn, rec)
-        for rec in sec_recs:
-            db.upsert_doc_section(conn, rec)
 
 
 NESTED_DOC_SECTIONS = [

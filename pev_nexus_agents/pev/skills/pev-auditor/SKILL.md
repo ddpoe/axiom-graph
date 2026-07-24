@@ -67,7 +67,7 @@ Your review scope is determined empirically, not from the Architect's prediction
    - **Residual** — everything else: staleness the change-set can't explain (independent main-advance, e.g. a stray node from an edit that landed mid-cycle), or a Reviewer-flagged node. **Hand-review** as normal.
    - **Docs are never reconciled** — doc sections are always your own judgment (Step 4a + 4b). The reconciliation only spares the code/test re-confirmation.
 
-   **If the gate fails** (Reviewer `FAIL`, or pre-merge `unexplained-drift`), there is no blanket — hand-review every in-scope node. The blanket is *checked trust*, not blind: it rides on the Reviewer's pass plus the clean bracket, and the sticky-`LINKED_STALE` invariant still holds — these nodes clear only via your explicit, evidence-backed `mark_clean`, never automatically.
+   **If the gate fails** (Reviewer `FAIL`, or pre-merge `unexplained-drift`), there is no blanket — hand-review every in-scope node. The blanket is *checked trust*, not blind: it rides on the Reviewer's pass plus the clean bracket, and the sticky-`LINKED_STALE` invariant still holds — these nodes clear only via your explicit, evidence-backed clean actions (`mark_clean`, or a guarded `reverify` on a source), never automatically.
 
 ### Step 4: Review stale nodes
 
@@ -82,6 +82,8 @@ Read({project_root}/.pev/doc-topology.json)   ← primary
 ```
 
 If absent, fall back to `${CLAUDE_PLUGIN_ROOT}/templates/doc-topology.json` (the plugin default — generic starter categories). In either case parse the JSON.
+
+If neither path resolves, check the graph before concluding the project has no topology: when `.pev` is a configured `docs_dirs` root it is indexed as `{project_id}::docs.doc-topology`. Every docs root flattens into the one `docs.` namespace, so `.pev` never appears in a doc id — and a listing that doesn't mention `.pev` is not evidence the root is unindexed.
 
 For each `category.*` section in the topology:
 
@@ -187,6 +189,10 @@ axiom_graph_mark_clean(
   verified_by="agent:pev-auditor"
 )
 ```
+
+**Source-rooted cascades: classify the change, then pick the verb.** When a source node's change is *inconsequential to its dependents* — it doesn't alter anything they describe (test-assertion literals, error-string tweaks, formatting, internal refactor behind an unchanged contract) — one `axiom_graph_reverify(node_id=<source>, reason=..., verified_by="agent:pev-auditor")` verifies the source and clears the whole LINKED_STALE cascade rooted at it, instead of tracing via-chains and hand-building `node_ids` lists. It conservatively skips dependents that are also stale via other offenders and names the blocking offenders.
+
+**Guard before you call it:** reverify is a blanket over *everything* rooted at the source, so skim the cascade first (the `via` column of `drift_query format="full"`, or `axiom_graph_graph(direction="in")`) for dependents that document the aspect you changed. If any do, the change wasn't inconsequential *for them*: `update_section` + `mark_clean` those first with per-node evidence, then reverify the source to sweep the remaining noise. After the call, read the cleared list in the report — a node you didn't expect there means you misjudged the change; fix its prose (the `[reverify:<source>]` provenance in history keeps it traceable). When in doubt about the change's reach, don't reverify — fall back to per-node `mark_clean`.
 
 **Key principle (residual and doc nodes):** Stale ≠ broken. Most stale nodes after a Builder run are fine — changed intentionally. Read the diff, make a judgment, mark clean. Only flag things that are actually wrong. (Reconciled code/test batches from Step 3.4 skip the per-node diff read — they ride on the Reviewer's pass plus the clean bracket.)
 
@@ -396,9 +402,9 @@ The orchestrator relays your questions to the user and resumes you with the answ
 - **Do NOT modify code.** No `Edit`, `Write`, or `Bash`. The PreToolUse hook will block you.
 - **Do NOT commit.** No git operations.
 - **Stale ≠ broken.** Most stale nodes are fine — changed intentionally. Read the diff, make a judgment. Only flag things that are actually wrong. (Exception: reconciled code/test nodes per Step 3.4 are batch-cleaned on the Reviewer's validation without a per-node diff read.)
-- **`axiom_graph_mark_clean` is the single clean action.** It both records the AGENT_VERIFIED judgment and clears the CONTENT_STALE marker. There is no separate tag removal step for individual nodes — `mark_clean` handles both.
+- **`axiom_graph_mark_clean` and `axiom_graph_reverify` are the only clean actions.** Both record the AGENT_VERIFIED judgment and clear staleness — `mark_clean` per named node, `reverify` for a source whose change is inconsequential to its dependents (cascade-cleared nodes carry `[reverify:<source>]` provenance). There is no separate tag removal step.
 - **Follow the Auditor Reference Protocol** (`${CLAUDE_PLUGIN_ROOT}/templates/auditor-reference-protocol.md`) for the full checklist. The protocol sections are ordered — follow them in order.
-- **Use `verified_by="agent:pev-auditor"` in `axiom_graph_mark_clean` calls** for traceability.
+- **Use `verified_by="agent:pev-auditor"` in `axiom_graph_mark_clean` and `axiom_graph_reverify` calls** for traceability.
 - **The `decisions` section is your only narrative artifact.** What changed (sections updated, nodes marked clean, links added/removed) is recoverable mechanically from `axiom_graph_report(since_sha=baseline)` — do not duplicate it in prose. Reserve the cycle-wide `decisions` section for non-obvious judgment calls (e.g., "marked clean despite drift because logic is identical"): `### D-{N} (Auditor): {title}\n**Phase:** audit\n**Choice:** {judgment}\n**Reason:** {why}`. If there are no non-obvious judgments, append nothing.
 - **Use Google-style docstrings** conventions when writing doc content.
 - **`counts` in the Impact Report are advisory, not authoritative.** Don't fabricate. The authoritative list of what changed during the audit is `axiom_graph_report(since_sha=baseline)`, rendered into the manifest by the orchestrator at Phase 8 — that's the source-of-truth for what was touched. The `counts` block in your Impact Report is a rough at-a-glance for the user; if you're unsure of a number, omit the field rather than guess.
@@ -409,7 +415,7 @@ The orchestrator relays your questions to the user and resumes you with the answ
 **Two budget mechanisms limit your work:**
 
 - **maxTurns** is a hard cutoff on assistant response turns. You will not receive a warning when it approaches — your context window naturally degrades over a long session, and the cutoff exists to preserve the quality of your work rather than letting it degrade. **If you are cut off mid-work, nothing is lost.** The orchestrator automatically treats it as `CONTINUING` — your committed code, manifest writes, and marked-clean nodes are all preserved. The next incarnation picks up where you left off with a fresh context and full budget. The tool budget warnings are your active planning signal; maxTurns is a safety net you don't need to manage.
-- **Tool budget hook** — counts actual tool calls. The hook warns you as you approach the limit (the warning message includes your current count and the limit). When the gate activates, only doc-write tools (`axiom_graph_update_section`, `axiom_graph_write_doc`, `axiom_graph_add_section`, `axiom_graph_add_link`, `axiom_graph_mark_clean`, `axiom_graph_build`, `axiom_graph_check`) are allowed — read-only exploration tools are blocked but you can still write docs and mark nodes.
+- **Tool budget hook** — counts actual tool calls. The hook warns you as you approach the limit (the warning message includes your current count and the limit). When the gate activates, only doc-write and clean-action tools (`axiom_graph_update_section`, `axiom_graph_patch_section`, `axiom_graph_write_doc`, `axiom_graph_add_section`, `axiom_graph_delete_link`, `axiom_graph_update_doc_meta`, `axiom_graph_mark_clean`, `axiom_graph_reverify`, `axiom_graph_purge_node`, `axiom_graph_build`, `axiom_graph_check`) are allowed — read-only exploration tools are blocked but you can still write docs and mark nodes.
 
 **Returning `CONTINUING` is normal, not a failure.** Already-marked-clean nodes won't appear stale on the next incarnation's `axiom_graph_check`, so progress is preserved automatically.
 

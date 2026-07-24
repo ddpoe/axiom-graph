@@ -5,9 +5,10 @@ the canonical import path for database operations.  Implementation is
 split across seven submodules:
 
 - ``_core``       — schema + connection + serdes helpers
+- ``migrations``  — versioned schema migrations (PRAGMA user_version)
 - ``nodes``       — node CRUD + verification
 - ``edges``       — edge CRUD + ID migration
-- ``docs``        — doc/doc_section CRUD + FTS search
+- ``docs``        — doc metadata + doc-section node reads + FTS search
 - ``history``     — history rows + reference points
 - ``staleness``   — staleness persistence + computed queries
 - ``embeddings``  — sqlite-vec embedding I/O + semantic search
@@ -19,6 +20,7 @@ Callers should prefer ``from axiom_graph.db import X`` going forward.
 from __future__ import annotations
 
 from axiom_graph.db._core import *  # noqa: F401,F403
+from axiom_graph.db.migrations import *  # noqa: F401,F403
 from axiom_graph.db.docs import *  # noqa: F401,F403
 from axiom_graph.db.edges import *  # noqa: F401,F403
 from axiom_graph.db.embeddings import *  # noqa: F401,F403

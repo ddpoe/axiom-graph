@@ -128,15 +128,6 @@ def update_node_baseline(
             "UPDATE nodes SET code_hash = ?, desc_hash = ?, own_status = 'VERIFIED' WHERE id = ?",
             (code_hash, desc_hash, node_id),
         )
-        # If this is a docjson shadow row, re-sync the four invariant
-        # fields from doc_sections so the baseline reset does not
-        # silently drop the shadow out of lockstep with canonical.
-        # Code-node baseline resets are unaffected (no doc_sections row).
-        subtype_row = conn.execute("SELECT subtype FROM nodes WHERE id = ?", (node_id,)).fetchone()
-        if subtype_row and subtype_row["subtype"] == "docjson":
-            from axiom_graph.db.docs import _sync_docjson_shadow  # noqa: PLC0415
-
-            _sync_docjson_shadow(conn, node_id)
 
 
 def get_verification(db_path: Path, node_id: str) -> dict | None:
@@ -237,7 +228,8 @@ def upsert_node_conn(
                 location = ?, level_3_location = ?, level_steps = ?,
                 level_0 = ?, level_1 = ?, level_2 = ?,
                 dflow_meta = ?, source = ?,
-                title = ?, node_type = ?, subtype = ?
+                title = ?, node_type = ?, subtype = ?,
+                doc_position = ?, doc_level = ?
             WHERE id = ?
             """,
             (
@@ -252,33 +244,44 @@ def upsert_node_conn(
                 node.title,
                 node.node_type,
                 node.subtype,
+                node.doc_position,
+                node.doc_level,
                 node.id,
             ),
         )
-        if text_changed:
+        # DocJSON section carve-out (ADR-021): sections are first-class
+        # nodes whose level_1/level_2 mirror the CURRENT file content, so
+        # desc_hash (the content-mirror hash) and updated_at (last-edit
+        # timestamp) must advance with them.  Only code_hash stays behind
+        # as the staleness baseline — the comparator's CONTENT_UPDATED
+        # signal comes from code_hash vs current content hash.
+        # Tag-only edits do not change level_1/level_2, so sections also
+        # resync tags when the stored set drifted.
+        sync_tags = text_changed
+        if node.subtype == "docjson_section":
+            if text_changed:
+                conn.execute(
+                    "UPDATE nodes SET desc_hash = ?, updated_at = ? WHERE id = ?",
+                    (node.desc_hash, _now_utc(), node.id),
+                )
+            if not sync_tags:
+                stored_tags = {
+                    r["tag"] for r in conn.execute("SELECT tag FROM tags WHERE node_id = ?", (node.id,)).fetchall()
+                }
+                sync_tags = stored_tags != set(node.tags or [])
+        if sync_tags:
             conn.execute("DELETE FROM tags WHERE node_id = ?", (node.id,))
             for tag in node.tags or []:
                 conn.execute(
                     "INSERT OR IGNORE INTO tags (node_id, tag) VALUES (?, ?)",
                     (node.id, tag),
                 )
+        if text_changed:
             conn.execute("DELETE FROM node_fts WHERE id = ?", (node.id,))
             conn.execute(
                 "INSERT INTO node_fts (id, level_1, level_2) VALUES (?, ?, ?)",
                 (node.id, node.level_1, node.level_2 or ""),
             )
-        # docjson shadow carve-out: discovery_only preserves the staleness
-        # baseline for code nodes, but doc-section shadow rows MUST mirror
-        # doc_sections.{heading,content,desc_hash,updated_at}.  The earlier
-        # UPDATE overwrote level_1/level_2 with the AxiomNode's values
-        # (which can drift from the canonical row when the scanner builds
-        # an AxiomNode independently); the helper restores the invariant.
-        # No-op when no canonical doc_sections row exists yet (cold-build
-        # ordering).
-        if node.subtype == "docjson":
-            from axiom_graph.db.docs import _sync_docjson_shadow  # noqa: PLC0415
-
-            _sync_docjson_shadow(conn, node.id)
         return False  # no content change — staleness preserved
 
     口 = Step(
@@ -299,12 +302,14 @@ def upsert_node_conn(
             (id, node_type, subtype, title, location, status, source,
              code_hash, desc_hash, file_mtime,
              level_0, level_1, level_2,
-             level_3_location, level_steps, dflow_meta, updated_at)
+             level_3_location, level_steps, dflow_meta,
+             doc_position, doc_level, updated_at)
         VALUES
             (:id, :node_type, :subtype, :title, :location, :status, :source,
              :code_hash, :desc_hash, :file_mtime,
              :level_0, :level_1, :level_2,
-             :level_3_location, :level_steps, :dflow_meta, :updated_at)
+             :level_3_location, :level_steps, :dflow_meta,
+             :doc_position, :doc_level, :updated_at)
         """,
         row,
     )
@@ -439,7 +444,7 @@ def get_undocumented_nodes(
                 WHERE e.to_id = n.id AND e.edge_type = 'documents'
             )
             AND (? IS NULL OR n.node_type = ?)
-            AND NOT (n.node_type = 'atomic_process' AND COALESCE(n.subtype, '') = 'docjson')
+            AND NOT (n.node_type = 'atomic_process' AND COALESCE(n.subtype, '') IN ('docjson', 'docjson_section'))
             """,
             (node_type, node_type),
         ).fetchall()

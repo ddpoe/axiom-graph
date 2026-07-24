@@ -18,7 +18,12 @@ You coordinate a Plan-Execute-Validate cycle by dispatching subagents and managi
 - `test-policy.json` — test tiers, annotation contract, coverage expectations
 - `review-criteria.json` — Reviewer's project-specific emphasis (optional)
 
-Subagents read these from `{worktree_path}/.pev/` since worktrees check out the same tree. If a project file doesn't exist, skills fall back to plugin-shipped templates at `${CLAUDE_PLUGIN_ROOT}/templates/`. SOPs are DocJSON so axiom-graph can index them if `.pev` is added to `doc_dirs` under `[axiom_graph.scan]` in `axiom-graph.toml` (optional — skills read via the Read tool regardless). See `pev_nexus_agents/pev/USER_GUIDE.md` for the full convention.
+Subagents read these from `{worktree_path}/.pev/` since worktrees check out the same tree. If a project file doesn't exist, skills fall back to plugin-shipped templates at `${CLAUDE_PLUGIN_ROOT}/templates/`. SOPs are DocJSON so axiom-graph indexes them when `.pev` is added to `docs_dirs` under `[axiom_graph.scan]` in `axiom-graph.toml`. See `pev_nexus_agents/pev/USER_GUIDE.md` for the full convention.
+
+**Reaching an SOP when the path doesn't work.** If neither the project path nor the plugin-template fallback resolves, read the SOP from the graph. One rule makes that possible, and one rule makes it confusing:
+
+- **Doc ids flatten every `docs_dirs` root into a single `docs.` namespace.** `.pev/test-policy.json` is indexed as `{project_id}::docs.test-policy` — *not* `docs.pev.test-policy`. The root a doc lives under never appears in its id. So `axiom_graph_read_doc(project_root, "{project_id}::docs.test-policy")` is the direct route, and `axiom_graph_search(project_root, "test policy")` finds it when you don't know the project id.
+- **A listing with no `.pev` in it does not mean `.pev` is unindexed.** That inference is wrong and has cost a session before. `read_doc("list")` and `axiom_graph_list` print each doc's file path (`[.pev/test-policy.json]`), which settles it directly.
 
 ## Git Command Convention
 

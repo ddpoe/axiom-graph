@@ -61,18 +61,22 @@ See [USER_GUIDE.md §Customizing via `.pev/` SOPs](./USER_GUIDE.md#customizing-v
 
 ### 1d. (Optional) Let axiom-graph index your SOPs
 
-`axiom-graph.toml` has a `doc_dirs` key under `[axiom_graph.scan]` that defaults to `["docs"]`. To make your `.pev/` SOPs searchable via `axiom_graph_search` and trackable via `axiom_graph_history`, add `.pev` to the list:
+`axiom-graph.toml` has a `docs_dirs` key under `[axiom_graph.scan]` that defaults to `["docs"]`. To make your `.pev/` SOPs searchable via `axiom_graph_search` and trackable via `axiom_graph_history`, add `.pev` to the list:
 
 ```toml
 [axiom_graph.scan]
-doc_dirs = ["docs", ".pev"]
+docs_dirs = ["docs", ".pev"]
 ```
+
+The key is `docs_dirs`, not `doc_dirs` — an unrecognized key is ignored silently, leaving `.pev` unindexed with no error to tell you.
 
 Then re-index:
 
 ```bash
 axiom-graph build .
 ```
+
+Your SOPs are now doc nodes, but note how they are named: **every configured root flattens into one `docs.` namespace**, so `.pev/test-policy.json` is `{project_id}::docs.test-policy` — the `.pev` part is not in the id. That means no listing will ever show `.pev` in a doc id, and its absence is not evidence the root went unindexed. `axiom_graph_list` and `read_doc("list")` print each doc's file path so you can confirm at a glance. A side effect worth knowing: `docs/test-policy.json` and `.pev/test-policy.json` would collide on a single id — the build warns when that happens.
 
 **Not required** — PEV skills read `.pev/*.json` directly via the Read tool regardless of indexing. Opt in when you want axiom-graph-native queries over your SOP history (who changed what, when, and why).
 
@@ -144,4 +148,4 @@ Do not remove the directory matching the currently-registered version — Claude
 - **Understanding what agent does what** → [DESIGN.md §Agent responsibilities](./DESIGN.md#agent-responsibilities-one-line-each)
 - **Customizing deeper** → [USER_GUIDE.md §Customizing via `.pev/` SOPs](./USER_GUIDE.md#customizing-via-pev-sops)
 - **Something broke** → [../hook-spike/TROUBLESHOOTING.md](../hook-spike/TROUBLESHOOTING.md)
-- **Version history** → [../CHANGELOG.md](../CHANGELOG.md)
+- **Version history** → [./CHANGELOG.md](./CHANGELOG.md)

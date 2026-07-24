@@ -18,6 +18,8 @@ path.
 
 from __future__ import annotations
 
+from tests.conftest import seed_section_node
+
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -76,6 +78,7 @@ def _write_doc_with_section(
     *,
     title: str = "Doc",
     heading: str = "Section",
+    content: str = "x",
 ) -> None:
     now = _now_iso()
     with db._connect(db_path) as conn:
@@ -90,21 +93,14 @@ def _write_doc_with_section(
                 "updated_at": now,
             },
         )
-        db.upsert_doc_section(
+        seed_section_node(
             conn,
-            {
-                "id": section_id,
-                "doc_id": doc_id,
-                "heading": heading,
-                "level": 2,
-                "tags": "",
-                "content": "x",
-                "desc_hash": hashlib.sha256(b"x").hexdigest()[:16],
-                "parent_id": None,
-                "depth": 0,
-                "position": 0,
-                "updated_at": now,
-            },
+            section_id,
+            heading=heading,
+            content=content,
+            desc_hash=hashlib.sha256(content.encode()).hexdigest()[:16],
+            location=f"docs/{doc_id.split('::')[-1]}.json",
+            updated_at=now,
         )
 
 
@@ -380,18 +376,7 @@ class TestGroupBy:
         long_id = "p::docs.spec::long_sec"
         long_doc_id = "p::docs.spec"
         long_content = "x" * (DOC_SECTION_LONG_THRESHOLD + 50)
-        _write_doc_with_section(db_path, long_doc_id, long_id)
-        # The helper seeds content="x" — overwrite via direct doc_sections
-        # update + sync.  Calling index_doc_sections_fts will pick up the
-        # change AND create the shadow row in nodes with the long level_2.
-        from axiom_graph.db import docs as db_docs_mod
-
-        with db._connect(db_path) as conn:
-            conn.execute(
-                "UPDATE doc_sections SET content = ? WHERE id = ?",
-                (long_content, long_id),
-            )
-        db_docs_mod.index_doc_sections_fts(db_path)
+        _write_doc_with_section(db_path, long_doc_id, long_id, content=long_content)
 
         # Predicted set per parse_drift_filter semantics.
         show_own, show_link, show_doc_quality = st.parse_drift_filter(filter_value)
@@ -487,13 +472,19 @@ def _seed_frozen_doc_section(
             "INSERT OR REPLACE INTO docs (id, title, tags, file_path, desc_hash, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
             (doc_id, doc_id.split("::")[-1], tags_json, f"docs/{doc_id.split('::')[-1]}.json", "h", now),
         )
-        conn.execute(
-            "INSERT OR REPLACE INTO doc_sections (id, doc_id, heading, level, tags, content, "
-            "desc_hash, parent_id, depth, position, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (section_id, doc_id, "Heading", 2, "", "body", "h2", None, 0, 0, now),
+        seed_section_node(
+            conn,
+            section_id,
+            heading="Heading",
+            content="body",
+            desc_hash="h2",
+            location=f"docs/{doc_id.split('::')[-1]}.json",
+            updated_at=now,
         )
-    _upsert_node(db_path, section_id, link_status=link_status, location=f"docs/{doc_id.split('::')[-1]}.json")
+        conn.execute(
+            "UPDATE nodes SET link_status = ? WHERE id = ?",
+            (link_status, section_id),
+        )
 
 
 def _write_frozen_tags_toml(project_root: Path, tags: list[str]) -> None:

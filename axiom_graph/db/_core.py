@@ -49,12 +49,14 @@ _SCHEMA_SQL = """
 --     upsert_node(discovery_only=True) so node_history.scanned_at can be
 --     diffed against it to detect drift. Bumped only by a discovery_only=False
 --     full build when the row's content actually changed.
---   * subtype='docjson' shadow rows: NOT authoritative. The canonical column
---     is doc_sections.updated_at, which is bumped on every section write.
---     The shadow's updated_at is frozen at initial-index time because the
---     same discovery_only=True path also runs for these rows. Staleness
---     queries that need a doc-section's last-edit timestamp MUST read
---     doc_sections.updated_at, not nodes.updated_at.
+--   * subtype='docjson_section' rows: last-edit timestamp, bumped whenever
+--     the section's heading/content actually changes (any write path).
+--     The section's own staleness baseline lives in code_hash only;
+--     desc_hash/level_1/level_2 always mirror the current file content
+--     (ADR-021 envelope model — sections are first-class nodes).
+-- doc_position / doc_level are DocJSON section metadata (subtype=
+-- 'docjson_section'): sibling-scoped render order and heading level.
+-- NULL for every other row.
 CREATE TABLE IF NOT EXISTS nodes (
     id               TEXT PRIMARY KEY,
     node_type        TEXT NOT NULL,
@@ -75,6 +77,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     staleness        TEXT NOT NULL DEFAULT 'VERIFIED',
     own_status       TEXT NOT NULL DEFAULT 'VERIFIED',
     link_status      TEXT NOT NULL DEFAULT 'VERIFIED',
+    doc_position     INTEGER,
+    doc_level        INTEGER,
     updated_at       TEXT NOT NULL
 );
 
@@ -111,26 +115,15 @@ CREATE TABLE IF NOT EXISTS node_history (
 
 CREATE INDEX IF NOT EXISTS idx_history_node_id ON node_history (node_id, id DESC);
 
+-- Thin doc-level metadata (file provenance + doc tags).  Section content
+-- lives in ``nodes`` (subtype='docjson_section') per ADR-021 — there is
+-- deliberately no doc_sections table.
 CREATE TABLE IF NOT EXISTS docs (
     id          TEXT PRIMARY KEY,
     title       TEXT NOT NULL,
     tags        TEXT,
     file_path   TEXT NOT NULL,
     desc_hash   TEXT,
-    updated_at  TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS doc_sections (
-    id          TEXT PRIMARY KEY,
-    doc_id      TEXT NOT NULL REFERENCES docs(id),
-    heading     TEXT NOT NULL,
-    level       INTEGER NOT NULL DEFAULT 2,
-    tags        TEXT,
-    content     TEXT,
-    desc_hash   TEXT,
-    parent_id   TEXT,
-    depth       INTEGER NOT NULL DEFAULT 0,
-    position    INTEGER NOT NULL,
     updated_at  TEXT NOT NULL
 );
 
@@ -302,6 +295,8 @@ def _node_to_row(node: AxiomNode) -> dict[str, Any]:
         "level_3_location": node.level_3_location,
         "level_steps": _steps_to_json(node.level_steps),
         "dflow_meta": json.dumps(node.dflow_meta) if node.dflow_meta else None,
+        "doc_position": node.doc_position,
+        "doc_level": node.doc_level,
         "updated_at": _now_utc(),
     }
 
@@ -325,6 +320,8 @@ def _row_to_node(row: sqlite3.Row) -> AxiomNode:
         level_3_location=d["level_3_location"],
         level_steps=_json_to_steps(d.get("level_steps")),
         dflow_meta=json.loads(d["dflow_meta"]) if d.get("dflow_meta") else None,
+        doc_position=d.get("doc_position"),
+        doc_level=d.get("doc_level"),
         tags=[],  # populated separately if needed
     )
 
@@ -383,10 +380,26 @@ def _derive_change_type(
 
 
 def init_db(db_path: Path) -> None:
-    """Create the schema if it does not already exist."""
+    """Create the schema if it does not already exist.
+
+    A **fresh** DB (no ``nodes`` table yet) is created on the current
+    envelope schema and stamped with ``PRAGMA user_version =
+    CURRENT_SCHEMA_VERSION`` so it is never mistaken for a legacy DB
+    needing migration.  An **existing** DB keeps its stored
+    ``user_version`` untouched — the migration runner
+    (:func:`axiom_graph.db.migrations.run_migrations`) is responsible for
+    upgrading legacy DBs (which read as version 0).
+    """
+    from axiom_graph.db.migrations import CURRENT_SCHEMA_VERSION  # noqa: PLC0415
+
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with _connect(db_path) as conn:
+        is_fresh = (
+            conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'nodes'").fetchone() is None
+        )
         conn.executescript(_SCHEMA_SQL)
+        if is_fresh:
+            conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION:d}")
 
 
 def vacuum_into(source: Path, target: Path) -> None:

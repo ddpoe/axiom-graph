@@ -1,13 +1,21 @@
-"""Axiom-graph DB: doc/doc_section CRUD, renames, and FTS search.
+"""Axiom-graph DB: doc metadata, doc-section node reads, renames, FTS search.
 
-Covers the ``docs`` and ``doc_sections`` tables (``upsert_doc``,
-``upsert_doc_section``, ``get_doc_sections``, ``list_docs``,
-``list_all_doc_sections``, ``get_long_sections``,
-``query_doc_sections_by_tags``, ``get_doc_ids_by_filepath``,
-``delete_doc_by_id``, ``record_doc_rename``, ``record_code_rename``,
-``move_doc``, ``get_all_doc_file_paths``, ``get_all_node_locations``,
-``get_tagged_doc_doc_edges``), plus the FTS5 node_fts search
-(``fts_search``, ``index_doc_sections_fts``, ``list_tags``).
+Per ADR-021 the DocJSON storage model is envelope-pattern nodes: every
+section is a first-class ``nodes`` row (``subtype='docjson_section'``,
+heading in ``level_1``, full content in ``level_2``, render order /
+heading level in ``doc_position`` / ``doc_level``) and the DocJSON file
+is the lone composite envelope (``subtype='docjson_doc'``).  There is no
+``doc_sections`` table and no shadow-row sync machinery.
+
+This module covers the thin ``docs`` metadata table (``upsert_doc``,
+``list_docs``, ``get_doc_ids_by_filepath``, ``get_all_doc_file_paths``),
+node-backed section reads that preserve the legacy row-dict shape
+(``get_doc_sections``, ``list_all_doc_sections``, ``get_long_sections``,
+``query_doc_sections_by_tags``, ``get_section_doc_id_map``,
+``get_tagged_doc_doc_edges``), doc lifecycle (``delete_doc_by_id``,
+``record_doc_rename``, ``record_code_rename``, ``move_doc``), and the
+FTS5 node_fts search (``fts_search``, ``index_doc_sections_fts``,
+``list_tags``).
 """
 
 from __future__ import annotations
@@ -169,8 +177,11 @@ def delete_doc_by_id(
         )
         conn.execute(f"DELETE FROM nodes WHERE id IN ({ph})", node_ids)
 
-    口 = Step(step_num=3, name="Delete doc and section records", purpose="Remove doc_sections and docs table entries")
-    conn.execute("DELETE FROM doc_sections WHERE doc_id = ?", (doc_id,))
+    口 = Step(
+        step_num=3,
+        name="Delete doc metadata record",
+        purpose="Remove the docs table entry (sections are nodes rows, already deleted above)",
+    )
     conn.execute("DELETE FROM docs WHERE id = ?", (doc_id,))
 
 
@@ -380,119 +391,140 @@ def upsert_doc(conn: sqlite3.Connection, doc: dict) -> None:
     )
 
 
-def _sync_docjson_shadow(conn: sqlite3.Connection, sec_id: str) -> None:
-    """Sync the ``nodes`` shadow row from the canonical ``doc_sections`` row.
+# Subtype / source families for DocJSON section nodes.  ``docjson`` is the
+# pre-ADR-021 legacy subtype (kept in read filters so tools stay usable on a
+# not-yet-migrated DB); ``docjson_section`` is the current one.  Source
+# scoping keeps markdown doc nodes (source='doc_scanner', legacy subtype
+# 'docjson') out of DocJSON-section queries.
+_SECTION_SUBTYPES = ("docjson", "docjson_section")
+_DOCJSON_SOURCES = ("docjson", "json_doc_scanner")
 
-    For every row in ``nodes`` with ``subtype='docjson'`` and id ``sec_id``,
-    the four-field invariant is::
 
-        nodes.updated_at  == doc_sections.updated_at
-        nodes.desc_hash   == doc_sections.desc_hash
-        nodes.level_1     == doc_sections.heading
-        nodes.level_2     == doc_sections.content
-
-    The ``desc_hash`` column holds ``hash16(content)``, not a description
-    hash — the name is a historical artefact of the ``nodes`` schema.
-    The DocJSON scanner mirrors this by emitting ``content_hash`` for
-    section atomic nodes' ``desc_hash``, so the staleness comparator's
-    two sides agree.  See cycle ``pev-instance-2026-05-16-docjson-section-desc-updated-phantom-cascade``.
-
-    This helper is the single canonical writer of those four columns for
-    docjson shadow rows.  It is idempotent and a silent no-op when the
-    canonical ``doc_sections`` row is absent (e.g. cold-build ordering,
-    or a stray shadow row).  It does NOT create the shadow row — shadow
-    creation stays in :func:`index_doc_sections_fts`.
-
-    The helper deliberately does NOT touch ``code_hash``, ``link_status``,
-    ``own_status``, or any verification columns; staleness mechanics
-    remain governed by their existing writers (per ADR-018 LINKED_STALE
-    stickiness).
+def _section_filter_sql(alias: str = "") -> str:
+    """SQL predicate selecting DocJSON section node rows.
 
     Args:
-        conn: Open SQLite connection (caller owns the transaction).
-        sec_id: Full doc-section ID (matches ``doc_sections.id``).
+        alias: Optional table alias prefix (e.g. ``"n."``).
     """
-    row = conn.execute(
-        "SELECT heading, content, desc_hash, updated_at FROM doc_sections WHERE id = ?",
-        (sec_id,),
-    ).fetchone()
-    if row is None:
-        return
-    conn.execute(
-        """
-        UPDATE nodes
-        SET level_1 = ?, level_2 = ?, desc_hash = ?, updated_at = ?
-        WHERE id = ?
-        """,
-        (
-            row["heading"] or "",
-            row["content"] or "",
-            row["desc_hash"],
-            row["updated_at"],
-            sec_id,
-        ),
+    return (
+        f"{alias}node_type = 'atomic_process' "
+        f"AND {alias}subtype IN ('docjson', 'docjson_section') "
+        f"AND {alias}source IN ('docjson', 'json_doc_scanner')"
     )
 
 
-def upsert_doc_section(conn: sqlite3.Connection, sec: dict) -> None:
-    """Insert or replace a doc_section record. Takes an open connection.
+_SECTION_FILTER_SQL = _section_filter_sql()
 
-    After persisting the canonical row, syncs the matching ``nodes``
-    shadow row (when present) via :func:`_sync_docjson_shadow` so the
-    four-field invariant holds for every write path.
+
+def split_section_id(section_id: str) -> tuple[str, str]:
+    """Split a full section ID into ``(doc_id, dot_path)``.
+
+    Section IDs are ``{doc_id}::{dot_path}`` where ``doc_id`` itself
+    contains exactly one ``::`` (``proj::docs.x``) and the dot-path never
+    does — so the split is the last ``::``.
     """
-    conn.execute(
-        """
-        INSERT OR REPLACE INTO doc_sections
-            (id, doc_id, heading, level, tags, content, desc_hash, parent_id, depth, position, updated_at)
-        VALUES
-            (:id, :doc_id, :heading, :level, :tags, :content, :desc_hash, :parent_id, :depth, :position, :updated_at)
-        """,
-        sec,
-    )
-    _sync_docjson_shadow(conn, sec["id"])
+    doc_id, _, dot_path = section_id.rpartition("::")
+    return doc_id, dot_path
 
 
-def find_docjson_shadow_invariant_violations(db_path: Path) -> list[str]:
-    """Return IDs of ``subtype='docjson'`` shadow rows that drift from canonical.
+def _like_escape(text: str) -> str:
+    r"""Escape LIKE wildcards so *text* matches literally (ESCAPE '\\')."""
+    return text.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
 
-    Scans every ``nodes`` row with ``subtype='docjson'``, joins to
-    ``doc_sections`` on id, and surfaces rows where any of the four
-    invariant fields disagrees.  Rows without a canonical match are
-    classified as orphan shadows and are NOT reported here (different
-    bug category).
 
-    Returns:
-        Sorted list of offending node IDs.  Empty when the invariant
-        holds DB-wide.
+def _section_tags_json(conn: sqlite3.Connection, section_ids: list[str]) -> dict[str, str]:
+    """Return ``{section_id: json_tags_string}`` for sections that have tags."""
+    out: dict[str, list[str]] = {}
+    for i in range(0, len(section_ids), 500):
+        chunk = section_ids[i : i + 500]
+        ph = ",".join("?" * len(chunk))
+        for r in conn.execute(
+            f"SELECT node_id, tag FROM tags WHERE node_id IN ({ph}) ORDER BY tag",
+            chunk,
+        ).fetchall():
+            out.setdefault(r["node_id"], []).append(r["tag"])
+    return {sid: json.dumps(tags) for sid, tags in out.items()}
+
+
+def _section_node_to_dict(row: sqlite3.Row | dict, tags_json: str | None) -> dict:
+    """Map a section node row to the legacy ``doc_sections`` dict shape.
+
+    Keys: ``id``, ``doc_id``, ``heading``, ``level``, ``tags`` (JSON string
+    or None), ``content``, ``desc_hash``, ``parent_id``, ``depth``,
+    ``position``, ``updated_at``.  ``doc_id`` / ``parent_id`` / ``depth``
+    are derived from the ID's dot-path; ``position`` / ``level`` come from
+    the denormalized ``doc_position`` / ``doc_level`` columns.
     """
-    with _connect(db_path) as conn:
-        rows = conn.execute(
-            """
-            SELECT n.id
-            FROM nodes n
-            JOIN doc_sections d ON d.id = n.id
-            WHERE n.subtype = 'docjson'
-              AND (
-                  COALESCE(n.level_1, '') != COALESCE(d.heading, '')
-               OR COALESCE(n.level_2, '') != COALESCE(d.content, '')
-               OR COALESCE(n.desc_hash, '') != COALESCE(d.desc_hash, '')
-               OR COALESCE(n.updated_at, '') != COALESCE(d.updated_at, '')
-              )
-            ORDER BY n.id
-            """,
-        ).fetchall()
-        return [r["id"] for r in rows]
+    d = dict(row)
+    sec_id = d["id"]
+    doc_id, dot_path = split_section_id(sec_id)
+    if "." in dot_path:
+        parent_id: str | None = f"{doc_id}::{dot_path.rsplit('.', 1)[0]}"
+    else:
+        parent_id = None
+    return {
+        "id": sec_id,
+        "doc_id": doc_id,
+        "heading": d.get("level_1") or "",
+        "level": d.get("doc_level") if d.get("doc_level") is not None else 2,
+        "tags": tags_json,
+        "content": d.get("level_2") or "",
+        "desc_hash": d.get("desc_hash"),
+        "parent_id": parent_id,
+        "depth": dot_path.count("."),
+        "position": d.get("doc_position") if d.get("doc_position") is not None else 0,
+        "updated_at": d.get("updated_at"),
+    }
+
+
+def _depth_first(sections: list[dict]) -> list[dict]:
+    """Order section dicts in depth-first document order.
+
+    Siblings sort by ``position`` (then id for stability); each parent is
+    immediately followed by its subtree.  Sections whose parent is missing
+    from the set are treated as roots (defensive).
+    """
+    by_parent: dict[str | None, list[dict]] = {}
+    ids = {s["id"] for s in sections}
+    for s in sections:
+        parent = s["parent_id"] if s["parent_id"] in ids else None
+        by_parent.setdefault(parent, []).append(s)
+    for siblings in by_parent.values():
+        siblings.sort(key=lambda s: (s["position"], s["id"]))
+
+    out: list[dict] = []
+
+    def _walk(parent: str | None) -> None:
+        for sec in by_parent.get(parent, []):
+            out.append(sec)
+            _walk(sec["id"])
+
+    _walk(None)
+    return out
+
+
+def _query_section_dicts(conn: sqlite3.Connection, where: str, params: list) -> list[dict]:
+    """Fetch section nodes matching *where*, mapped to legacy dict shape."""
+    rows = conn.execute(
+        f"SELECT * FROM nodes WHERE {_SECTION_FILTER_SQL} AND {where}",
+        params,
+    ).fetchall()
+    tag_map = _section_tags_json(conn, [r["id"] for r in rows])
+    return [_section_node_to_dict(r, tag_map.get(r["id"])) for r in rows]
 
 
 def get_doc_sections(db_path: Path, doc_id: str) -> list[dict]:
-    """Return all doc_section rows for a given doc_id, ordered by position."""
+    """Return section dicts for a doc, in depth-first document order.
+
+    Sections are ``nodes`` rows (``subtype='docjson_section'``); the
+    returned dicts preserve the legacy ``doc_sections`` row shape.
+    """
     with _connect(db_path) as conn:
-        rows = conn.execute(
-            "SELECT * FROM doc_sections WHERE doc_id = ? ORDER BY position",
-            (doc_id,),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        pattern = _like_escape(doc_id) + "::%"
+        secs = _query_section_dicts(conn, r"id LIKE ? ESCAPE '\'", [pattern])
+    # LIKE with escaped wildcards is exact, but keep a defensive prefix check.
+    secs = [s for s in secs if s["doc_id"] == doc_id]
+    return _depth_first(secs)
 
 
 def list_docs(db_path: Path) -> list[dict]:
@@ -503,10 +535,16 @@ def list_docs(db_path: Path) -> list[dict]:
 
 
 def list_all_doc_sections(db_path: Path) -> list[dict]:
-    """Return all rows from doc_sections ordered by doc_id, position."""
+    """Return all section dicts ordered by doc_id, then depth-first."""
     with _connect(db_path) as conn:
-        rows = conn.execute("SELECT * FROM doc_sections ORDER BY doc_id, position").fetchall()
-        return [dict(r) for r in rows]
+        secs = _query_section_dicts(conn, "1=1", [])
+    by_doc: dict[str, list[dict]] = {}
+    for s in secs:
+        by_doc.setdefault(s["doc_id"], []).append(s)
+    out: list[dict] = []
+    for doc_id in sorted(by_doc):
+        out.extend(_depth_first(by_doc[doc_id]))
+    return out
 
 
 # DOC_SECTION_LONG content-length threshold (single source of truth).
@@ -517,18 +555,28 @@ DOC_SECTION_LONG_THRESHOLD = 2000
 
 
 def get_long_sections(db_path: Path, threshold: int = DOC_SECTION_LONG_THRESHOLD) -> list[dict]:
-    """Return doc sections whose content exceeds *threshold* chars, longest first."""
+    """Return doc sections whose content exceeds *threshold* chars, longest first.
+
+    Section content lives in ``nodes.level_2`` (full, untruncated) — the
+    same column the ``DOC_SECTION_LONG`` arm of ``query_drift_rows``
+    filters on, so ``check`` and ``drift_query`` agree by construction.
+    """
     with _connect(db_path) as conn:
         rows = conn.execute(
-            """
-            SELECT id, doc_id, heading, LENGTH(content) AS chars
-            FROM doc_sections
-            WHERE LENGTH(content) > ?
-            ORDER BY LENGTH(content) DESC
+            f"""
+            SELECT id, level_1 AS heading, LENGTH(level_2) AS chars
+            FROM nodes
+            WHERE {_SECTION_FILTER_SQL}
+              AND LENGTH(level_2) > ?
+            ORDER BY LENGTH(level_2) DESC
             """,
             (threshold,),
         ).fetchall()
-        return [dict(r) for r in rows]
+    out: list[dict] = []
+    for r in rows:
+        doc_id, _ = split_section_id(r["id"])
+        out.append({"id": r["id"], "doc_id": doc_id, "heading": r["heading"], "chars": r["chars"]})
+    return out
 
 
 def query_doc_sections_by_tags(
@@ -537,12 +585,12 @@ def query_doc_sections_by_tags(
     *,
     match_all: bool = False,
 ) -> list[dict]:
-    """Return doc_sections whose section-level tags overlap with *tags*.
+    """Return doc sections whose section-level tags overlap with *tags*.
 
     When *match_all* is ``True``, only sections tagged with **every**
     requested tag are returned.  Otherwise any overlap is sufficient.
 
-    Each returned dict has all ``doc_sections`` columns plus
+    Each returned dict has the legacy ``doc_sections`` row shape plus
     ``doc_title`` (from the parent ``docs`` row).
     """
     if not tags:
@@ -552,18 +600,25 @@ def query_doc_sections_by_tags(
         threshold = len(tags) if match_all else 1
         rows = conn.execute(
             f"""
-            SELECT ds.*, d.title AS doc_title
-            FROM doc_sections ds
-            JOIN docs d ON ds.doc_id = d.id
-            JOIN tags t ON t.node_id = ds.id
-            WHERE t.tag IN ({placeholders})
-            GROUP BY ds.id
+            SELECT n.*
+            FROM nodes n
+            JOIN tags t ON t.node_id = n.id
+            WHERE {_section_filter_sql("n.")}
+              AND t.tag IN ({placeholders})
+            GROUP BY n.id
             HAVING COUNT(DISTINCT t.tag) >= ?
-            ORDER BY d.id, ds.position
             """,
             [*tags, threshold],
         ).fetchall()
-        return [dict(r) for r in rows]
+        tag_map = _section_tags_json(conn, [r["id"] for r in rows])
+        doc_titles = {r["id"]: r["title"] for r in conn.execute("SELECT id, title FROM docs").fetchall()}
+    out: list[dict] = []
+    for r in rows:
+        sec = _section_node_to_dict(r, tag_map.get(r["id"]))
+        sec["doc_title"] = doc_titles.get(sec["doc_id"], "")
+        out.append(sec)
+    out.sort(key=lambda s: (s["doc_id"], s["position"], s["id"]))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -594,35 +649,40 @@ def get_tagged_doc_doc_edges(db_path: Path, tags: list[str]) -> list[dict]:
 
     with _connect(db_path) as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 e.from_id AS source_section_id,
-                e.to_id   AS target_section_id,
-                d.tags    AS doc_tags
+                e.to_id   AS target_section_id
             FROM edges e
-            JOIN doc_sections s_src ON s_src.id = e.from_id
-            JOIN docs d             ON d.id = s_src.doc_id
-            JOIN doc_sections s_tgt ON s_tgt.id = e.to_id
+            JOIN nodes s_src ON s_src.id = e.from_id AND {_section_filter_sql("s_src.")}
+            JOIN nodes s_tgt ON s_tgt.id = e.to_id AND {_section_filter_sql("s_tgt.")}
             WHERE e.edge_type = 'documents'
-              AND d.tags IS NOT NULL
             """
         ).fetchall()
+        doc_tag_rows = conn.execute("SELECT id, tags FROM docs WHERE tags IS NOT NULL").fetchall()
 
     # Filter in Python: docs.tags is a JSON array string; check overlap with
-    # the requested tags set.  This avoids building dynamic SQL with IN clauses.
+    # the requested tags set.  The tag check is at the document level — the
+    # source section's owning doc (derived from the section ID) must carry
+    # at least one matching tag.
     tag_set = set(tags)
-    result: list[dict] = []
-    for r in rows:
-        row_dict = dict(r)
+    tagged_doc_ids: set[str] = set()
+    for r in doc_tag_rows:
         try:
-            doc_tags = json.loads(row_dict.get("doc_tags", "[]") or "[]")
+            doc_tags = json.loads(r["tags"] or "[]")
         except (json.JSONDecodeError, TypeError):
             doc_tags = []
         if tag_set & set(doc_tags):
+            tagged_doc_ids.add(r["id"])
+
+    result: list[dict] = []
+    for r in rows:
+        src_doc_id, _ = split_section_id(r["source_section_id"])
+        if src_doc_id in tagged_doc_ids:
             result.append(
                 {
-                    "source_section_id": row_dict["source_section_id"],
-                    "target_section_id": row_dict["target_section_id"],
+                    "source_section_id": r["source_section_id"],
+                    "target_section_id": r["target_section_id"],
                 }
             )
     return result
@@ -687,18 +747,14 @@ def get_section_doc_id_map(db_path: Path, doc_ids: set[str] | None = None) -> di
         return {}
 
     with _connect(db_path) as conn:
-        if doc_ids is None:
-            rows = conn.execute(
-                "SELECT id, doc_id FROM doc_sections",
-            ).fetchall()
-        else:
-            placeholders = ",".join("?" * len(doc_ids))
-            rows = conn.execute(
-                f"SELECT id, doc_id FROM doc_sections WHERE doc_id IN ({placeholders})",
-                list(doc_ids),
-            ).fetchall()
+        rows = conn.execute(f"SELECT id FROM nodes WHERE {_SECTION_FILTER_SQL}").fetchall()
 
-    return {r["id"]: r["doc_id"] for r in rows}
+    out: dict[str, str] = {}
+    for r in rows:
+        doc_id, _ = split_section_id(r["id"])
+        if doc_ids is None or doc_id in doc_ids:
+            out[r["id"]] = doc_id
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -868,11 +924,13 @@ def fts_search(
 
 
 def index_doc_sections_fts(db_path: Path) -> int:
-    """Index all doc sections into the node_fts table for full-text search.
+    """Re-sync node_fts entries for every DocJSON section node.
 
-    Creates synthetic entries in node_fts using the doc section ID as the id,
-    the heading as level_1, and the content as level_2. Also creates corresponding
-    entries in the nodes table so the FTS results can be joined.
+    Sections are first-class ``nodes`` rows, so this is a pure FTS refresh
+    from the canonical ``level_1`` / ``level_2`` columns.  It never creates
+    node rows — a purged section therefore stays purged (the legacy
+    resurrection branch that re-inserted nodes from orphaned
+    ``doc_sections`` rows is retired with that table).
 
     Args:
         db_path: Path to the axiom-graph DB file.
@@ -882,61 +940,14 @@ def index_doc_sections_fts(db_path: Path) -> int:
     """
     count = 0
     with _connect(db_path) as conn:
-        sections = conn.execute(
-            "SELECT id, doc_id, heading, content, level, tags, desc_hash, "
-            "parent_id, depth, position, updated_at FROM doc_sections"
-        ).fetchall()
-
+        sections = conn.execute(f"SELECT id, level_1, level_2 FROM nodes WHERE {_SECTION_FILTER_SQL}").fetchall()
         for sec in sections:
-            sec_id = sec["id"]
-            heading = sec["heading"] or ""
-            content = sec["content"] or ""
-
-            # Ensure a shadow row exists in nodes so FTS results can join.
-            # The invariant-bearing fields (level_1/level_2/desc_hash/
-            # updated_at) are written unconditionally by the helper below
-            # — the INSERT here only handles cold-build first-creation.
-            existing = conn.execute("SELECT id FROM nodes WHERE id = ?", (sec_id,)).fetchone()
-
-            if not existing:
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO nodes
-                        (id, node_type, subtype, title, location, status, source,
-                         code_hash, desc_hash, level_0, level_1, level_2,
-                         level_3_location, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        sec_id,
-                        "atomic_process",
-                        "docjson",
-                        heading,
-                        f"docs/{sec['doc_id'].split('::')[-1]}.json",
-                        "active",
-                        "docjson",
-                        sec["desc_hash"] or "",
-                        sec["desc_hash"],
-                        heading,
-                        heading,
-                        content,
-                        None,
-                        sec["updated_at"],
-                    ),
-                )
-
-            # Sync the four-field invariant unconditionally (covers both
-            # the first-insert case and the resync-existing case).
-            _sync_docjson_shadow(conn, sec_id)
-
-            # Sync FTS: delete old entry (if any) then insert fresh
-            conn.execute("DELETE FROM node_fts WHERE id = ?", (sec_id,))
+            conn.execute("DELETE FROM node_fts WHERE id = ?", (sec["id"],))
             conn.execute(
                 "INSERT INTO node_fts (id, level_1, level_2) VALUES (?, ?, ?)",
-                (sec_id, heading, content),
+                (sec["id"], sec["level_1"] or "", sec["level_2"] or ""),
             )
             count += 1
-
     return count
 
 
@@ -950,13 +961,12 @@ __all__ = [
     "record_code_rename",
     # Upserts + reads
     "upsert_doc",
-    "upsert_doc_section",
     "get_doc_sections",
     "list_docs",
     "list_all_doc_sections",
     "get_long_sections",
     "DOC_SECTION_LONG_THRESHOLD",
-    "find_docjson_shadow_invariant_violations",
+    "split_section_id",
     "query_doc_sections_by_tags",
     "get_tagged_doc_doc_edges",
     "get_doc_ids_with_tags",

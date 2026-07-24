@@ -1,4 +1,4 @@
-<!-- generated from axiom_graph::docs.consumer.examples.multi-target-rendering @ f6b9b220927f; do not edit -->
+<!-- generated from axiom_graph::docs.consumer.examples.multi-target-rendering @ f24404bffe8f; do not edit -->
 
 # Tutorial: Rendering to README, plugin docs, and the guide
 
@@ -160,6 +160,29 @@ The two flavors are not interchangeable, and the config rules enforce the sane c
 The hard constraint: **only a `nav` target may be `sphinx`, and a `doc` target is always `plain`.** A single file has no navigation tree, so `{toctree}` scaffolding would be meaningless on it — declaring `doc` with `format = "sphinx"` is rejected at config load. A subtree, by contrast, can be either: the `guide` target is `nav` + `sphinx` (Read the Docs), while `plugin-pev` is `nav` + `plain` (a Markdown folder).
 
 `sphinx` output is byte-identical to the original single-site build, so adopting targets does not change your existing guide — it just lets you add more destinations beside it.
+
+## Grouping Pages: Nesting vs. Captions
+
+Navigation **shape** is a separate axis from flavor. Within a `nav` target, the `show:` list controls how pages group, and it has exactly two shapes:
+
+- **Flat** — a list of strings is a flat run of pages. A string is always a *single leaf page, even if it contains a slash*: `tutorials/getting-started` is one page at the top level, **not** a `tutorials` group. A flat `show:` renders as a flat `{toctree}` (sphinx) or a flat bullet list (plain).
+- **Grouped** — a single-key mapping is a section folder with its own ordered children:
+
+```yaml
+show:
+  - tutorials:
+      show:
+        - getting-started
+        - writing-contracts
+  - how-to:
+      show:
+        - registration
+        - canvas
+```
+
+A grouped `show:` nests: each folder gets a landing page (`<folder>/index`) carrying a child `{toctree}`, so the sidebar shows an expandable **Tutorials → …** tree. See [the docs-honesty loop](docs-honesty-loop.md) for the full `show:` schema and landing-page rules.
+
+**The limit to know up front: render-site emits no `:caption:`.** Grouping is always folder-landing *nesting*, never the bold, non-clickable Sphinx caption headers a Diátaxis sidebar (Tutorials / How-to Guides / Explanation) typically uses. A common mistake is to author a flat `show:` of slash-path strings expecting the physical subfolders to auto-group into captioned tracks — they do not: physical folders group only when you express them as `show:` mappings, and even then you get nesting, not captions. If you need that caption style, render the guide and then post-process the generated `index.md` into one captioned `{toctree}` per group yourself; the nav schema has no caption key today.
 
 ## Rendering a Subset
 

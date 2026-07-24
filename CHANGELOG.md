@@ -4,11 +4,31 @@ All notable changes to axiom-graph are recorded here. Format follows [Keep a Cha
 
 > **Tag scopes.** This repo is now a monorepo. Tags are prefixed by component:
 > `axiom-graph-v*` — `axiom_graph` Python package (this CHANGELOG); `pev-v*` and `hook-spike-v*` —
-> Claude Code plugins under `pev_nexus_agents/` (see `pev_nexus_agents/CHANGELOG.md`).
+> Claude Code plugins under `pev_nexus_agents/` (see `pev_nexus_agents/pev/CHANGELOG.md`).
 
-## [Unreleased]
+## [2.2.0] - 2026-07-24
 
-_Nothing yet — entries accumulate here for the next release._
+Doc-graph release. DocJSON sections become first-class envelope-pattern graph nodes (ADR-021) via an automatic, data-preserving in-place schema migration, and a new scoped `axiom_graph_reverify` MCP tool clears a verified source's LINKED_STALE cascade in one call. Multi-root `docs_dirs` projects gain the tooling they were missing: authoring into any configured root, seeing which root each doc came from, and a warning when two roots claim one doc id. Plus honest `mark_clean` reporting on aggregates, the end of the two-table drift bug class, same-file AutoStep delegation in the Python scanner, and two viz doc-viewer/search fixes.
+
+### Added
+
+- **`axiom_graph_write_doc(docs_root=...)` targets any configured docs root.** New docs could only ever be created under `docs_dirs[0]`; a doc destined for a secondary root (e.g. `.pev/`) had to be hand-written as raw JSON and picked up by a later build. Pass `docs_root` to pick the destination — it must match an entry of `[axiom_graph.scan].docs_dirs` (compared as POSIX paths, so `.pev`, `./.pev`, and `.pev/` are equivalent), and an unknown value is a hard error that lists the configured roots without writing anything. Omitting it keeps the previous behavior exactly. Doc-id derivation is unchanged, so a doc written this way gets the same id a full build derives for that file. Updating existing docs in any root (`update_section` / `patch_section` / `add_section`) already worked and is untouched.
+- **Build warns when two docs roots derive the same doc id.** Doc ids flatten every root into one `docs.` namespace, so `docs/x.json` and `.pev/x.json` both resolve to `{project_id}::docs.x` and silently overwrite each other — last scanned wins. The docs scan loop now tracks id → source file across roots and appends a warning naming both files and the shared id. A warning, not an error: existing projects keep building. Only files actually walked in a given build participate, so mtime-skipped files don't produce spurious pairs.
+- **New `axiom_graph_reverify(node_id)` MCP tool.** Verify a node and clear the LINKED_STALE it caused in one operation: expands composite sources (doc envelopes, modules, sections with children) to their subtree, resolves transitive doc-to-doc chains back to their root offender, conservatively skips nodes that are also stale via other offenders (reported with the blocking offender IDs), and finishes with a staleness recompute plus a before/after report — so aggregates visibly clear in the same call. Cascade-cleared nodes carry `[reverify:<source>]` provenance in their history/verification rows, keeping them distinguishable from individually reviewed verifications.
+- **Same-file AutoStep delegation resolution.** The Python module scanner now runs a `local_func_ids` pre-pass, so an `AutoStep` marker's `delegates_to` resolves functions defined in the same module — including forward references to functions defined later in the file — instead of only cross-module targets.
+
+### Changed
+
+- **⚠️ Breaking (schema): DocJSON sections are now first-class graph nodes** (envelope pattern, ADR-021): each section is a real node, section nesting is queryable via `composes` edges like workflows and state machines, and the separate `doc_sections` store is gone. **Breaking schema change with automatic, data-preserving in-place migration** — run your normal `build` after upgrading; history, verification baselines, and renames are preserved and a backup is written first.
+- **MCP doc tools unchanged** — `read_doc`, `update_section`, `patch_section`, and friends behave identically; only the underlying storage moved.
+- **Doc listings show which root each doc lives under.** `read_doc("list")` appends the file path (`{project_id}::docs.test-policy  Project Test Policy  [.pev/test-policy.json]`), and `axiom_graph_list` now appends the location for doc, doc-envelope, and doc-section rows the way it already did for functions. Previously nothing in any listing distinguished a doc in a secondary root from one in `docs/` — the truth was only visible in the DB `file_path` column, which led at least one session to conclude a configured root was not being indexed at all. Code-node rows are unchanged.
+
+### Fixed
+
+- **`mark_clean` no longer reports false success on aggregates.** Marking a doc envelope, module, or section-with-children clean when its LINKED_STALE is inherited from descendants now returns an explicit "inherited — no direct effect" result naming the stale descendants to clean (MCP and CLI), instead of a success message that changed nothing. Mixed nodes (own stale signal AND stale descendants) report "own signal cleared; inherited remains". Ordinary own-signal nodes keep the exact same plain-success output.
+- **Two-table drift bug class eliminated**: purged doc sections no longer resurrect as `NOT_FOUND`, `drift_query` now reaches doc-quality signals (e.g. `DOC_SECTION_LONG`), and the shadow-row sync machinery is retired.
+- **Viz: doc viewer no longer jumps to the top on every edit.** The doc viewer rebuilt its scroll container via `innerHTML` on each re-render, so editing or opening a section, changing a heading/slug, toggling collapse, or editing tags/links reset the viewport to the top. The scroll offset is now captured before the rebuild and reapplied after; a fresh doc load still opens at the top.
+- **Viz: keyword search is client-side substring matching (uncapped, name-first).** Keyword search previously round-tripped to the server's whole-token, ranked, top-50 FTS endpoint, so partial names like `env` → `store_env_content` could rank past the result cap and never appear. It now filters the already-loaded node set in the browser with substring matching; name (title/id/summary) matches sort ahead of body-text matches. Semantic mode still queries the server, where the embeddings live.
 
 ## [2.1.1] - 2026-06-14
 

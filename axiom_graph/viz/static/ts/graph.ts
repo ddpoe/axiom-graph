@@ -22,6 +22,8 @@ export const SUBTYPE_COLORS: Record<string, string> = {
   function:         '#27ae60',
   test:             '#e74c3c',
   docjson:          '#f39c12',
+  docjson_section:  '#f39c12',
+  docjson_doc:      '#f39c12',
   config:           '#f0883e',
   external_package: '#7f8c8d',
 };

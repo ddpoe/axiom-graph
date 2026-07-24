@@ -6,7 +6,7 @@
 // =============================================================================
 
 import type { AxiomNode, StalenessMap } from './types.js';
-import { displayStaleness } from './types.js';
+import { displayStaleness, isDocSubtype } from './types.js';
 import { esc, apiFetch } from './view-utils.js';
 import { NODE_TYPE_COLORS, NODE_TYPE_DEFAULT } from './graph.js';
 import {
@@ -386,7 +386,7 @@ function _makeNodeRow(node: AxiomNode, depth = 0): HTMLTableRowElement {
   const state = getAppState();
   const isActive   = state.selectedNodeId === node.id;
   const isMarkdownConfig = node.subtype === 'config' && node.location && node.location.endsWith('.md');
-  const isCode     = node.subtype !== 'docjson' && node.node_type !== 'entity' && !isMarkdownConfig;
+  const isCode     = !isDocSubtype(node.subtype) && node.node_type !== 'entity' && !isMarkdownConfig;
   const indent     = 16 + depth * 20;
   const firstCellIndent = depth > 0;
 
@@ -531,7 +531,7 @@ function _makeNodeRow(node: AxiomNode, depth = 0): HTMLTableRowElement {
     tr.addEventListener('click', () => {
       if (isCode && node.location) {
         openSource(node.id);
-      } else if (node.subtype === 'docjson') {
+      } else if (isDocSubtype(node.subtype)) {
         openDocPreview(node.id);
       } else if (isMarkdownConfig) {
         openMarkdownPreview(node.id);

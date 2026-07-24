@@ -25,8 +25,11 @@ JSON document format::
         ]
     }
 
-Each section becomes one ``atomic_process`` AxiomNode (subtype=docjson).
-The file itself becomes one ``composite_process`` AxiomNode (subtype=docjson).
+Each section becomes one ``atomic_process`` AxiomNode
+(subtype=docjson_section) — a first-class graph node carrying the full
+section content in ``level_2`` plus ``doc_position`` / ``doc_level``
+render metadata (ADR-021 envelope model).  The file itself becomes one
+``composite_process`` AxiomNode (subtype=docjson_doc), the lone envelope.
 
 ``composes`` edge:  doc_node → section_node  (structural containment)
 ``documents`` edge: section_node → link['node_id']  (section documents that code node)
@@ -36,7 +39,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -46,11 +48,6 @@ from axiom_annotations import task, Step, AutoStep
 
 from axiom_graph.index.file_state import file_unchanged_since
 from axiom_graph.models import AxiomEdge, AxiomNode, hash16, make_edge
-
-
-def _strip_html(text: str) -> str:
-    """Strip HTML tags for search index text."""
-    return re.sub(r"<[^>]+>", "", text).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +207,7 @@ def scan_single_json_doc(
     doc_node = AxiomNode(
         id=doc_id,
         node_type="composite_process",
-        subtype="docjson",
+        subtype="docjson_doc",
         title=title,
         location=rel_path,
         source="json_doc_scanner",
@@ -316,15 +313,17 @@ def _walk_sections(
         content_hash = hash16(content) if content else hash16("")
 
         # Section atomic nodes set both code_hash and desc_hash to content_hash.
-        # The doc_sections shadow row (synced by _sync_docjson_shadow) also stores
-        # content_hash in desc_hash per the four-field invariant — both sides of
-        # the staleness comparator agree, so heading-only edits do not flip
-        # desc_hash on the section atomic.  Heading edits still surface via
-        # CONTENT_UPDATED on the file-level composite node.
+        # code_hash is the staleness BASELINE (preserved across discovery
+        # upserts); desc_hash always mirrors the CURRENT content hash — both
+        # sides of the staleness comparator agree, so heading-only edits do
+        # not flip desc_hash on the section atomic.  Heading edits still
+        # surface via CONTENT_UPDATED on the file-level composite node.
+        # level_2 carries the FULL raw content (one column, one source of
+        # truth — DOC_SECTION_LONG and read_doc both consume it).
         section_node = AxiomNode(
             id=section_id,
             node_type="atomic_process",
-            subtype="docjson",
+            subtype="docjson_section",
             title=heading,
             location=rel_path,
             source="json_doc_scanner",
@@ -332,9 +331,11 @@ def _walk_sections(
             desc_hash=content_hash,
             level_0=doc_title,
             level_1=heading,
-            level_2=_strip_html(content)[:4000] if content else None,
+            level_2=content if content else None,
             level_3_location=rel_path,
             tags=sec_tags,
+            doc_position=pos,
+            doc_level=level,
         )
         nodes.append(section_node)
 

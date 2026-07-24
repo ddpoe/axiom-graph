@@ -92,6 +92,11 @@ export function displayStaleness(entry: StalenessEntry | undefined): string {
   return own;
 }
 
+/** True when a node subtype belongs to the doc family (envelope, section, or legacy markdown doc). */
+export function isDocSubtype(subtype: string | undefined | null): boolean {
+  return subtype === 'docjson' || subtype === 'docjson_section' || subtype === 'docjson_doc';
+}
+
 /** Verification record for a node. */
 export interface VerificationRecord {
   verified_at?: string;

@@ -260,8 +260,6 @@ def rescan_docs() -> dict:
         with db._connect(server._db()) as conn:
             for rec in doc_recs:
                 db.upsert_doc(conn, rec)
-            for rec in sec_recs:
-                db.upsert_doc_section(conn, rec)
         scanned = len(doc_recs)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -348,8 +346,6 @@ def import_doc_json(body: _DocImportRequest) -> dict:
         with db._connect(server._db()) as conn:
             for rec in doc_recs:
                 db.upsert_doc(conn, rec)
-            for rec in sec_recs:
-                db.upsert_doc_section(conn, rec)
 
         rel = json_path.relative_to(server._PROJECT_ROOT).as_posix()
         try:
@@ -445,8 +441,6 @@ def create_doc(body: _DocCreateRequest) -> dict:
         with db._connect(server._db()) as conn:
             for rec in doc_recs:
                 db.upsert_doc(conn, rec)
-            for rec in sec_recs:
-                db.upsert_doc_section(conn, rec)
 
         rel = json_path.relative_to(server._PROJECT_ROOT).as_posix()
         try:
@@ -668,8 +662,6 @@ def move_doc_endpoint(doc_id: str, body: _DocMoveRequest) -> dict:
         with db._connect(server._db()) as conn:
             for rec in doc_recs:
                 db.upsert_doc(conn, rec)
-            for rec in sec_recs:
-                db.upsert_doc_section(conn, rec)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Re-scan failed: {exc}") from exc
 
@@ -717,8 +709,6 @@ def save_doc(doc_id: str, body: _DocSaveRequest) -> dict:
         with db._connect(server._db()) as conn:
             for rec in doc_recs:
                 db.upsert_doc(conn, rec)
-            for rec in sec_recs:
-                db.upsert_doc_section(conn, rec)
 
         return {"ok": True, "sections_saved": len(sec_recs)}
     except Exception as exc:

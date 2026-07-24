@@ -21,7 +21,7 @@
   },
   "concepts/staleness.md": {
     "doc_id": "axiom_graph::docs.consumer.concepts.staleness",
-    "hash": "2c4153b28327"
+    "hash": "82e61794978c"
   },
   "concepts/the-mesh.md": {
     "doc_id": "axiom_graph::docs.consumer.concepts.the-mesh",
@@ -29,7 +29,7 @@
   },
   "examples/docs-honesty-loop.md": {
     "doc_id": "axiom_graph::docs.consumer.examples.docs-honesty-loop",
-    "hash": "f10d512d9293"
+    "hash": "4b6969d300cf"
   },
   "examples/index.md": {
     "doc_id": "axiom_graph::docs.consumer.examples",
@@ -37,7 +37,7 @@
   },
   "examples/multi-target-rendering.md": {
     "doc_id": "axiom_graph::docs.consumer.examples.multi-target-rendering",
-    "hash": "f6b9b220927f"
+    "hash": "f24404bffe8f"
   },
   "examples/reporting-pipeline.md": {
     "doc_id": "axiom_graph::docs.consumer.examples.reporting-pipeline",
@@ -45,11 +45,11 @@
   },
   "get-started/configuration.md": {
     "doc_id": "axiom_graph::docs.consumer.get-started.configuration",
-    "hash": "13d8315f1f5f"
+    "hash": "eabcb9e74295"
   },
   "get-started/connect-your-agent.md": {
     "doc_id": "axiom_graph::docs.consumer.get-started.connect-your-agent",
-    "hash": "168300d7c649"
+    "hash": "b52b22b12f6e"
   },
   "get-started/index.md": {
     "doc_id": "axiom_graph::docs.consumer.get-started",

@@ -5,6 +5,8 @@ and _transition_change_type mapping."""
 
 from __future__ import annotations
 
+from tests.conftest import seed_section_tuple
+
 import json
 import time
 from pathlib import Path
@@ -200,11 +202,7 @@ def test_get_stale_doc_sections_matches_became_content_updated(db_path: Path):
             "INSERT OR REPLACE INTO docs (id, title, file_path, desc_hash, updated_at) VALUES (?, ?, ?, ?, ?)",
             ("proj::docs.arch", "Architecture", "docs/arch.json", "x", section_ts),
         )
-        conn.execute(
-            "INSERT OR REPLACE INTO doc_sections (id, doc_id, heading, level, position, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            ("proj::docs.arch::overview", "proj::docs.arch", "Overview", 2, 0, section_ts),
-        )
+        seed_section_tuple(conn, ("proj::docs.arch::overview", "proj::docs.arch", "Overview", 2, 0, section_ts))
 
     time.sleep(0.02)
     db.upsert_node(db_path, func, discovery_only=False)

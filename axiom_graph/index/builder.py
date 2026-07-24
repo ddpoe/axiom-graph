@@ -112,8 +112,8 @@ def build(
 
     口 = Step(
         step_num=2,
-        name="Init DB and preload mtimes",
-        purpose="Ensure .axiom_graph/ dir and DB schema exist; batch-load stored file mtimes for mtime fast-pass",
+        name="Init DB, run migrations, and preload mtimes",
+        purpose="Ensure .axiom_graph/ dir and DB schema exist; run pending versioned schema migrations so a legacy DB upgrades in place before any scanning; batch-load stored file mtimes for mtime fast-pass",
         outputs="db_path, stored_mtimes dict",
     )
     # Resolve configured DB path (defaults to .axiom_graph/graph.db).
@@ -125,6 +125,16 @@ def build(
     logger.debug("build: initialising DB at %s", db_path)
     db.init_db(db_path)
     logger.debug("build: DB initialised")
+
+    # Versioned auto-migration (ADR-021): bring a legacy DB up to the
+    # current schema in place, before any scanning touches it.  No-op for
+    # fresh or already-current DBs.  Raises SchemaVersionError when the DB
+    # was written by a newer package (downgrade guard).
+    from axiom_graph.db.migrations import run_migrations  # noqa: PLC0415
+
+    migrations_applied = run_migrations(db_path)
+    if migrations_applied:
+        logger.info("build: applied schema migration(s): %s", migrations_applied)
 
     nodes_written = 0
     nodes_skipped = 0
@@ -259,7 +269,7 @@ def build(
         name="Scan doc files",
         purpose="Run doc_scanner on Markdown files and json_doc_scanner on DocJSON files in docs/",
         inputs="docs_dir, stored_mtimes",
-        outputs="all_nodes/all_edges extended with doc and section nodes; doc/section records upserted",
+        outputs="all_nodes/all_edges extended with doc and section nodes; doc/section records upserted; warnings for missing roots and for doc ids two roots both derive",
     )
     # ------------------------------------------------------------------
     # Doc + JSON doc scanners — loop over configured docs_dirs
@@ -271,7 +281,16 @@ def build(
     # mtime-skipped files are intentionally NOT included — they keep
     # their existing edges untouched (see ADR-013, edge case 1 in pitch).
     scanned_section_ids: set[str] = set()
+    # DocJSON doc envelope ids walked this build — drives the
+    # vanished-section pruning pass below.
+    scanned_doc_ids: set[str] = set()
     seen_docs_roots: set[Path] = set()
+    # DocJSON doc id -> the first file that derived it this build.  Doc ids
+    # flatten every configured root into one ``docs.`` namespace, so the same
+    # filename under two roots resolves to a single identity and the
+    # last-scanned file silently wins.  Only files actually walked this build
+    # participate — mtime-skipped files keep their existing rows untouched.
+    doc_id_sources: dict[str, str] = {}
     for rel_docs in config.scan.docs_dirs:
         docs_dir = (project_root / rel_docs).resolve()
         if docs_dir in seen_docs_roots:
@@ -318,11 +337,17 @@ def build(
             # whose ``links`` array is empty (they emit zero documents
             # edges, so deriving from ``all_edges`` would miss them).
             scanned_section_ids.update(rec["id"] for rec in sec_recs)
+            scanned_doc_ids.update(rec["id"] for rec in doc_recs)
+            for rec in doc_recs:
+                prior = doc_id_sources.setdefault(rec["id"], rec["file_path"])
+                if prior != rec["file_path"]:
+                    warnings.append(
+                        f"duplicate doc id {rec['id']} derived from two docs_dirs "
+                        f"roots: {prior} and {rec['file_path']} — last scanned wins"
+                    )
             with db._connect(db_path) as conn:
                 for rec in doc_recs:
                     db.upsert_doc(conn, rec)
-                for rec in sec_recs:
-                    db.upsert_doc_section(conn, rec)
         except Exception as exc:  # pragma: no cover
             warnings.append(f"json_doc_scanner failed on {rel_docs}/: {exc}")
             logger.warning("json_doc_scanner error: %s", exc)
@@ -581,13 +606,42 @@ def build(
             warnings.append(f"rename detection failed: {exc}")
             logger.warning("rename detection error: %s", exc)
 
-    口 = AutoStep(step_num=9, name="Purge stale entries")
+    口 = AutoStep(step_num=9, name="Purge stale entries and prune vanished doc sections")
     # ------------------------------------------------------------------
     # Purge pass — remove DB rows for files that no longer exist on disk
     # ------------------------------------------------------------------
     nodes_purged = _purge_stale_entries(
         db_path, project_root, warnings, exclude_dirs=config.scan.exclude_dirs, git_sha=git_sha
     )
+
+    # ------------------------------------------------------------------
+    # Vanished-section pruning pass (ADR-021 / build-path invariant)
+    # ------------------------------------------------------------------
+    # For every DocJSON doc walked THIS build, any section node in the DB
+    # that is no longer in the scan output has vanished from the file
+    # (e.g. removed via raw JSON edit) and is cascade-deleted with a
+    # preserved DELETED tombstone.  Docs inside mtime-skipped files are
+    # not in ``scanned_doc_ids``, so their sections are untouched.
+    sections_pruned = 0
+    if scanned_doc_ids:
+        try:
+            with db._connect(db_path) as conn:
+                for doc_id in scanned_doc_ids:
+                    rows = conn.execute(
+                        "SELECT id FROM nodes WHERE node_type = 'atomic_process' "
+                        "AND subtype IN ('docjson', 'docjson_section') "
+                        "AND source IN ('docjson', 'json_doc_scanner') "
+                        "AND id LIKE ? ESCAPE '\\'",
+                        (doc_id.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_") + "::%",),
+                    ).fetchall()
+                    for r in rows:
+                        if r["id"] not in scanned_section_ids:
+                            db.delete_node_by_id(conn, r["id"], reason_meta={"reason": "section removed from file"})
+                            sections_pruned += 1
+                            logger.info("build: pruned vanished doc section %s", r["id"])
+        except Exception as exc:  # pragma: no cover
+            warnings.append(f"vanished-section pruning failed: {exc}")
+            logger.warning("vanished-section pruning error: %s", exc)
 
     # ------------------------------------------------------------------
     # documents-edge reconciliation pass
@@ -825,6 +879,8 @@ def _generate_embeddings(
             content = sec.get("content", "")
             text = heading + "\n" + content
             c_hash = content_hash_for_embedding(heading, content)
+            if sec_id in hashes:
+                continue  # already queued via the scanned-nodes loop above
             if existing_hashes.get(sec_id) != c_hash:
                 items.append((sec_id, text))
                 hashes[sec_id] = c_hash

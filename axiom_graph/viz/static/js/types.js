@@ -13,3 +13,7 @@ export function displayStaleness(entry) {
     }
     return own;
 }
+/** True when a node subtype belongs to the doc family (envelope, section, or legacy markdown doc). */
+export function isDocSubtype(subtype) {
+    return subtype === 'docjson' || subtype === 'docjson_section' || subtype === 'docjson_doc';
+}

@@ -32,8 +32,8 @@ case "$AGENT_TYPE" in
     ;;
   pev:pev-auditor)
     LIMIT=75
-    ALLOWLIST="axiom_graph_update_section|axiom_graph_patch_section|axiom_graph_write_doc|axiom_graph_add_section|axiom_graph_delete_link|axiom_graph_update_doc_meta|axiom_graph_mark_clean|axiom_graph_purge_node|axiom_graph_build|axiom_graph_check"
-    ALLOWLIST_HUMAN="axiom_graph_update_section, axiom_graph_patch_section, axiom_graph_write_doc, axiom_graph_add_section, axiom_graph_delete_link, axiom_graph_update_doc_meta, axiom_graph_mark_clean, axiom_graph_purge_node, axiom_graph_build, axiom_graph_check"
+    ALLOWLIST="axiom_graph_update_section|axiom_graph_patch_section|axiom_graph_write_doc|axiom_graph_add_section|axiom_graph_delete_link|axiom_graph_update_doc_meta|axiom_graph_mark_clean|axiom_graph_reverify|axiom_graph_purge_node|axiom_graph_build|axiom_graph_check"
+    ALLOWLIST_HUMAN="axiom_graph_update_section, axiom_graph_patch_section, axiom_graph_write_doc, axiom_graph_add_section, axiom_graph_delete_link, axiom_graph_update_doc_meta, axiom_graph_mark_clean, axiom_graph_reverify, axiom_graph_purge_node, axiom_graph_build, axiom_graph_check"
     ;;
   pev:pev-doc-reviewer)
     LIMIT=60
