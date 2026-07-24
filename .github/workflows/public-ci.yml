@@ -17,7 +17,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install ruff
+      # Pinned to the version in poetry.lock — see the note in ci.yml. The
+      # shipped tree carries no lock-driven install, so this must stay in sync
+      # manually; bump it with the dev lock.
+      - run: pip install ruff==0.15.16
       - run: ruff check .
       - run: ruff format --check .
 
