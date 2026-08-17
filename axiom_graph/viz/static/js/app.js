@@ -311,6 +311,19 @@ function renderDocsView() {
         return;
     const docs = DocApi.getDocs();
     const filtered = DocTree.applyFilters(docs);
+    // An explicit "open in docs" navigation leaves a one-shot pending key.
+    // Consume it up front so the target's ancestor folders are already expanded
+    // by the time the tree renders below.
+    const pendingDocId = sessionStorage.getItem('cortex-doc-pending');
+    let revealDocId = null;
+    if (pendingDocId) {
+        sessionStorage.removeItem('cortex-doc-pending');
+        const pendingDoc = docs.find(d => d.id === pendingDocId);
+        if (pendingDoc) {
+            DocTree.revealDocFolders(pendingDoc);
+            revealDocId = pendingDocId;
+        }
+    }
     // Build the layout
     container.innerHTML = `
     <div class="doc-layout">
@@ -485,11 +498,24 @@ function renderDocsView() {
         });
     }
     ColResize.init(container);
-    // Restore selected doc
+    // An explicit navigation always wins.  Scroll after docsSelectDoc settles —
+    // it re-renders the tree on completion, which would drop an earlier scroll.
+    if (revealDocId) {
+        const target = revealDocId;
+        void docsSelectDoc(target).then(() => _scrollDocIntoView(target));
+        return;
+    }
+    // Otherwise restore the last selected doc, but only when the docs view has
+    // nothing selected yet.
     const savedDocId = sessionStorage.getItem('cortex-doc-id');
     if (savedDocId && !DocApi.getSelectedDocId() && docs.some(d => d.id === savedDocId)) {
         docsSelectDoc(savedDocId);
     }
+}
+function _scrollDocIntoView(docId) {
+    const row = document.querySelector(`.doc-list-item[data-doc-id="${docId}"]`);
+    if (row)
+        row.scrollIntoView({ block: 'nearest' });
 }
 async function docsSelectDoc(docId) {
     sessionStorage.setItem('cortex-doc-id', docId);

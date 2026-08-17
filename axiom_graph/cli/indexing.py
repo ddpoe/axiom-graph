@@ -55,7 +55,9 @@ def cmd_init(project_root: str, project_id: str | None) -> None:
     if db_path.exists():
         click.confirm(
             f"Index already exists at {db_path}. "
-            "Re-initialising will reset all baselines and clear staleness signals. Continue?",
+            "Re-initialising DELETES this database and rebuilds it from scratch: "
+            "every baseline and staleness signal is reset, and every verification "
+            "record and the whole change history are lost. Continue?",
             abort=True,
         )
         db_path.unlink()

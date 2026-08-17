@@ -170,6 +170,10 @@ export interface DocListEntry {
   source?: string;
   tags?: string[];
   section_count?: number;
+  /** POSIX path relative to the project root, e.g. "docs/adrs/015.json".
+   *  The only field that records which configured docs root a doc came
+   *  from — ids flatten every root into the same "docs." namespace. */
+  file_path?: string;
 }
 
 /** History entry for a node. */

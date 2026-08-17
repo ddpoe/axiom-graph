@@ -215,8 +215,17 @@ export function destroyRawMonaco() {
 }
 // ── Doc directory helper ────────────────────────────────────────────────────
 export function docDir(doc) {
-    // Extract directory from doc ID: "cortex::docs.adrs.015" -> "docs/adrs".
-    // When no dotpath is present, fall back to the primary docs root.
+    // Prefer the doc's real path: "docs/adrs/015.json" -> "docs/adrs".  This is
+    // the only source that preserves which configured docs root the doc came
+    // from — the id cannot, because every root flattens into the same "docs."
+    // namespace (".pev/test-policy.json" -> "{project}::docs.test-policy", which
+    // is indistinguishable from a doc sitting at the top of the primary root).
+    if (doc.file_path) {
+        const norm = doc.file_path.replace(/\\/g, '/');
+        const cut = norm.lastIndexOf('/');
+        return cut === -1 ? '' : norm.slice(0, cut);
+    }
+    // Fallback for entries with no path: derive from the doc ID dotpath.
     const idParts = doc.id.split('::');
     const dotPath = idParts.length >= 2 ? idParts[1] : doc.id;
     const segments = dotPath.split('.');

@@ -1,4 +1,4 @@
-<!-- generated from axiom_graph::docs.consumer.get-started.use-the-cli @ d8df31693484; do not edit -->
+<!-- generated from axiom_graph::docs.consumer.get-started.use-the-cli @ da98399ae7a1; do not edit -->
 
 # Use the CLI
 
@@ -48,7 +48,7 @@ Run `init` once to create the index. It scans every source file, discovers funct
 axiom-graph init .
 ```
 
-The index lands at `.axiom_graph/graph.db` inside your project. If a database already exists, `init` prompts for confirmation before wiping and rebuilding from scratch. Use `--id <prefix>` to set a custom project-ID prefix (it defaults to the directory name).
+The index lands at `.axiom_graph/graph.db` inside your project. If a database already exists, `init` prompts for confirmation before deleting it and rebuilding from scratch — that means every baseline, staleness signal, verification record, and your entire change history are lost, and the prompt says so. Use `--id <prefix>` to set a custom project-ID prefix (it defaults to the directory name).
 
 After the first build, use `build` for incremental updates. It runs in discovery-only mode: new nodes are inserted and edges are refreshed, but existing nodes keep their verification baselines, so your hard-won [staleness](../concepts/staleness.md) signals are preserved. `build` also runs annotation validation and the rename matcher (covered under resolve drift, below) as part of the same pass.
 

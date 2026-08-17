@@ -14,6 +14,7 @@ import logging
 import re
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -119,12 +120,17 @@ def scan_module(
         name="Read and parse AST",
         purpose="Read file text, compute relative path and dotpath, parse Python AST",
     )
+    # Sample the mtime BEFORE reading the bytes.  A write landing between the
+    # two then means the index holds the new bytes under the old mtime, so the
+    # next build re-scans redundantly; sampling after the read would mean the
+    # index holds the old bytes under the new mtime and the file is skipped
+    # permanently.
+    file_mtime = file_path.stat().st_mtime
     source = file_path.read_text(encoding="utf-8", errors="replace")
     source_lines = source.splitlines()
     rel_path = file_path.relative_to(project_root).as_posix()
     dotpath = _rel_path_to_dotpath(rel_path)
     module_id = f"{project_id}::{dotpath}"
-    file_mtime = file_path.stat().st_mtime
 
     try:
         tree = ast.parse(source, filename=str(file_path))
@@ -203,12 +209,12 @@ def scan_module(
 
     口 = Step(
         step_num=3,
-        name="Import analysis and name_map",
-        purpose="Walk module-level imports to build name_map (bound name → module node ID) and emit depends_on edges",
-        outputs="name_map dict, external_pkg_ids set, depends_on edges appended",
+        name="Module-level import analysis and name_map",
+        purpose="Walk the imports that are direct children of the module to build name_map (bound name → module node ID) and emit module-level depends_on edges",
+        outputs="name_map dict, external_pkg_ids set, depends_on edges appended — an edge to a module this one star-imports carries a reexport marker for the build-time resolver",
     )
     # -----------------------------------------------------------------------
-    # Import analysis — module-level only (ast.iter_child_nodes, not ast.walk)
+    # Import analysis — statements that are direct children of the module
     # -----------------------------------------------------------------------
     # current_package_parts: used for resolving relative imports.
     # name_map: bound name → intra-project module node_id.
@@ -220,50 +226,67 @@ def scan_module(
     current_package_parts = dotpath.split(".")[:-1]  # e.g. ["pm"] for pm/cli.py
     # name_map: bound_name -> (module_node_id, original_name_or_None)
     # original_name is set for "from X import Y" bindings so we can resolve
-    # Y to a function-level node ID. It is None for "import X" bindings where
-    # the function name comes from attribute access (pm.method.execute → "execute").
-    name_map: dict[str, tuple[str, str | None]] = {}
-    external_pkg_ids: set[str] = set()
+    # Y to a function-level node ID. It is None for whole-module bindings —
+    # "import X" and "from pkg import submodule" alike — where the function
+    # name comes from attribute access (pm.method.execute → "execute").
+    module_imports = [n for n in ast.iter_child_nodes(tree) if isinstance(n, (ast.Import, ast.ImportFrom))]
+    module_scan = _scan_imports(
+        module_imports,
+        project_root=project_root,
+        project_id=project_id,
+        module_id=module_id,
+        package_parts=current_package_parts,
+    )
+    name_map: dict[str, tuple[str, str | None]] = dict(module_scan.bindings)
+    external_pkg_ids: set[str] = set(module_scan.external_ids)
 
-    for imp_node in ast.iter_child_nodes(tree):
-        if isinstance(imp_node, ast.Import):
-            for alias in imp_node.names:
-                target_id = _resolve_import(alias.name, project_root, project_id)
-                if target_id and target_id != module_id:
-                    bound = alias.asname or alias.name.split(".")[0]
-                    name_map[bound] = (target_id, None)  # whole-module binding
-                    edges.append(make_edge("depends_on", module_id, target_id))
-                elif target_id is None:
-                    ext_id = _external_node_id(alias.name, project_id)
-                    if ext_id:
-                        external_pkg_ids.add(ext_id)
-                        edges.append(make_edge("depends_on", module_id, ext_id))
-        elif isinstance(imp_node, ast.ImportFrom):
-            level = imp_node.level or 0
-            mod = imp_node.module or ""
-            if level > 0:
-                base_parts = current_package_parts[: len(current_package_parts) - (level - 1)]
-                resolved_name = ".".join(base_parts + [mod]) if mod else ".".join(base_parts)
-            else:
-                resolved_name = mod
-            if resolved_name:
-                target_id = _resolve_import(resolved_name, project_root, project_id)
-                if target_id and target_id != module_id:
-                    edges.append(make_edge("depends_on", module_id, target_id))
-                    for alias in imp_node.names:
-                        if alias.name != "*":
-                            bound = alias.asname or alias.name
-                            # alias.name is the original name in the source module,
-                            # so we can construct a function-level node ID later.
-                            name_map[bound] = (target_id, alias.name)
-                elif target_id is None:
-                    ext_id = _external_node_id(resolved_name, project_id)
-                    if ext_id:
-                        external_pkg_ids.add(ext_id)
-                        edges.append(make_edge("depends_on", module_id, ext_id))
+    for target_id in sorted(module_scan.module_targets):
+        # A module this one re-exports from carries a durable marker so the
+        # build-time resolver can follow the re-export relation later.  The
+        # edge itself is an ordinary dependency; only the marker is new.
+        meta = {"reexport": "star"} if target_id in module_scan.star_sources else None
+        edges.append(make_edge("depends_on", module_id, target_id, meta=meta))
+    for ext_id in sorted(module_scan.external_ids):
+        edges.append(make_edge("depends_on", module_id, ext_id))
 
     口 = Step(
         step_num=4,
+        name="Deferred import union",
+        purpose="Walk every import that is NOT a direct child of the module — function body, class body, nested def, guarded block — and record the dependencies the module-level pass did not already carry",
+        inputs="the module AST and the module-level pass's target sets",
+        outputs="depends_on edges appended for deferred-only targets, external_pkg_ids extended",
+        critical="A flattened whole-file union, deliberately not a scoped one: module dependency is a property of the file. Per-function binding scope is a separate concern handled in _collect_functions, where it decides delegate targets.",
+    )
+    # ------------------------------------------------------------------
+    # Deferred imports — every import that is NOT a direct child of the
+    # module: inside a function body, a class body, a nested def, or a
+    # guarded block.  A deferred import is the standard remedy for a
+    # circular import or a slow module load, and the module genuinely
+    # depends on what it imports there.  Flattened deliberately: module
+    # dependency is a whole-file property, so every scope contributes to
+    # one union.  Per-function *binding* scope is handled separately in
+    # ``_collect_functions``, where it is load-bearing for delegation.
+    # ------------------------------------------------------------------
+    module_import_ids = {id(n) for n in module_imports}
+    deferred_imports = [
+        n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom)) and id(n) not in module_import_ids
+    ]
+    if deferred_imports:
+        deferred_scan = _scan_imports(
+            deferred_imports,
+            project_root=project_root,
+            project_id=project_id,
+            module_id=module_id,
+            package_parts=current_package_parts,
+        )
+        for target_id in sorted(deferred_scan.module_targets - module_scan.module_targets):
+            edges.append(make_edge("depends_on", module_id, target_id))
+        for ext_id in sorted(deferred_scan.external_ids - module_scan.external_ids):
+            external_pkg_ids.add(ext_id)
+            edges.append(make_edge("depends_on", module_id, ext_id))
+
+    口 = Step(
+        step_num=5,
         name="Collect functions and edges",
         purpose="Recursively extract function/method nodes at all nesting levels; emit composes, depends_on, and validates edges via AST call graph",
         outputs="Function nodes and edges appended, external package stubs created",
@@ -299,6 +322,8 @@ def scan_module(
         findings_out=findings_out,
         autosteps_out=autosteps_out,
         is_rule_enabled=is_rule_enabled,
+        project_root=project_root,
+        package_parts=current_package_parts,
     )
 
     # Emit stub nodes for external packages and tag the module
@@ -317,6 +342,171 @@ def scan_module(
             unique_edges.append(e)
 
     return nodes, unique_edges
+
+
+# ---------------------------------------------------------------------------
+# Import scanning
+# ---------------------------------------------------------------------------
+
+
+class _ImportScan(NamedTuple):
+    """Everything one set of import statements contributes to the index.
+
+    Attributes:
+        bindings: ``{bound_name: (module_node_id, original_name_or_None)}``.
+            ``original_name`` is None for whole-module bindings.
+        module_targets: Intra-project module node ids this scope depends on.
+        external_ids: External package stub ids this scope depends on.
+        star_sources: Subset of ``module_targets`` this scope re-exports
+            from via ``from X import *``.
+    """
+
+    bindings: dict[str, tuple[str, str | None]]
+    module_targets: set[str]
+    external_ids: set[str]
+    star_sources: set[str]
+
+
+# Statements that open a new binding scope.  An import inside one binds
+# there, not in the scope being walked.
+_SCOPE_BOUNDARIES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+
+
+def _iter_scope_imports(node: ast.AST):
+    """Yield the import statements that bind names in *node*'s own scope.
+
+    Descends through block statements that do not open a scope — ``if``,
+    ``try``, ``for``, ``with``, ``match`` — so a guarded or lazily-taken
+    import still counts, and stops at nested ``def`` / ``class`` bodies,
+    whose imports bind in a scope of their own.
+
+    Args:
+        node: The AST node whose scope to walk (usually a FunctionDef).
+
+    Yields:
+        ``ast.Import`` / ``ast.ImportFrom`` statements in that scope.
+    """
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.Import, ast.ImportFrom)):
+            yield child
+        elif isinstance(child, _SCOPE_BOUNDARIES):
+            continue
+        elif isinstance(child, (ast.stmt, ast.ExceptHandler, ast.match_case)):
+            yield from _iter_scope_imports(child)
+
+
+def _scan_imports(
+    import_nodes,
+    *,
+    project_root: Path,
+    project_id: str,
+    module_id: str,
+    package_parts: list[str],
+) -> _ImportScan:
+    """Resolve a set of import statements into bindings and dependency targets.
+
+    Shared by the module-level walk, the deferred-import union, and the
+    per-function binding overlay, so all three agree on what an import
+    means.  Names that resolve outside ``project_root`` are excluded from
+    the bindings and reported as external package stubs instead.
+
+    ``from pkg import name`` binds ``name`` to the **submodule** when
+    ``pkg/name.py`` (or ``pkg/name/__init__.py``) exists on disk: the
+    receiver of a later ``name.f()`` is that module, not the package.  The
+    package edge is kept alongside the submodule edge — importing a
+    submodule does execute its package.
+
+    Args:
+        import_nodes: Iterable of ``ast.Import`` / ``ast.ImportFrom``.
+        project_root: Absolute path to the project being scanned.
+        project_id: Project namespace prefix for node ids.
+        module_id: Node id of the module being scanned (self-imports are
+            skipped).
+        package_parts: Dotted-path components of the enclosing package,
+            used to resolve relative imports.
+
+    Returns:
+        An ``_ImportScan``.
+    """
+    bindings: dict[str, tuple[str, str | None]] = {}
+    module_targets: set[str] = set()
+    external_ids: set[str] = set()
+    star_sources: set[str] = set()
+
+    for imp_node in import_nodes:
+        if isinstance(imp_node, ast.Import):
+            for alias in imp_node.names:
+                target_id = _resolve_import(alias.name, project_root, project_id)
+                if target_id and target_id != module_id:
+                    bound = alias.asname or alias.name.split(".")[0]
+                    bindings[bound] = (target_id, None)  # whole-module binding
+                    module_targets.add(target_id)
+                elif target_id is None:
+                    ext_id = _external_node_id(alias.name, project_id)
+                    if ext_id:
+                        external_ids.add(ext_id)
+            continue
+
+        if not isinstance(imp_node, ast.ImportFrom):
+            continue
+
+        level = imp_node.level or 0
+        mod = imp_node.module or ""
+        if level > 0:
+            base_parts = package_parts[: len(package_parts) - (level - 1)]
+            resolved_name = ".".join(base_parts + [mod]) if mod else ".".join(base_parts)
+        else:
+            resolved_name = mod
+        if not resolved_name:
+            continue
+
+        target_id = _resolve_import(resolved_name, project_root, project_id)
+        if target_id is None:
+            ext_id = _external_node_id(resolved_name, project_id)
+            if ext_id:
+                external_ids.add(ext_id)
+            continue
+        if target_id != module_id:
+            module_targets.add(target_id)
+        for alias in imp_node.names:
+            if alias.name == "*":
+                if target_id != module_id:
+                    star_sources.add(target_id)
+                continue
+            bound = alias.asname or alias.name
+            submodule_id = _resolve_import(f"{resolved_name}.{alias.name}", project_root, project_id)
+            if submodule_id and submodule_id != module_id:
+                # The imported name IS a module — bind it as a namespace so
+                # `name.f()` resolves inside the file that defines `f`.
+                bindings[bound] = (submodule_id, None)
+                module_targets.add(submodule_id)
+            elif submodule_id is None and target_id != module_id:
+                # alias.name is the original name in the source module, so a
+                # function-level node id can be constructed from it later.
+                bindings[bound] = (target_id, alias.name)
+
+    return _ImportScan(bindings, module_targets, external_ids, star_sources)
+
+
+def _attribute_target_id(binding: tuple[str, str | None], attr_name: str) -> str:
+    """Return the node id an attribute call on a bound name resolves to.
+
+    A namespace binding (``import mod``, ``from pkg import submodule``)
+    makes ``mod.f()`` a module-level function of ``mod``.  A named import
+    (``from mod import Thing``) makes ``Thing.f()`` a member of ``Thing``,
+    which the index stores under the qualified name ``Thing.f``.
+
+    Args:
+        binding: ``(module_node_id, original_name_or_None)`` from a name_map.
+        attr_name: The attribute being called.
+
+    Returns:
+        The resolved node id.
+    """
+    mod_id, original = binding
+    if original is None:
+        return f"{mod_id}::{attr_name}"
+    return f"{mod_id}::{original}.{attr_name}"
 
 
 # ---------------------------------------------------------------------------
@@ -341,13 +531,43 @@ def _collect_functions(
     findings_out: list | None = None,
     autosteps_out: list | None = None,
     is_rule_enabled=None,
+    project_root: Path | None = None,
+    package_parts: list[str] | None = None,
+    class_name: str | None = None,
 ) -> None:
-    """Walk direct children of tree for FunctionDef / AsyncFunctionDef."""
+    """Walk direct children of tree for FunctionDef / AsyncFunctionDef.
+
+    Imports declared inside a function body bind in that function's scope
+    only, so each function is walked with its own binding overlay layered
+    over the enclosing one.  A local binding shadows an enclosing one of
+    the same name, which is what Python itself does — the reader of a
+    function body sees the local import and expects it to win.
+
+    ``class_name`` names the class whose body is being walked, or None at
+    module level.  It qualifies ``self`` / ``cls`` delegate targets and is
+    deliberately not derived from ``name_prefix``: inside a method that
+    prefix names the enclosing *function*, while a closure defined there is
+    still a member of the same class.
+    """
     if name_map is None:
         name_map = {}
     for child in ast.iter_child_nodes(tree):
         if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
+
+        # Per-function binding overlay.  Delegation is not scope-free: an
+        # import inside one function must not resolve a call in another.
+        scope_name_map = name_map
+        if project_root is not None:
+            local_scan = _scan_imports(
+                _iter_scope_imports(child),
+                project_root=project_root,
+                project_id=project_id,
+                module_id=module_id,
+                package_parts=package_parts or [],
+            )
+            if local_scan.bindings:
+                scope_name_map = {**name_map, **local_scan.bindings}
 
         qualified_name = f"{name_prefix}{child.name}" if name_prefix else child.name
         func_id = f"{project_id}::{dotpath}::{qualified_name}"
@@ -422,7 +642,7 @@ def _collect_functions(
                 envelope_id=envelope_id,
                 rel_path=rel_path,
                 project_id=project_id,
-                name_map=name_map,
+                name_map=scope_name_map,
                 local_func_ids=local_func_ids,
                 findings_out=findings_out,
                 autosteps_out=autosteps_out,
@@ -430,6 +650,8 @@ def _collect_functions(
                 envelope_purpose=dflow_dec.get("purpose") if dflow_dec else None,
                 envelope_node_id=envelope_id,
                 is_rule_enabled=is_rule_enabled,
+                module_id=module_id,
+                class_name=class_name,
             )
             nodes.extend(step_nodes)
             edges.extend(step_edges)
@@ -438,18 +660,18 @@ def _collect_functions(
         # Walks the full function subtree (including nested defs) so that names
         # used inside closures still count as dependencies of the enclosing function.
         # Only fires for names in name_map — stdlib/third-party are never in it.
-        if name_map:
+        if scope_name_map:
             used: set[str] = set()
             for name_node in ast.walk(child):
-                if isinstance(name_node, ast.Name) and name_node.id in name_map:
-                    used.add(name_map[name_node.id][0])
+                if isinstance(name_node, ast.Name) and name_node.id in scope_name_map:
+                    used.add(scope_name_map[name_node.id][0])
                 elif isinstance(name_node, ast.Attribute):
                     # db_adapter.get(...) → root is "db_adapter"
                     root = name_node.value
                     while isinstance(root, ast.Attribute):
                         root = root.value
-                    if isinstance(root, ast.Name) and root.id in name_map:
-                        used.add(name_map[root.id][0])
+                    if isinstance(root, ast.Name) and root.id in scope_name_map:
+                        used.add(scope_name_map[root.id][0])
             for target_id in sorted(used):
                 edges.append(make_edge("depends_on", func_id, target_id))
 
@@ -458,27 +680,29 @@ def _collect_functions(
         # only — no transitive traversal) and resolves each call against name_map.
         # Calls to stdlib/third-party are silently ignored (never in name_map).
         # Unresolvable targets (e.g. fixture-mediated calls) are silently skipped.
-        if name_map and "test" in func_tags:
+        if scope_name_map and "test" in func_tags:
             for call_node in ast.walk(child):
                 if not isinstance(call_node, ast.Call):
                     continue
                 func_ref = call_node.func
-                if isinstance(func_ref, ast.Name) and func_ref.id in name_map:
-                    mod_id, orig_name = name_map[func_ref.id]
+                if isinstance(func_ref, ast.Name) and func_ref.id in scope_name_map:
+                    mod_id, orig_name = scope_name_map[func_ref.id]
                     if orig_name is not None:
                         # from mod import func → func(...)
                         edges.append(make_edge("validates", func_id, f"{mod_id}::{orig_name}"))
                 elif isinstance(func_ref, ast.Attribute):
-                    # mod.func(...) — resolve root to module, attr is function name
+                    # mod.func(...) — resolve root to its binding, attr is the member
                     attr_name = func_ref.attr
                     root = func_ref.value
                     while isinstance(root, ast.Attribute):
                         root = root.value
-                    if isinstance(root, ast.Name) and root.id in name_map:
-                        mod_id, _ = name_map[root.id]
-                        edges.append(make_edge("validates", func_id, f"{mod_id}::{attr_name}"))
+                    if isinstance(root, ast.Name) and root.id in scope_name_map:
+                        target = _attribute_target_id(scope_name_map[root.id], attr_name)
+                        edges.append(make_edge("validates", func_id, target))
 
-        # Recurse into nested functions (classes too, for methods)
+        # Recurse into nested functions (classes too, for methods).  The
+        # scope map goes down, not the module one: a closure sees the
+        # bindings of the function that encloses it.
         _collect_functions(
             tree=child,
             source_lines=source_lines,
@@ -491,8 +715,13 @@ def _collect_functions(
             parent_id=func_id,
             name_prefix=f"{qualified_name}.",
             top_level=False,
-            name_map=name_map,
+            name_map=scope_name_map,
             local_func_ids=local_func_ids,
+            project_root=project_root,
+            package_parts=package_parts,
+            # A closure defined in a method is still inside the class, so the
+            # class qualifier passes through the function boundary unchanged.
+            class_name=class_name,
         )
 
     # Also descend into class bodies so methods are discovered
@@ -512,6 +741,11 @@ def _collect_functions(
                 top_level=False,
                 name_map=name_map,
                 local_func_ids=local_func_ids,
+                project_root=project_root,
+                package_parts=package_parts,
+                # Matches name_prefix above, so a self/cls target is byte-
+                # identical to the id this same walk mints for the method.
+                class_name=child.name,
             )
 
 
@@ -635,6 +869,8 @@ def _extract_step_nodes(
     envelope_purpose: str | None = None,
     envelope_node_id: str | None = None,
     is_rule_enabled=None,
+    module_id: str | None = None,
+    class_name: str | None = None,
 ) -> tuple[list[AxiomNode], list[AxiomEdge]]:
     """Extract step/autostep nodes and their structural edges.
 
@@ -642,9 +878,10 @@ def _extract_step_nodes(
     for every ``Step(...)`` / ``AutoStep(...)`` call inside ``func_node``,
     plus a ``composes`` edge from the envelope to each step.  For AutoSteps
     whose next statement is a direct call to an intra-project function —
-    either an imported name (``name_map``) or a function defined in the same
-    module (``local_func_ids``) — a ``delegates_to`` edge is emitted from the
-    autostep to the target function node.
+    an imported name (``name_map``), a function defined in the same module
+    (``local_func_ids``), or a sibling method reached through ``self`` /
+    ``cls`` (``module_id`` + ``class_name``) — a ``delegates_to`` edge is
+    emitted from the autostep to the target function node.
 
     Step nodes carry NO staleness dimensions (empty code_hash sentinel,
     NULL desc_hash); ``compute_staleness`` short-circuits for their
@@ -661,6 +898,10 @@ def _extract_step_nodes(
         local_func_ids: ``{func_name: node_id}`` for functions defined in the
             same module, so an AutoStep delegating to a same-file function
             resolves (not only imported ones).
+        module_id: Node ID of the enclosing module, used to build the target
+            ID for a ``self`` / ``cls`` delegate.
+        class_name: Name of the class enclosing ``func_node``, or None when
+            it is not a method.  Required for ``self`` / ``cls`` resolution.
 
     Returns:
         Tuple of (step_nodes, edges).  Never raises; on malformed
@@ -771,8 +1012,16 @@ def _extract_step_nodes(
                         target_name = _fn.id
                     elif isinstance(_fn, ast.Attribute):
                         target_name = _fn.attr
-                if name_map is not None:
-                    target_id = _resolve_next_call_target(nxt, name_map, local_func_ids)
+                # A self/cls target needs no import bindings, so it resolves
+                # even for a caller that passed no name_map at all.
+                if name_map is not None or class_name is not None:
+                    target_id = _resolve_next_call_target(
+                        nxt,
+                        name_map or {},
+                        local_func_ids,
+                        module_id=module_id,
+                        class_name=class_name,
+                    )
                     if target_id:
                         step_edges.append(make_edge("delegates_to", step_id, target_id))
 
@@ -852,14 +1101,18 @@ def _iter_statement_lists(func_node: ast.AST):
     Walking statement lists — rather than ``ast.walk`` — lets us reason about
     "the AutoStep assignment is immediately followed by a call" without
     confusing unrelated calls elsewhere in the function.
+
+    No visited-set is kept, deliberately.  Every list pushed below is a fresh
+    copy, so two pushes can never denote the same list, and the AST is a finite
+    tree the stack only ever descends — nothing can be reached twice.  An
+    ``id()``-keyed guard here is not merely redundant: a yielded list is freed
+    once ``body`` rebinds, CPython recycles its address for the next
+    ``list(nested)``, and the guard then skips a body it has never seen.  That
+    silently dropped markers declared inside loop and ``try`` bodies.
     """
     stack: list[list[ast.stmt]] = [list(getattr(func_node, "body", []) or [])]
-    seen_ids: set[int] = set()
     while stack:
         body = stack.pop()
-        if id(body) in seen_ids:
-            continue
-        seen_ids.add(id(body))
         yield body
         for stmt in body:
             for attr in ("body", "orelse", "finalbody"):
@@ -931,6 +1184,9 @@ def _resolve_next_call_target(
     stmt: ast.stmt,
     name_map: dict[str, tuple[str, str | None]],
     local_func_ids: dict[str, str] | None = None,
+    *,
+    module_id: str | None = None,
+    class_name: str | None = None,
 ) -> str | None:
     """Given the statement AFTER an AutoStep, find the node ID of the called function.
 
@@ -941,6 +1197,12 @@ def _resolve_next_call_target(
     A bare name is resolved against ``name_map`` (imports) first, then
     ``local_func_ids`` (functions defined in the same module), so an AutoStep
     delegating to a same-file function resolves as well as an imported one.
+
+    An attribute call resolves through ``name_map`` when the receiver is an
+    import binding, and through ``module_id`` + ``class_name`` when it is
+    ``self`` or ``cls``.  The second form reads the class from the caller's
+    walk position rather than from a lookup table, so two classes in one
+    module sharing a method name each resolve to their own.
     """
     call: ast.Call | None = None
     if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call):
@@ -969,15 +1231,26 @@ def _resolve_next_call_target(
             root = root.value
         if isinstance(root, ast.Name):
             # Python scanner accepts BOTH namespace and named-import attr
-            # access (mod.foo() or aliased.foo()) — the existing behavior is
-            # to emit f"{mod_id}::{attr_name}" regardless of which side of
-            # the import the name came from.  The shared helper conservatively
-            # only resolves the namespace case (original is None), so for the
-            # named-import-attr case (original is not None) we replicate the
-            # legacy behavior inline rather than asking the helper to relax.
+            # access (mod.foo() or Thing.foo()).  The shared helper
+            # conservatively resolves only the namespace case, so both are
+            # resolved here from the binding: a namespace receiver makes the
+            # attribute a module-level function, a named one makes it a
+            # member of the imported symbol.
             if root.id in name_map:
-                mod_id, _ = name_map[root.id]
-                return f"{mod_id}::{attr_name}"
+                return _attribute_target_id(name_map[root.id], attr_name)
+            # Intra-class delegation.  `self` and `cls` are never imports, so
+            # the target comes from the enclosing class instead — the same
+            # walk that reaches this call is guaranteed to mint that method
+            # node under the identical id, so this form cannot dangle.
+            #
+            # Tested against the DIRECT receiver, not the walked-down root: in
+            # `self.collaborator.method()` the root is still `self`, but the
+            # outermost attribute names a method of the collaborator, not a
+            # sibling.  Pairing the two would invent an edge to a method the
+            # class does not have — worse than the missing edge it replaces.
+            direct = func_ref.value
+            if isinstance(direct, ast.Name) and direct.id in ("self", "cls") and class_name and module_id:
+                return f"{module_id}::{class_name}.{attr_name}"
     return None
 
 

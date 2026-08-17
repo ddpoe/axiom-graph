@@ -1,4 +1,4 @@
-<!-- generated from axiom_graph::docs.consumer.get-started.configuration @ eabcb9e74295; do not edit -->
+<!-- generated from axiom_graph::docs.consumer.get-started.configuration @ 90402c392b59; do not edit -->
 
 # Configuration
 
@@ -42,7 +42,7 @@ Because `docs_dirs` and `config_dirs` are lists, projects that scatter docs and 
 **Every docs root flattens into one `docs.` namespace.** A doc id is `{project_id}::docs.` plus the file's path *relative to whichever root contained it* — the root's own name is not part of the id. So `.pev/test-policy.json` is `myproject::docs.test-policy`, and `.pev/cycles/foo.json` is `myproject::docs.cycles.foo`. Three consequences worth knowing:
 
 - **A listing that never mentions `.pev` is not evidence that `.pev` went unindexed.** `axiom_graph_list` and `read_doc("list")` print each doc's file path (`[.pev/test-policy.json]`) so you can tell the roots apart at a glance.
-- **Two roots can collide on one id.** `docs/x.json` and `.pev/x.json` both derive `myproject::docs.x` and overwrite each other — last scanned wins. The build emits a warning naming both files and the shared id. Give docs in different roots distinct filenames.
+- **Two roots can collide on one id.** `docs/x.json` and `.pev/x.json` both derive `myproject::docs.x` and overwrite each other — last scanned wins. The build emits a warning naming both files and the shared id; this check enumerates the whole document tree from disk, so an incremental build catches a collision against a file its mtime fast-pass skipped, not only files it re-scanned. Give docs in different roots distinct filenames. To see the full picture — every document and section id at once, not just the ones that collide — run `axiom-graph doc-ids preview <PROJECT_ROOT>`.
 - **New docs go to `docs_dirs[0]` unless you say otherwise.** Pass `docs_root` to `axiom_graph_write_doc` (e.g. `docs_root=".pev"`) to author into a different configured root; the value must match a `docs_dirs` entry.
 
 ### JavaScript / TypeScript scanning

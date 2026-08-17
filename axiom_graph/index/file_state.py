@@ -25,7 +25,18 @@ def file_unchanged_since(
 
     This is the mtime fast-pass: a cheap timestamp comparison used to skip
     re-scanning files whose modification time has not advanced past the
-    value recorded at index time.
+    stored value.
+
+    ``stored_mtime`` comes from the ``nodes.file_mtime`` column, which holds
+    *the file's on-disk modification time as observed when this build last
+    scanned the file's bytes*.  It is not a wall-clock scan timestamp, and it
+    is not a claim that the staleness baseline agrees with those bytes — that
+    guarantee belongs to ``code_hash`` and the content gate.  It is the
+    builder's scan-skip cache: advancing it promises the next build may
+    safely skip the file entirely, so only a full per-file index pass —
+    nodes *and* edges *and* doc/section records — may advance it.  Partial
+    refreshers (``index.mark_clean``, ``index.builder.rescan_file_if_needed``)
+    deliberately leave it alone.
 
     Args:
         stored_mtime: The file modification time recorded in the index, or

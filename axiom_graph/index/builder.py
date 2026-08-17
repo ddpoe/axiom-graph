@@ -15,19 +15,25 @@ Runs all scanners, validates ontology edges, and returns a summary dict:
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from axiom_annotations import workflow, task, Step, AutoStep
 
 from axiom_graph.config import AxiomGraphConfig
-from axiom_graph.index import db
+from axiom_graph.index import db, doc_ids
 from axiom_graph.index.file_state import file_unchanged_since
+from axiom_graph.models import make_edge
 from axiom_graph.ontology import valid_edge
 from axiom_graph.scanners import config_scanner, doc_scanner, module_scanner
 from axiom_graph.docjson import parse as json_doc_scanner
 from axiom_graph.index.status import BROKEN_LINK
+
+if TYPE_CHECKING:
+    from axiom_graph.models import AxiomNode
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +55,20 @@ _BASE_SKIP_DIRS: frozenset[str] = frozenset(
         "worktrees",  # PEV per-cycle git worktrees live under .claude/worktrees/
     }
 )
+
+# Scanner-derived edge types the build reconciles against the sources it
+# walked.  Membership is the whole scope of the reconciliation pass: an edge
+# type not named here is never deleted by a build, whatever its source file
+# says.  Widening this set is a deliberate decision, not a side effect —
+# each entry needs its own coverage, because each edge type has its own
+# cardinality rules (an AutoStep delegates at most once; a state machine's
+# state delegates once per transition, and every one of those is correct).
+_RECONCILED_SCANNER_EDGE_TYPES: frozenset[str] = frozenset({"delegates_to"})
+
+# How many carrier files the leftover-orphan notice names before it
+# summarises the rest.  The list is the remedy — it tells the reader what to
+# touch — so it has to stay short enough to read in one line.
+_ORPHAN_NOTICE_FILE_CAP: int = 5
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +107,14 @@ def build(
     -------
     dict
         Summary with keys ``nodes_written``, ``nodes_skipped``,
-        ``edges_written``, ``edges_skipped``, ``warnings``.
+        ``edges_written``, ``edges_skipped``, ``warnings``, plus the
+        reconciliation counters ``documents_edges_reconciled`` (orphan
+        documents edges deleted), ``scanner_edges_reconciled`` (superseded
+        scanner-derived edges deleted), ``orphaned_steps_reaped`` (step rows
+        deleted because the file this build walked no longer declares them),
+        ``orphaned_step_rows`` (step rows still parentless anywhere in the
+        index) and ``surplus_delegate_edges`` (delegate links still held by
+        AutoSteps that hold more than one).
     """
     t0 = time.monotonic()
     logger.info("build: start (project_root=%s, discovery_only=%s)", project_root, discovery_only)
@@ -267,9 +294,10 @@ def build(
     口 = Step(
         step_num=4,
         name="Scan doc files",
-        purpose="Run doc_scanner on Markdown files and json_doc_scanner on DocJSON files in docs/",
+        purpose="Run doc_scanner on Markdown files and json_doc_scanner on DocJSON files in docs/, then report doc-id overlaps across the whole tree",
         inputs="docs_dir, stored_mtimes",
-        outputs="all_nodes/all_edges extended with doc and section nodes; doc/section records upserted; warnings for missing roots and for doc ids two roots both derive",
+        outputs="all_nodes/all_edges extended with doc and section nodes; doc/section records upserted; warnings for missing roots, for doc ids more than one file derives, and for dotted filenames",
+        critical="The overlap signal enumerates every DocJSON on disk, not the files walked this build — an incremental build must notice a collision against an mtime-skipped file, and ordinary JSON beside the docs must never produce one",
     )
     # ------------------------------------------------------------------
     # Doc + JSON doc scanners — loop over configured docs_dirs
@@ -285,12 +313,6 @@ def build(
     # vanished-section pruning pass below.
     scanned_doc_ids: set[str] = set()
     seen_docs_roots: set[Path] = set()
-    # DocJSON doc id -> the first file that derived it this build.  Doc ids
-    # flatten every configured root into one ``docs.`` namespace, so the same
-    # filename under two roots resolves to a single identity and the
-    # last-scanned file silently wins.  Only files actually walked this build
-    # participate — mtime-skipped files keep their existing rows untouched.
-    doc_id_sources: dict[str, str] = {}
     for rel_docs in config.scan.docs_dirs:
         docs_dir = (project_root / rel_docs).resolve()
         if docs_dir in seen_docs_roots:
@@ -338,19 +360,42 @@ def build(
             # edges, so deriving from ``all_edges`` would miss them).
             scanned_section_ids.update(rec["id"] for rec in sec_recs)
             scanned_doc_ids.update(rec["id"] for rec in doc_recs)
-            for rec in doc_recs:
-                prior = doc_id_sources.setdefault(rec["id"], rec["file_path"])
-                if prior != rec["file_path"]:
-                    warnings.append(
-                        f"duplicate doc id {rec['id']} derived from two docs_dirs "
-                        f"roots: {prior} and {rec['file_path']} — last scanned wins"
-                    )
             with db._connect(db_path) as conn:
                 for rec in doc_recs:
                     db.upsert_doc(conn, rec)
         except Exception as exc:  # pragma: no cover
             warnings.append(f"json_doc_scanner failed on {rel_docs}/: {exc}")
             logger.warning("json_doc_scanner error: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Whole-tree doc-id signals (advisory; neither alters a derived id).
+    #
+    # Doc ids flatten every configured root into one ``docs.`` namespace
+    # and rewrite ``/`` to ``.``; neither transform is injective, so two
+    # files can derive one identity and the last-scanned one silently
+    # wins.  This pass enumerates every DocJSON *on disk* rather than the
+    # files walked above, so an incremental build reports an overlap
+    # against a file the mtime fast-pass skipped just as a full build does.
+    # Only DocJSON documents are counted: a project is free to keep
+    # ordinary JSON beside its docs, and those files never become doc
+    # nodes, so a finding about them would always be a false positive.
+    # ------------------------------------------------------------------
+    try:
+        _doc_files = doc_ids.enumerate_doc_files(project_root, config.scan.docs_dirs)
+        _signals = doc_ids.doc_id_signals(project_id, _doc_files)
+        for _collision in _signals.collisions:
+            warnings.append(
+                f"duplicate doc id {_collision.doc_id} derived from "
+                f"{len(_collision.sources)} files: {', '.join(_collision.sources)} — last scanned wins"
+            )
+        for _dotted in _signals.dotted:
+            warnings.append(
+                f"dotted DocJSON filename {_dotted} — the extra dots are indistinguishable "
+                "from directory separators in the derived doc id; consider hyphens"
+            )
+    except Exception as exc:  # pragma: no cover
+        warnings.append(f"doc id overlap scan failed: {exc}")
+        logger.warning("doc id overlap scan error: %s", exc)
 
     口 = Step(
         step_num=5,
@@ -403,9 +448,17 @@ def build(
     口 = Step(
         step_num=6,
         name="Batch upsert nodes and edges",
-        purpose="Validate ontology constraints and upsert all discovered nodes (single transaction) then edges (single transaction)",
+        purpose=(
+            "Validate ontology constraints and upsert all discovered nodes (single transaction) then "
+            "edges (single transaction), then retarget delegate links that name no node by following "
+            "the re-export relation"
+        ),
         inputs="all_nodes, all_edges, node_type_map",
-        outputs="nodes_written, nodes_skipped, edges_written, edges_skipped counts updated",
+        outputs="nodes_written, nodes_skipped, edges_written, edges_skipped, delegate_targets_resolved counts updated",
+        critical=(
+            "The delegate resolver reads its symbol table from the index, never from this build's scan "
+            "output, and rewrites all_edges so the reconciliation pass downstream sees corrected targets"
+        ),
     )
     # ------------------------------------------------------------------
     # Validate ontology and upsert nodes (single transaction)
@@ -457,8 +510,25 @@ def build(
             else:
                 edges_skipped += 1
 
+    # ------------------------------------------------------------------
+    # Delegate-target resolution — a scanner sees one file at a time and
+    # cannot know where a re-exported symbol is defined, so a call routed
+    # through a re-export shim resolves to a module that defines nothing.
+    # After the upserts above, the index holds every node and every
+    # re-export marker, and the closure can be walked.  Deliberately not a
+    # phase of its own: renumbering the steps below it would strand the
+    # existing step nodes, which is the very surface this pass exists to
+    # repair (see the cycle's decision log).
+    # ------------------------------------------------------------------
+    delegate_targets_resolved = _resolve_delegate_targets(db_path, all_edges, warnings)
+    if delegate_targets_resolved:
+        logger.info(
+            "delegate resolver: retargeted %d delegate link(s) through the re-export closure",
+            delegate_targets_resolved,
+        )
+
     口 = Step(
-        step_num=8,
+        step_num=7,
         name="Rename detection",
         purpose="Detect hash-similarity renames: find existing code nodes missing from this scan whose code_hash matches a newly discovered node",
         critical="Mtime-skipped files must be included in scanned_ids to prevent false renames",
@@ -492,7 +562,7 @@ def build(
                     return s, e
                 return None, None
 
-            口 = AutoStep(step_num=8.1, name="Build scope-reduced lost/found pools")
+            口 = AutoStep(step_num=7.1, name="Build scope-reduced lost/found pools")
             # Include mtime-skipped nodes (still on disk, unchanged) so they are
             # not mistaken for lost nodes.
             scanned_ids: set[str] = {n.id for n in all_nodes}
@@ -566,7 +636,7 @@ def build(
                     cfg.rename.code_threshold,
                     no_git=no_git,
                 )
-                口 = AutoStep(step_num=8.2, name="Run matcher + apply renames")
+                口 = AutoStep(step_num=7.2, name="Run matcher + apply renames")
                 match = _rm.run_matcher(adapter, pool_cap=cfg.rename.pool_cap)
                 nodes_renamed = len(match.applied)
                 renamed_new_ids = list(adapter.applied_new_ids)
@@ -606,7 +676,7 @@ def build(
             warnings.append(f"rename detection failed: {exc}")
             logger.warning("rename detection error: %s", exc)
 
-    口 = AutoStep(step_num=9, name="Purge stale entries and prune vanished doc sections")
+    口 = AutoStep(step_num=8, name="Purge stale entries and prune vanished doc sections")
     # ------------------------------------------------------------------
     # Purge pass — remove DB rows for files that no longer exist on disk
     # ------------------------------------------------------------------
@@ -622,6 +692,12 @@ def build(
     # (e.g. removed via raw JSON edit) and is cascade-deleted with a
     # preserved DELETED tombstone.  Docs inside mtime-skipped files are
     # not in ``scanned_doc_ids``, so their sections are untouched.
+    #
+    # This pass and the documents-edge reconciliation below are the two passes
+    # that only run for files this build scanned, and both swallow their
+    # failures into ``warnings``.  If either fails, the per-file index pass is
+    # incomplete and the scan-cache stamp must not fire — see the stamp block.
+    per_file_pass_failed = False
     sections_pruned = 0
     if scanned_doc_ids:
         try:
@@ -640,6 +716,7 @@ def build(
                             sections_pruned += 1
                             logger.info("build: pruned vanished doc section %s", r["id"])
         except Exception as exc:  # pragma: no cover
+            per_file_pass_failed = True
             warnings.append(f"vanished-section pruning failed: {exc}")
             logger.warning("vanished-section pruning error: %s", exc)
 
@@ -685,9 +762,218 @@ def build(
                     "documents-edge reconciler: reconciled %d orphan documents edges",
                     documents_edges_reconciled,
                 )
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:
+            per_file_pass_failed = True
             warnings.append(f"documents-edge reconciliation failed: {exc}")
             logger.warning("documents-edge reconciliation error: %s", exc)
+
+    口 = Step(
+        step_num=9,
+        name="Reconcile scanner-derived edges",
+        purpose=(
+            "For every source this build walked, delete the scoped scanner edges its file no "
+            "longer justifies, then report any leftovers the walked-source scoping cannot reach"
+        ),
+        inputs="all_nodes (walked sources), all_edges (intended targets), _RECONCILED_SCANNER_EDGE_TYPES",
+        outputs="scanner_edges_reconciled, surplus_delegate_edges, a one-line notice when leftovers remain",
+        critical="Gated on this build's NODE output, never its edge output; joins the per-file failure guard",
+    )
+    # ------------------------------------------------------------------
+    # scanner-edge reconciliation pass
+    # ------------------------------------------------------------------
+    # Source files are the source of truth for the edges the scanners derive
+    # from them.  An edge's identity includes its target, so retargeting a
+    # step's next call mints a NEW edge row and leaves the old one behind —
+    # node upsert cannot retire it, and purge cannot either (both endpoints
+    # are alive in files that still exist).  For every source walked THIS
+    # build, diff the DB's outbound set for each scoped edge type against the
+    # set this build's scan intended, and delete the difference.
+    #
+    # Scope: ``_RECONCILED_SCANNER_EDGE_TYPES`` only — every other edge type
+    # is untouched.
+    #
+    # Two properties are load-bearing, both copied from the documents
+    # reconciler above:
+    #
+    #   * The walked-source gate comes from this build's NODE output
+    #     (``all_nodes``), never its edge output.  A step that was walked but
+    #     resolves no delegate emits zero edges; deriving the gate from edges
+    #     would drop it out of scope and preserve its superseded edge forever.
+    #   * Sources absent from this build's output — mtime-skipped files, files
+    #     a scanner raised on — are out of scope entirely, NOT treated as
+    #     intending ∅.  Reversing that silently strips live edges from every
+    #     unchanged file.
+    scanner_edges_reconciled = 0
+    walked_source_ids: set[str] = {n.id for n in all_nodes}
+    if walked_source_ids:
+        # Intended targets per (edge_type, source) from this build's scan.
+        # A walked source missing from this map intends ∅ and is reconciled
+        # to ∅ — it stays in scope because the gate is the node set.
+        intended_by_source: dict[tuple[str, str], set[str]] = {}
+        for e in all_edges:
+            if e.edge_type in _RECONCILED_SCANNER_EDGE_TYPES and e.from_id in walked_source_ids:
+                intended_by_source.setdefault((e.edge_type, e.from_id), set()).add(e.to_id)
+
+        try:
+            with db._connect(db_path) as conn:
+                for edge_type in sorted(_RECONCILED_SCANNER_EDGE_TYPES):
+                    # Only sources that actually hold a stored edge of this
+                    # type can have a superseded one; intersecting with the
+                    # walked set keeps the pass O(offenders), not O(nodes).
+                    candidates = db.get_edge_source_ids_conn(conn, edge_type) & walked_source_ids
+                    for from_id in candidates:
+                        intended = intended_by_source.get((edge_type, from_id), set())
+                        current = db.get_outbound_edge_targets_conn(conn, from_id, edge_type)
+                        for target in current - intended:
+                            if db.delete_edge_conn(conn, from_id, target, edge_type):
+                                scanner_edges_reconciled += 1
+                                logger.info(
+                                    "scanner-edge reconciler: removed superseded %s %s -> %s",
+                                    edge_type,
+                                    from_id,
+                                    target,
+                                )
+            if scanner_edges_reconciled > 0:
+                logger.info(
+                    "scanner-edge reconciler: retired %d superseded scanner edge(s)",
+                    scanner_edges_reconciled,
+                )
+        except Exception as exc:
+            per_file_pass_failed = True
+            warnings.append(f"scanner-edge reconciliation failed: {exc}")
+            logger.warning("scanner-edge reconciliation error: %s", exc)
+
+    # -- TRANSITIONAL (remove with the edge-repair cycle) --------------
+    # Surplus delegate links predating the reconciler survive on files this
+    # build never walked, so the walked-source scoping cannot reach them.
+    # Report that they exist — one line, no detail; the offender list and the
+    # remedy belong to the repair path, built once, there.  Deliberately NOT
+    # gated on the walked set: surplus surviving on a source that WAS walked
+    # means the reconciler failed, so this one signal covers both.  Scoped to
+    # AutoStep sources, which is where cardinality ≤ 1 holds — a state
+    # machine's states legitimately delegate once per transition.
+    surplus_delegate_edges = 0
+    try:
+        with db._connect(db_path) as conn:
+            rows = conn.execute(
+                "SELECT COUNT(*) - 1 AS surplus FROM edges e "
+                "JOIN nodes n ON n.id = e.from_id "
+                "WHERE e.edge_type = 'delegates_to' AND n.subtype = 'autostep' "
+                "GROUP BY e.from_id HAVING COUNT(*) > 1"
+            ).fetchall()
+        surplus_delegate_edges = sum(r["surplus"] for r in rows)
+        if surplus_delegate_edges:
+            warnings.append(
+                f"{surplus_delegate_edges} surplus workflow delegate link(s) left over on "
+                f"{len(rows)} step(s) from builds before they were reconciled — each clears "
+                "when its file is next scanned"
+            )
+    except Exception as exc:  # pragma: no cover -- report-only, never fails a build
+        logger.warning("surplus delegate-link count failed: %s", exc)
+    # -- end TRANSITIONAL ----------------------------------------------
+
+    口 = AutoStep(step_num=10, name="Reap orphaned workflow step rows")
+    # ------------------------------------------------------------------
+    # Orphaned step-row reaping pass
+    # ------------------------------------------------------------------
+    # For every file this build walked, delete the step rows the index stores
+    # there that the file's markers no longer justify, then report the
+    # leftovers the walked-file scoping cannot reach.  Gated on this build's
+    # NODE output: a file absent from it — mtime-skipped, or one whose scanner
+    # raised — is out of scope, never treated as intending zero steps.  Joins
+    # the per-file failure guard so a reaping failure is retried rather than
+    # stamped past.
+    #
+    # Source files are the source of truth for the step rows the scanners
+    # derive from them, and a step row that loses its marker is reachable by
+    # nothing else: it can never become NOT_FOUND (steps carry no staleness
+    # dimension), so purge refuses it; the location purge only fires when the
+    # whole file is gone; and its envelope has usually been deleted along
+    # with the function that carried it, taking the ``composes`` edge away.
+    # Only the file the marker was declared in still names it, which is why
+    # the diff is keyed on location.  Same shape and the same two load-bearing
+    # properties as the passes above — the safety argument itself lives in the
+    # helper's docstring.
+    orphaned_steps_reaped, reap_failed = _reap_orphaned_step_nodes(db_path, all_nodes, warnings)
+    per_file_pass_failed = per_file_pass_failed or reap_failed
+    if orphaned_steps_reaped:
+        warnings.append(
+            f"removed {orphaned_steps_reaped} workflow step entr"
+            f"{'y' if orphaned_steps_reaped == 1 else 'ies'} the source no longer declares"
+        )
+
+    # -- TRANSITIONAL (remove with the full-walk / repair cycle) --------
+    # Orphaned step rows predating the reaper survive on files this build
+    # never walked, so the walked-file scoping cannot reach them.  Unlike the
+    # surplus-delegate notice above, this one carries its remedy: the fast
+    # pass is a pure mtime comparison with no content component, so advancing
+    # a file's modification time — touching or re-saving it — is enough to
+    # force the re-scan that reconciles it.  Naming the carrier files is what
+    # makes that actionable, so the list is named and capped rather than
+    # summarised as a bare count.
+    #
+    # Known limitation: this finds only orphans whose envelope is gone, which
+    # is what makes it a single query with no scan.  An orphan whose envelope
+    # survives — a workflow renumbered so its old step numbers were left
+    # behind — still has a ``composes`` parent and is invisible here.  That is
+    # accepted: minting one requires editing its file, which makes the next
+    # build walk and reap it, so it can only persist while the scanner raises
+    # on that file, which is already reported as its own warning.  Touching
+    # every source file and rebuilding clears both kinds.
+    orphaned_step_rows = 0
+    try:
+        with db._connect(db_path) as conn:
+            orphans_by_file = db.count_parentless_step_nodes_by_location_conn(conn)
+        orphaned_step_rows = sum(orphans_by_file.values())
+        if orphaned_step_rows:
+            named = sorted(orphans_by_file)[:_ORPHAN_NOTICE_FILE_CAP]
+            file_list = ", ".join(named)
+            overflow = len(orphans_by_file) - len(named)
+            if overflow:
+                file_list += f" (+{overflow} more)"
+            warnings.append(
+                f"{orphaned_step_rows} orphaned workflow step entr"
+                f"{'y' if orphaned_step_rows == 1 else 'ies'} left over in "
+                f"{len(orphans_by_file)} file(s) from builds before they were reconciled: "
+                f"{file_list} — touch or re-save each file (updating its modification time is "
+                "enough, no edit needed) and rebuild to force the re-scan that clears them"
+            )
+    except Exception as exc:  # pragma: no cover -- report-only, never fails a build
+        logger.warning("orphaned step-row count failed: %s", exc)
+    # -- end TRANSITIONAL ----------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Scan-cache stamp — record the on-disk mtime of every file this build
+    # actually opened and parsed, so the next build's mtime fast-pass can
+    # skip it.  Runs in BOTH build modes: ``upsert_node_conn`` only writes
+    # ``file_mtime`` when it inserts a row, so without this pass a node's
+    # stored mtime would be frozen at first insertion forever.
+    #
+    # Runs after — and is guarded on — the four index-integrity passes above
+    # that are gated on this build's scanned set: vanished-section pruning,
+    # documents-edge reconciliation, scanner-edge reconciliation, and
+    # orphaned step-row reaping.  All four swallow their failures into
+    # ``warnings``, so control reaches here either way.  Stamping is a promise
+    # that the next build may skip the file entirely, and that promise must
+    # not be made while any of them left this file's index incomplete:
+    # leaving the stored mtime behind is exactly what makes the next build
+    # re-scan the file and retry them.
+    #
+    # Known and accepted exception — embedding generation (Step 13) is also
+    # gated on this build's node set, also swallows its failures into
+    # ``warnings``, and runs AFTER this stamp, so a file whose embeddings
+    # failed is not retried until its bytes change.  That is deliberate.
+    # Embeddings are an optional, separately hash-gated derived subsystem:
+    # a missing vector degrades semantic search but does not corrupt the
+    # index, and gating the scan cache on an optional subsystem would keep
+    # the fast pass dead on every install that has no embedder configured.
+    # ------------------------------------------------------------------
+    file_mtimes_stamped = 0
+    if per_file_pass_failed:
+        logger.warning("build: skipping the scanned-file mtime stamp — a per-file pass failed; the next build re-scans")
+    else:
+        口 = AutoStep(step_num=11, name="Stamp scanned-file mtimes")
+        file_mtimes_stamped = _stamp_scanned_file_mtimes(db_path, all_nodes)
 
     # ------------------------------------------------------------------
     # Broken-link detection — flag nodes with dangling edges created by
@@ -696,7 +982,7 @@ def build(
     broken_links_flagged = _flag_broken_links(db_path, warnings)
 
     口 = Step(
-        step_num=10,
+        step_num=12,
         name="Index doc sections into FTS",
         purpose="Add doc section heading+content to node_fts so they are discoverable via axiom_graph_search",
     )
@@ -713,7 +999,7 @@ def build(
         logger.warning("doc section FTS indexing error: %s", exc)
 
     口 = Step(
-        step_num=11,
+        step_num=13,
         name="Generate embeddings",
         purpose="Compute embedding vectors for code nodes and doc sections for semantic search",
     )
@@ -774,7 +1060,13 @@ def build(
         "nodes_renamed": nodes_renamed,
         "renamed_new_ids": renamed_new_ids,
         "nodes_purged": nodes_purged,
+        "file_mtimes_stamped": file_mtimes_stamped,
         "documents_edges_reconciled": documents_edges_reconciled,
+        "delegate_targets_resolved": delegate_targets_resolved,
+        "scanner_edges_reconciled": scanner_edges_reconciled,
+        "orphaned_steps_reaped": orphaned_steps_reaped,
+        "orphaned_step_rows": orphaned_step_rows,
+        "surplus_delegate_edges": surplus_delegate_edges,
         "broken_links_flagged": broken_links_flagged,
         "doc_sections_indexed": doc_sections_indexed,
         "embeddings_generated": embeddings_generated,
@@ -939,6 +1231,181 @@ def _generate_embeddings(
     return generated
 
 
+# Depth cap for the re-export closure walk.  Deep enough for the shim
+# chains that occur in practice (aggregator on top of aggregator), shallow
+# enough that a pathological package tree cannot make a build crawl.
+_REEXPORT_CLOSURE_MAX_DEPTH = 8
+
+
+def resolve_symbol_through_reexports(
+    module_id: str,
+    symbol: str,
+    node_exists,
+    reexport_sources,
+    max_depth: int = _REEXPORT_CLOSURE_MAX_DEPTH,
+) -> str | None:
+    """Follow a module's re-export relation looking for one that defines *symbol*.
+
+    A module that re-exports another's names defines nothing itself, so a
+    call routed through one names a node that was never minted.  The
+    definition is found by walking outward from the guessed module along
+    the re-export relation.
+
+    The relation is supplied by the caller as "the modules this one
+    re-exports from", not as any particular import form, so a second kind
+    of re-export can be added later by extending the populator rather than
+    this walk.
+
+    Breadth-first, so the nearest definition wins.  Among candidates at the
+    same distance the lexicographically smallest module id wins, which
+    makes a name exported by two sources resolve the same way on every
+    build rather than by dictionary order.  Already-visited modules are
+    skipped, so a mutual re-export cycle terminates.
+
+    Args:
+        module_id: Node id of the module the target was guessed against.
+        symbol: The symbol name being looked for.
+        node_exists: Callable taking a node id and returning whether the
+            index holds it.
+        reexport_sources: Callable taking a module node id and returning
+            the module ids it re-exports from.
+        max_depth: Maximum number of re-export hops to follow.
+
+    Returns:
+        The node id of the defining symbol, or None when the closure does
+        not reach one.
+    """
+    visited: set[str] = {module_id}
+    frontier: list[str] = [module_id]
+    for _ in range(max_depth):
+        next_frontier: list[str] = []
+        for current in frontier:
+            for source in reexport_sources(current):
+                if source in visited:
+                    continue
+                visited.add(source)
+                next_frontier.append(source)
+        if not next_frontier:
+            return None
+        for source in sorted(next_frontier):
+            candidate = f"{source}::{symbol}"
+            if node_exists(candidate):
+                return candidate
+        frontier = next_frontier
+    return None
+
+
+def _resolve_delegate_targets(db_path: Path, all_edges: list, warnings: list[str]) -> int:
+    """Retarget this build's delegate links that name no node in the index.
+
+    Runs after nodes and edges are upserted, so both the symbol table and
+    the re-export relation are read from the **index** rather than from
+    this build's scan output.  An incremental build only scans changed
+    files, so a table derived from the scan would resolve correctly on
+    full rebuilds and flap on every other one.
+
+    An edge's identity embeds its target, so a retarget mints a NEW edge
+    rather than mutating one.  ``all_edges`` is rewritten in place so the
+    scanner-edge reconciliation pass downstream sees the corrected targets
+    as this build's intended set and retires the superseded rows; running
+    the other way round would leave a permanent ghost per retarget.
+
+    Warns when there are unresolved delegate links and the index records no
+    re-export relation at all.  The markers that populate that relation are
+    written when a file is scanned, so an index predating them holds none
+    and the mtime fast-pass keeps skipping the very files that would supply
+    them — resolution is then inactive with nothing on the surface to say
+    so.  The warning names the remedy because the remedy is the part that
+    is undiscoverable.
+
+    Args:
+        db_path: Path to the axiom-graph SQLite database.
+        all_edges: This build's edge list, rewritten in place.
+        warnings: Mutable list for error messages.
+
+    Returns:
+        Number of delegate links retargeted.
+    """
+    candidates = [(i, edge) for i, edge in enumerate(all_edges) if edge.edge_type == "delegates_to"]
+    if not candidates:
+        return 0
+
+    resolved = 0
+    try:
+        with db._connect(db_path) as conn:
+            existence_cache: dict[str, bool] = {}
+
+            def node_exists(node_id: str) -> bool:
+                if node_id not in existence_cache:
+                    row = conn.execute("SELECT 1 FROM nodes WHERE id = ?", (node_id,)).fetchone()
+                    existence_cache[node_id] = row is not None
+                return existence_cache[node_id]
+
+            # The re-export relation, read once.  Only the star form
+            # populates it today; the walk above never learns that.
+            relation: dict[str, list[str]] = {}
+            for row in conn.execute("SELECT from_id, to_id, meta FROM edges WHERE edge_type = 'depends_on'"):
+                raw_meta = row["meta"]
+                if not raw_meta:
+                    continue
+                try:
+                    meta = json.loads(raw_meta)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(meta, dict) and meta.get("reexport"):
+                    relation.setdefault(row["from_id"], []).append(row["to_id"])
+            for sources in relation.values():
+                sources.sort()
+
+            def reexport_sources(module_id: str) -> list[str]:
+                return relation.get(module_id, [])
+
+            unresolved = 0
+            for index, edge in candidates:
+                if node_exists(edge.to_id):
+                    continue
+                unresolved += 1
+                module_id, _, symbol = edge.to_id.rpartition("::")
+                if not module_id or not symbol:
+                    continue
+                new_target = resolve_symbol_through_reexports(
+                    module_id,
+                    symbol,
+                    node_exists,
+                    reexport_sources,
+                )
+                if new_target is None or new_target == edge.to_id:
+                    continue
+                new_edge = make_edge("delegates_to", edge.from_id, new_target)
+                all_edges[index] = new_edge
+                db.upsert_edge_conn(conn, new_edge)
+                resolved += 1
+                logger.info(
+                    "delegate resolver: %s -> %s (was %s)",
+                    new_edge.from_id,
+                    new_edge.to_id,
+                    edge.to_id,
+                )
+
+            if unresolved and not relation:
+                message = (
+                    f"{unresolved} delegate link(s) name no node and the index records no "
+                    "re-export markers, so delegate-target resolution had nothing to follow. "
+                    "Markers are written when a file is scanned, so an index built before "
+                    "they existed holds none and the mtime fast-pass keeps skipping the files "
+                    "that would supply them. Remedy: force a full rescan — clear the stored "
+                    "file mtimes (UPDATE nodes SET file_mtime = NULL) and build again. If a "
+                    "full rescan still records no markers, the project has no star re-exports "
+                    "and these targets are out of this pass's reach."
+                )
+                warnings.append(message)
+                logger.warning("delegate resolver: %s", message)
+    except Exception as exc:  # pragma: no cover
+        warnings.append(f"delegate target resolution failed: {exc}")
+        logger.warning("delegate target resolution error: %s", exc)
+    return resolved
+
+
 def _flag_broken_links(db_path: Path, warnings: list[str]) -> int:
     """Detect and flag nodes with broken links after purge.
 
@@ -1008,6 +1475,164 @@ def _iter_js_files(
                 continue
             seen.add(resolved)
             yield path
+
+
+@task(
+    purpose="Delete the step rows the index stores for a file this build walked whose markers that file's scan no longer emitted",
+    inputs="db_path, the node set collected by this build's scanners, the build's warnings list",
+    outputs="(number of orphaned step rows deleted, whether the pass failed)",
+)
+def _reap_orphaned_step_nodes(
+    db_path: Path,
+    nodes: list[AxiomNode],
+    warnings: list[str],
+) -> tuple[int, bool]:
+    """Reconcile stored step rows against the markers *nodes* declares per file.
+
+    A step row is reached through its stored ``location``, never through its
+    enclosing workflow: when an annotated function is deleted or moved, its
+    envelope node goes with it and the ``composes`` edge cascades away, so the
+    step rows it used to hold have no parent left to be found through.  Only
+    the file they were declared in still names them.  That location is the
+    declaring file in every case — cross-module delegation moves a step's
+    ``delegates_to`` target, never the step itself.
+
+    Two properties carry the safety argument:
+
+    * **Out of scope is not the same as intending ∅.**  A file absent from
+      this build's node output — skipped by the mtime fast-pass, or one whose
+      scanner raised — is not reconciled at all.  Treating it as intending no
+      steps would delete every step row in the project on the first
+      incremental build.
+    * **The gate is this build's node output, not a list of files the build
+      thinks it walked.**  A derived list can drift from what the scanners
+      actually produced; the node output cannot.  ``_stamp_scanned_file_mtimes``
+      establishes the same invariant for the identical set, and
+      ``scan_module`` returns its ``(nodes, edges)`` atomically, so a file
+      whose scanner raised contributes zero nodes and falls out of scope
+      instead of reading as ∅.
+
+    A walked file that emitted no step markers at all *is* in scope and is
+    reconciled to ∅ — it is in the node output because its module node is,
+    and "this file declares no steps" is exactly what its scan says.
+
+    Deletion goes through :func:`db.delete_node_by_id`, which cascades edges,
+    tags, FTS and non-preserved history, writes a preserved ``DELETED``
+    tombstone naming the reaper as the actor, and keeps inbound ``documents``
+    edges from surviving sources (flag-don't-drop).
+
+    Args:
+        db_path: Path to the axiom-graph SQLite database.
+        nodes: Every node collected by this build's scanners.
+        warnings: The build's warnings list; a failure is appended here rather
+            than raised, so a reaping error can never fail a build.
+
+    Returns:
+        Tuple of (rows deleted, pass failed).  The failure flag joins the
+        caller's per-file guard: a build that could not finish reconciling
+        must not stamp the files it read, or their orphans stay unreachable
+        until those files change again.
+    """
+    walked_locations: set[str] = {node.location for node in nodes if node.location}
+    if not walked_locations:
+        return 0, False
+
+    # Intended step rows per walked file, from this build's scan output.  A
+    # walked file missing from this map intends ∅ and is reconciled to ∅.
+    intended_by_location: dict[str, set[str]] = {}
+    for node in nodes:
+        if getattr(node, "subtype", None) in db.STEP_NODE_SUBTYPES and node.location:
+            intended_by_location.setdefault(node.location, set()).add(node.id)
+
+    reaped = 0
+    try:
+        with db._connect(db_path) as conn:
+            stored_by_location = db.get_step_node_ids_by_location_conn(conn, walked_locations)
+            for location, stored_ids in stored_by_location.items():
+                intended = intended_by_location.get(location, set())
+                for node_id in sorted(stored_ids - intended):
+                    db.delete_node_by_id(
+                        conn,
+                        node_id,
+                        reason_meta={
+                            "actor": "build:reap-orphaned-steps",
+                            "reason": "step marker no longer declared by the source file",
+                        },
+                    )
+                    reaped += 1
+                    logger.info("step reaper: removed orphaned step %s (%s)", node_id, location)
+    except Exception as exc:
+        warnings.append(f"orphaned step reaping failed: {exc}")
+        logger.warning("orphaned step reaping error: %s", exc)
+        return reaped, True
+
+    if reaped:
+        logger.info("step reaper: removed %d orphaned step row(s)", reaped)
+    return reaped, False
+
+
+@task(
+    purpose="Record the on-disk mtime of every file this build opened and parsed, so the next build's mtime fast-pass can skip it",
+    inputs="db_path, the node set collected by this build's scanners",
+    outputs="Number of file locations stamped",
+)
+def _stamp_scanned_file_mtimes(db_path: Path, nodes: list[AxiomNode]) -> int:
+    """Advance ``file_mtime`` for every file location present in *nodes*.
+
+    ``file_mtime`` is the builder's scan-skip cache: it holds the file's
+    on-disk modification time as observed when this build last scanned the
+    file's bytes.  Only a full per-file index pass — nodes *and* edges *and*
+    doc/section records — may advance it, because advancing it is a promise
+    that the next :func:`build` may safely skip the file entirely.  This
+    function is the single place that promise is made.  It must therefore be
+    called only once the index-integrity passes gated on this build's scanned
+    set — vanished-section pruning and documents-edge reconciliation — have
+    run and succeeded; either of those failing after the stamp would never be
+    retried, because the next build would skip the file.
+
+    Embedding generation is knowingly outside that guard: it too is gated on
+    this build's node set but runs *after* the stamp, so a file whose
+    embeddings failed is not retried until its bytes change.  See the call
+    site in :func:`build` for why that is accepted.
+
+    The set of files to stamp needs no skip-list: every scanner applies its
+    own mtime fast-pass, and a skipped file contributes zero nodes, so the
+    file-level mtimes riding on *nodes* already are exactly "the files this
+    build opened and parsed".
+
+    Only rows that already carry a non-NULL ``file_mtime`` are updated, which
+    preserves the column's shape (module/doc nodes carry it, function nodes
+    do not) and keeps both mtime readers in agreement for locations that
+    stamp more than one row.
+
+    Args:
+        db_path: Path to the axiom-graph SQLite database.
+        nodes: Every node collected by this build's scanners.
+
+    Returns:
+        The number of distinct file locations stamped.
+    """
+    scanned_mtimes: dict[str, float] = {}
+    for node in nodes:
+        mtime = node.file_mtime
+        location = node.location
+        if mtime is None or not location:
+            continue
+        prior = scanned_mtimes.get(location)
+        if prior is None or mtime > prior:
+            scanned_mtimes[location] = mtime
+
+    if not scanned_mtimes:
+        logger.info("build: stamped 0 scanned-file mtimes")
+        return 0
+
+    with db._connect(db_path) as conn:
+        conn.executemany(
+            "UPDATE nodes SET file_mtime = ? WHERE location = ? AND file_mtime IS NOT NULL",
+            [(mtime, location) for location, mtime in scanned_mtimes.items()],
+        )
+    logger.info("build: stamped %d scanned-file mtimes", len(scanned_mtimes))
+    return len(scanned_mtimes)
 
 
 @task(

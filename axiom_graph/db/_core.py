@@ -57,6 +57,16 @@ _SCHEMA_SQL = """
 -- doc_position / doc_level are DocJSON section metadata (subtype=
 -- 'docjson_section'): sibling-scoped render order and heading level.
 -- NULL for every other row.
+-- nodes.file_mtime holds THE FILE'S ON-DISK MODIFICATION TIME AS OBSERVED
+-- WHEN THIS BUILD LAST SCANNED THE FILE'S BYTES.  It is not a wall-clock
+-- scan timestamp, and it is not a claim that the staleness baseline agrees
+-- with those bytes (that is code_hash plus the content gate).  It is the
+-- builder's scan-skip cache: advancing it promises the next build may
+-- safely skip the file entirely, so ONLY a full per-file index pass --
+-- nodes AND edges AND doc/section records -- may advance it.  Partial
+-- refreshers (mark_clean, rescan_file_if_needed) leave it alone.
+-- Stored on file-level rows (module / doc / config / section); NULL on
+-- function rows.
 CREATE TABLE IF NOT EXISTS nodes (
     id               TEXT PRIMARY KEY,
     node_type        TEXT NOT NULL,

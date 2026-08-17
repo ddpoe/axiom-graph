@@ -30,8 +30,38 @@ export function getExpandedFolders(): Set<string> {
       const stored = JSON.parse(localStorage.getItem('cortex-doc-expanded') || '[]');
       _expandedFolders = new Set(stored);
     } catch { _expandedFolders = new Set(); }
+    _seedRootsExpanded(_expandedFolders);
   }
   return _expandedFolders;
+}
+
+/**
+ * Default each configured docs root to open, once per root.
+ *
+ * Roots render as top-level folders, so a tree whose expanded-set predates
+ * that (or a project opened for the first time) would otherwise come up fully
+ * collapsed and look empty.  Seeding is recorded per root rather than by a
+ * single flag so switching to a project with different roots still seeds, and
+ * so a root the user deliberately collapses stays collapsed on reload.
+ */
+function _seedRootsExpanded(expanded: Set<string>): void {
+  let seeded: string[];
+  try {
+    seeded = JSON.parse(localStorage.getItem('cortex-doc-roots-seeded') || '[]');
+  } catch { seeded = []; }
+  const seenRoots = new Set(seeded);
+  let changed = false;
+  for (const root of getDocsDirs()) {
+    const clean = root.replace(/\/+$/, '');
+    if (!clean || seenRoots.has(clean)) continue;
+    expanded.add(clean);
+    seenRoots.add(clean);
+    changed = true;
+  }
+  if (changed) {
+    localStorage.setItem('cortex-doc-roots-seeded', JSON.stringify([...seenRoots]));
+    localStorage.setItem('cortex-doc-expanded', JSON.stringify([...expanded]));
+  }
 }
 
 function persistExpandedFolders(): void {
@@ -104,15 +134,22 @@ interface TreeNode {
   docs: DocListEntry[];
 }
 
-// Strip the longest configured docs-root prefix from a directory string.
-function stripAnyRoot(dir: string, roots: string[]): string {
-  let best = '';
+// Return the longest configured docs root containing `dir`, or null when the
+// directory sits under none of them.
+function matchRoot(dir: string, roots: string[]): string | null {
+  let best: string | null = null;
   for (const r of roots) {
     const clean = r.replace(/\/+$/, '');
-    if (clean && (dir === clean || dir.startsWith(clean + '/')) && clean.length > best.length) {
+    if (clean && (dir === clean || dir.startsWith(clean + '/')) && clean.length > (best?.length ?? 0)) {
       best = clean;
     }
   }
+  return best;
+}
+
+// Strip the longest configured docs-root prefix from a directory string.
+function stripAnyRoot(dir: string, roots: string[]): string {
+  const best = matchRoot(dir, roots);
   if (!best) return dir;
   return dir.slice(best.length).replace(/^\/+/, '');
 }
@@ -120,45 +157,68 @@ function stripAnyRoot(dir: string, roots: string[]): string {
 export function buildFolderTree(docs: DocListEntry[]): TreeNode {
   const primary = getPrimaryDocsDir();
   const allRoots = getDocsDirs();
-  const root: TreeNode = { path: primary, name: primary, children: new Map(), docs: [] };
+
+  // A virtual container sitting above the configured roots.  It is never
+  // drawn (renderTreeNode skips depth 0), which makes every configured root a
+  // top-level folder in its own right — so two roots can hold same-named
+  // subfolders (docs/cycles and .pev/cycles) without merging into one.
+  const superRoot: TreeNode = { path: '', name: '', children: new Map(), docs: [] };
+
+  const rootNodeFor = (rootRel: string): TreeNode => {
+    const clean = rootRel.replace(/\/+$/, '') || rootRel;
+    let node = superRoot.children.get(clean);
+    if (!node) {
+      node = { path: clean, name: clean, children: new Map(), docs: [] };
+      superRoot.children.set(clean, node);
+    }
+    return node;
+  };
+
+  // Seed every configured root so an empty one still shows up as a folder.
+  for (const r of allRoots) rootNodeFor(r);
+
+  // Walk `dir` down from its owning root, creating folders as needed.
+  // Directories under no configured root fall back to the primary, matching
+  // the behaviour before roots became distinct folders.
+  const folderFor = (dir: string): TreeNode => {
+    let node = rootNodeFor(matchRoot(dir, allRoots) ?? primary);
+    for (const seg of stripAnyRoot(dir, allRoots).split('/').filter(Boolean)) {
+      const childPath = node.path + '/' + seg;
+      if (!node.children.has(seg)) {
+        node.children.set(seg, { path: childPath, name: seg, children: new Map(), docs: [] });
+      }
+      node = node.children.get(seg)!;
+    }
+    return node;
+  };
 
   for (const doc of docs) {
-    const dir = docDir(doc);
-    const subParts = stripAnyRoot(dir, allRoots).split('/').filter(Boolean);
-
-    if (subParts.length === 0) {
-      root.docs.push(doc);
-    } else {
-      let node = root;
-      for (const seg of subParts) {
-        const childPath = node.path + '/' + seg;
-        if (!node.children.has(seg)) {
-          node.children.set(seg, { path: childPath, name: seg, children: new Map(), docs: [] });
-        }
-        node = node.children.get(seg)!;
-      }
-      node.docs.push(doc);
-    }
+    folderFor(docDir(doc)).docs.push(doc);
   }
 
   // Merge in known empty subdirectories
   const subdirs = getKnownSubdirs();
   if (subdirs) {
-    for (const dir of subdirs) {
-      const subParts = stripAnyRoot(dir, allRoots).split('/').filter(Boolean);
-      if (subParts.length === 0) continue;
-      let node = root;
-      for (const seg of subParts) {
-        const childPath = node.path + '/' + seg;
-        if (!node.children.has(seg)) {
-          node.children.set(seg, { path: childPath, name: seg, children: new Map(), docs: [] });
-        }
-        node = node.children.get(seg)!;
-      }
-    }
+    for (const dir of subdirs) folderFor(dir);
   }
 
-  return root;
+  return superRoot;
+}
+
+/**
+ * Expand every ancestor folder of `doc` so its row is visible in the tree.
+ *
+ * Folder paths are root-prefixed (`docs/adrs`, `.pev/cycles`), so accumulating
+ * the doc's directory segments reproduces the exact node paths held in the
+ * expanded set.
+ */
+export function revealDocFolders(doc: DocListEntry): void {
+  const expanded = getExpandedFolders();
+  const parts = docDir(doc).split('/').filter(Boolean);
+  for (let i = 1; i <= parts.length; i++) {
+    expanded.add(parts.slice(0, i).join('/'));
+  }
+  persistExpandedFolders();
 }
 
 function countTreeDocs(node: TreeNode): number {
@@ -266,8 +326,13 @@ function renderTreeNode(
     if (!isExpanded) return;
   }
 
-  // Sort children then render
-  const sortedChildren = [...node.children.entries()].sort(([a], [b]) => a.localeCompare(b));
+  // Depth 0's children are the configured docs roots, seeded in docs_dirs
+  // order — keep that order so the primary root leads instead of whichever
+  // root happens to sort first.  Everything below is alphabetical.
+  const childEntries = [...node.children.entries()];
+  const sortedChildren = depth === 0
+    ? childEntries
+    : childEntries.sort(([a], [b]) => a.localeCompare(b));
   for (const [, child] of sortedChildren) {
     renderTreeNode(target, child, depth + 1, expanded, selectDoc, selectedDocId, onRename, onMove);
   }
@@ -290,6 +355,8 @@ function buildDocListItem(
   const el = document.createElement('div');
   el.className = 'doc-list-item' + (doc.id === selectedDocId ? ' active' : '');
   el.style.paddingLeft = (depth * 14 + 8) + 'px';
+  // Lets an explicit "open in docs" navigation find this row to scroll to.
+  el.dataset.docId = doc.id;
 
   const tagChips = (doc.tags || []).slice(0, 3)
     .map(t => `<span class="doc-list-tag">${esc(t)}</span>`).join('');

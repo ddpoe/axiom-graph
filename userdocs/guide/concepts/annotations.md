@@ -1,4 +1,4 @@
-<!-- generated from axiom_graph::docs.consumer.concepts.annotations @ 5ea76e475d1c; do not edit -->
+<!-- generated from axiom_graph::docs.consumer.concepts.annotations @ 19bc2fd4c752; do not edit -->
 
 # The Semantic Layer: Annotated Highways
 
@@ -30,7 +30,7 @@ def cmd_check(...):
 | `@workflow` | An orchestration function — the top of a highway | `purpose`, `inputs`, `outputs`, `critical` |
 | `@task` | A leaf unit of work a workflow delegates to | same decorator contract as `@workflow` |
 | `Step(...)` | An internal phase inside a decorated function | `step_num`, `name`, `purpose` |
-| `AutoStep(...)` | A `Step` whose *next call* is the work it delegates | same fields as `Step`; records the delegation |
+| `AutoStep(...)` | A `Step` whose *next call* is the work it delegates | `step_num`, `name` only — no `purpose`/`inputs`/`outputs`/`critical`; the delegate's own envelope supplies those when the step is expanded |
 
 The split between `@workflow` and `@task` is the intent distinction: a workflow sequences, a task does. `Step` markers narrate the phases of either; `AutoStep` is the one that also records *where execution goes next*, which is how the graph captures cross-function delegation without a full call graph.
 

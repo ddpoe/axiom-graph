@@ -16,10 +16,12 @@ import json
 import logging
 import time
 from collections import defaultdict
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from axiom_graph.index import db
 from axiom_graph.index.file_state import file_unchanged_since
+from axiom_graph.index.mark_clean import VERIFICATION_OP_REVERIFY
 from axiom_graph.index.git_utils import get_git_sha
 from axiom_graph.models import hash16
 from axiom_graph.index.status import (
@@ -197,12 +199,32 @@ def _link_transition(old: str, new: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+_BROKEN_LINK_EDGE_TYPES = ("documents", "validates", "delegates_to")
+
+
 def find_broken_links(db_path: Path) -> dict[str, str]:
     """Find edges whose to_id has no matching node in the index.
 
-    Only checks ``documents`` and ``validates`` edge types (user-facing
-    link types).  Returns a dict mapping from_id to the first dangling
-    to_id found for that source node.
+    Covers the user-facing link types — ``documents``, ``validates``, and
+    ``delegates_to``.  A workflow step whose delegate target names nothing
+    is the same class of defect as a doc link pointing at a deleted
+    function: navigation dead-ends and consumers print an identifier that
+    resolves to no source.
+
+    A finding on a step node is attributed to the envelope that composes
+    it.  The envelope is the node a maintainer acts on, and it already
+    receives the transitive link signal that walks through its steps;
+    step nodes otherwise carry no staleness dimensions, since staleness
+    computation assigns their subtype a blanket VERIFIED.
+
+    A step no ``workflow`` / ``task`` composes — a leftover from an edit
+    that renumbered or removed the enclosing function, which nothing
+    retires — keeps the finding on itself.  That is deliberate: its own id
+    is the only identifier that names the leftover, whereas charging the
+    surrounding module would flag a live node for a step no scan emits.
+    The status is stable there, because the BROKEN_LINK overlay in
+    :func:`record_staleness` outranks the blanket VERIFIED and is
+    reapplied on every recompute for as long as the edge dangles.
 
     Args:
         db_path: Path to the axiom-graph SQLite database.
@@ -210,15 +232,33 @@ def find_broken_links(db_path: Path) -> dict[str, str]:
     Returns:
         Dict mapping source node ID to the dangling target node ID.
     """
+    placeholders = ", ".join("?" * len(_BROKEN_LINK_EDGE_TYPES))
     with db._connect(db_path) as conn:
         rows = conn.execute(
-            """
-            SELECT e.from_id, e.to_id
+            f"""
+            SELECT
+                CASE
+                    WHEN src.subtype IN ('step', 'autostep') THEN COALESCE(
+                        (SELECT c.from_id
+                           FROM edges c
+                           JOIN nodes env ON env.id = c.from_id
+                          WHERE c.edge_type = 'composes'
+                            AND c.to_id = e.from_id
+                            AND env.subtype IN ('workflow', 'task')
+                          ORDER BY c.from_id
+                          LIMIT 1),
+                        e.from_id
+                    )
+                    ELSE e.from_id
+                END AS from_id,
+                e.to_id AS to_id
             FROM edges e
+            LEFT JOIN nodes src ON src.id = e.from_id
             LEFT JOIN nodes n ON n.id = e.to_id
-            WHERE e.edge_type IN ('documents', 'validates')
+            WHERE e.edge_type IN ({placeholders})
               AND n.id IS NULL
-            """
+            """,
+            _BROKEN_LINK_EDGE_TYPES,
         ).fetchall()
     result: dict[str, str] = {}
     for r in rows:
@@ -270,6 +310,17 @@ def record_staleness(
     )
 
     # Post-processing: overlay BROKEN_LINK on link dimension.
+    #
+    # This overlay — not ``_flag_broken_links``' raw UPDATE at build time —
+    # is what makes a BROKEN_LINK stick: the recompute below rewrites
+    # link_status for every node it persists, so a build-time flag on a node
+    # this pass recomputes would otherwise be overwritten.
+    #
+    # The ``in new_statuses`` gate looks like it could drop findings, and does
+    # not: the persistence loop at the end of this function iterates
+    # ``new_statuses``, so a node absent from it is never written either and
+    # keeps whatever the build flagged.  The two sets move together — widening
+    # one without the other is what would open a gap.
     broken_links = find_broken_links(db_path)
     for node_id in broken_links:
         if node_id in new_statuses:
@@ -792,6 +843,58 @@ def resolve_root_offenders(stale_map: dict[str, list[str]]) -> dict[str, list[st
     return result
 
 
+def already_reverified_offenders(
+    offender_ids: Iterable[str],
+    *,
+    latest_change_ids: Mapping[str, int],
+    verification_ops: Mapping[str, list[tuple[int, str | None]]],
+) -> set[str]:
+    """Return the offenders that have already been reverified.
+
+    An offender counts as already-reverified when it carries a
+    verification row satisfying both:
+
+    1. **Operation check** — the row records
+       :data:`~axiom_graph.index.mark_clean.VERIFICATION_OP_REVERIFY` as
+       the operation that wrote it.  Rows recording any other operation
+       value, and rows written before that provenance existed (op
+       ``None``), are not counted.
+    2. **Ordering check** — that row is *newer* than the offender's most
+       recent content-bearing change, compared by ``node_history`` row
+       id (monotonic, so no clock reading is involved).  A later change
+       re-opens the offender.
+
+    Conservative default in every ambiguous case: an offender with no
+    qualifying verification row, or with no change row at all — hence no
+    reference point to order against — is **not** reported as
+    already-reverified.
+
+    Pure function over the passed maps — issues no SQL.  The api layer
+    supplies both (see
+    :func:`axiom_graph.db.history.get_verification_ordering_rows`).
+
+    Args:
+        offender_ids: Root offender IDs to classify.
+        latest_change_ids: Offender ID -> ``node_history.id`` of its most
+            recent content-bearing change row.
+        verification_ops: Offender ID -> its ``(history_id,
+            verification_op)`` pairs.
+
+    Returns:
+        The subset of *offender_ids* that has already been reverified.
+    """
+    result: set[str] = set()
+    for nid in offender_ids:
+        change_id = latest_change_ids.get(nid)
+        if change_id is None:
+            continue
+        for history_id, op in verification_ops.get(nid, ()):
+            if op == VERIFICATION_OP_REVERIFY and history_id > change_id:
+                result.add(nid)
+                break
+    return result
+
+
 def classify_inherited_link(
     db_path: Path,
     node_id: str,
@@ -907,10 +1010,15 @@ def compute_staleness(
         step_num=2,
         name="Per-file staleness detection",
         purpose="For each file location: check existence -> NOT_FOUND; CONTENT-GATED mtime fast-pass -> VERIFIED only when a whole-file fingerprint matches the file-level anchor's code_hash; else (mtime changed, or anchor missing/mismatched) re-parse and compare hashes per node",
-        inputs="location_map, project_root, stored mtimes from DB",
+        inputs="location_map, project_root, stored mtimes batch-loaded from the DB in one query before the loop",
         outputs="own_statuses updated for atomic_process nodes; composite_process nodes left unset for inheritance",
         critical="Mtime trust is no longer blind — the content gate confirms the file's bytes against the anchor's whole-file code_hash before blanket-VERIFY. The gate relies on that anchor code_hash being present and on read-mode parity (JS/TS read as raw decoded bytes, everything else via universal-newline read_text); a missing/empty anchor hash falls through to the per-node ladder rather than over-trusting mtime",
     )
+    # Batch-load every stored mtime in one query rather than opening a
+    # connection per location inside the loop.  Same values the per-location
+    # point lookup returns — both readers select MAX(file_mtime) per location.
+    stored_mtimes = db.get_all_file_mtimes(db_path)
+
     for location, loc_nodes in location_map.items():
         abs_path = project_root / location
         if not abs_path.exists():
@@ -918,7 +1026,7 @@ def compute_staleness(
                 own_statuses[n.id] = NOT_FOUND
             continue
 
-        stored_mtime = db.get_file_mtime(db_path, location)
+        stored_mtime = stored_mtimes.get(location)
         current_mtime = abs_path.stat().st_mtime
 
         # Mtime fast-pass (exact comparison — no slop; see cycle

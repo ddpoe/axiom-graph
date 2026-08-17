@@ -6,7 +6,7 @@ Covers:
 - Init → edit body → build → check → CONTENT_UPDATED
 - Init → edit docstring only → DESC_UPDATED
 - Both changed → CONTENT_UPDATED (not CLEAN)
-- discovery_only upsert does not update mtime
+- discovery_only build freezes the staleness baseline but advances file_mtime
 - discovery_only upsert does not update hashes
 - Line shift (add function above) → level_3_location updates, staleness stays CLEAN
 """
@@ -154,12 +154,18 @@ def test_init_edit_build_both_changed_content_stale(mini_project: Path, db_path:
 
 
 # ---------------------------------------------------------------------------
-# Tier 1 — discovery_only upsert does not update mtime
+# Tier 2 — discovery_only freezes the staleness baseline, not the scan cache
 # ---------------------------------------------------------------------------
 
 
-def test_discovery_only_upsert_does_not_update_mtime(mini_project: Path, db_path: Path):
-    """Direct DB assertion: file_mtime is unchanged after discovery_only upsert."""
+@workflow(
+    purpose=(
+        "Discovery-only mode preserves the staleness baseline (code_hash / desc_hash / "
+        "updated_at) for a scanned file while still advancing its file_mtime scan cache — "
+        "two independent guarantees on two different columns."
+    ),
+)
+def test_discovery_only_build_freezes_baseline_but_advances_mtime(mini_project: Path, db_path: Path):
     src = mini_project / "mod.py"
     src.write_text(
         'def greet():\n    """Say hello."""\n    return "hello"\n',
@@ -167,11 +173,15 @@ def test_discovery_only_upsert_does_not_update_mtime(mini_project: Path, db_path
     )
     builder.build(mini_project, project_id="proj", discovery_only=False)
 
-    # Record the stored mtime after initial build
+    module_before = [n for n in db.all_nodes(db_path) if n.title == "mod"][0]
+    with db._connect(db_path) as conn:
+        updated_at_before = conn.execute("SELECT updated_at FROM nodes WHERE id = ?", (module_before.id,)).fetchone()[
+            "updated_at"
+        ]
     stored_mtime_before = db.get_file_mtime(db_path, "mod.py")
     assert stored_mtime_before is not None
 
-    # Edit the file (changes its OS mtime)
+    # Edit the file (changes its OS mtime and its content)
     _bump_mtime()
     src.write_text(
         'def greet():\n    """Say hello."""\n    return "goodbye"\n',
@@ -179,9 +189,21 @@ def test_discovery_only_upsert_does_not_update_mtime(mini_project: Path, db_path
     )
     builder.build(mini_project, project_id="proj", discovery_only=True)
 
-    # Stored mtime should be unchanged — discovery_only preserves baseline
+    # The staleness baseline stays frozen — that is what discovery_only is for.
+    module_after = [n for n in db.all_nodes(db_path) if n.title == "mod"][0]
+    assert module_after.code_hash == module_before.code_hash
+    assert module_after.desc_hash == module_before.desc_hash
+    with db._connect(db_path) as conn:
+        updated_at_after = conn.execute("SELECT updated_at FROM nodes WHERE id = ?", (module_after.id,)).fetchone()[
+            "updated_at"
+        ]
+    assert updated_at_after == updated_at_before
+
+    # The scan cache advances to the bytes this build actually read, so the
+    # next build can skip the file instead of re-parsing it forever.
     stored_mtime_after = db.get_file_mtime(db_path, "mod.py")
-    assert stored_mtime_after == stored_mtime_before
+    assert stored_mtime_after > stored_mtime_before
+    assert stored_mtime_after == src.stat().st_mtime
 
 
 # ---------------------------------------------------------------------------

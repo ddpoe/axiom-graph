@@ -1,4 +1,4 @@
-<!-- generated from axiom_graph::docs.consumer.viz @ 51341425220d; do not edit -->
+<!-- generated from axiom_graph::docs.consumer.viz @ 9d8b19d61aeb; do not edit -->
 
 # The Viz Dashboard
 
@@ -67,7 +67,7 @@ The Staleness Cause block is worth dwelling on: it is the same drift signal the 
 
 ## Editing docs in the browser
 
-The Docs tab is a full manager for the DocJSON files in your `docs/` directory. A folder tree on the left organizes documents; a filter panel narrows by tag, search term, or path. Because each [DocJSON](concepts/docjson.md) section is its own node, the editor works at section granularity:
+The Docs tab is a full manager for the DocJSON files in every configured docs root (`[axiom_graph.scan] docs_dirs`, which defaults to just `docs/`). A folder tree on the left organizes documents, with each configured root as its own top-level folder; a filter panel narrows by tag, search term, or path. Because each [DocJSON](concepts/docjson.md) section is its own node, the editor works at section granularity:
 
 - **Edit a section** in a rich-text editor (headings, bold, lists, tables, code blocks); changes save back to the file on disk.
 - **Manage sections** - add, reorder by dragging, rename headings and slugs inline, delete. A table-of-contents sidebar tracks scroll position.
@@ -79,7 +79,7 @@ This is the same editing surface used to maintain the docs you are reading - the
 
 ## Workflows and tests
 
-**Workflows** surfaces the semantic layer - the annotated [orchestration highways](concepts/the-mesh.md). If your code uses `@workflow` / `@task` decorators, the tab lists every discovered workflow and task; selecting one shows its step sequence with step numbers, names, purposes, inputs, outputs, and critical-path flags. Filters narrow by module or show only items with steps, critical steps, or linked nodes. A Monaco viewer highlights the step lines in source. This is deliberately not a full call graph - it is the intentional highways through your orchestration, with their step names attached.
+**Workflows** surfaces the semantic layer - the annotated [orchestration highways](concepts/the-mesh.md). If your code uses `@workflow` / `@task` decorators, the tab lists every discovered workflow and task; selecting one shows its step sequence with step numbers, names, purposes, inputs, outputs, and critical-path flags. Where an `AutoStep` delegates into another annotated function, that function's steps are expanded inline and renumbered (`2.3.1.3.1`), indented one level per delegation hop — so a short function backed by a deep call chain reads as the whole flow rather than a handful of markers. An `AutoStep` has no purpose of its own, so its row shows the purpose declared on the function it calls. Filters narrow by module or show only items with steps, critical steps, or linked nodes. A Monaco viewer highlights the step lines in source. This is deliberately not a full call graph - it is the intentional highways through your orchestration, with their step names attached.
 
 **Tests** lists every indexed test function with a tier badge (T1 unit, T2 integration, T3 end-to-end) and shows which code nodes each test `validates`. Filter by module, tier, or step annotations; selecting a test opens its source with relevant lines highlighted, and fixture relationships appear when available.
 

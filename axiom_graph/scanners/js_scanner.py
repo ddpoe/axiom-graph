@@ -1667,12 +1667,15 @@ def scan_js_module(
     if not HAS_TREE_SITTER:
         raise RuntimeError("tree-sitter is required for JS/TS scanning. Install with: pip install axiom-graph[js]")
 
+    # Sample the mtime BEFORE reading the bytes — see scan_module for the
+    # rationale (stamping an mtime newer than the bytes we indexed makes the
+    # next build skip the file permanently).
+    file_mtime = file_path.stat().st_mtime
     source_bytes = file_path.read_bytes()
     source_text = source_bytes.decode("utf-8", errors="replace")
     rel_path = file_path.relative_to(project_root).as_posix()
     dotpath = _rel_path_to_dotpath(rel_path)
     module_id = f"{project_id}::{dotpath}"
-    file_mtime = file_path.stat().st_mtime
 
     suffix = file_path.suffix
     lang = _get_language(suffix)

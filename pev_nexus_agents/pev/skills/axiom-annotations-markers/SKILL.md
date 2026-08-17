@@ -68,21 +68,32 @@ Marks a sequential phase. Typically used for phases that contain inline logic.
          purpose="Load axiom-graph.toml and determine project_id")
 ```
 
-- `step_num`: integer or float (minor only inside loops).
-- `name`: short label for the step.
-- `purpose`: (optional) what this step accomplishes.
+- `step_num`: **required** — integer or float (minor only inside loops).
+- `name`: **required** — short label for the step.
+- `purpose`: **required** — what this step accomplishes.
 - `inputs`: (optional) what this step reads.
 - `outputs`: (optional) what this step produces.
 - `critical`: (optional) important constraints or invariants.
 
 ### AutoStep(step_num=N)
-Same fields as `Step`. Used when the step delegates to a `@task` function — the scanner
-auto-resolves the `delegates_to` edge.
+
+**`AutoStep` takes `step_num` and `name` only — nothing else.** It does *not* share `Step`'s
+fields, and passing `purpose=`, `inputs=`, `outputs=` or `critical=` raises `TypeError` at
+import time, which takes down every module that imports the file.
 
 ```python
 口 = AutoStep(step_num=10, name="Purge stale entries")
 nodes_purged = _purge_stale_entries(db_path, project_root, warnings)
 ```
+
+- `step_num`: **required** — integer or float (minor only inside loops).
+- `name`: (optional) short label for the step.
+
+This is by design, not an omission. An `AutoStep` delegates to a `@task`/`@workflow`, and the
+intent lives on *that* function's decorator — purpose, inputs, outputs and critical are resolved
+from the delegate target during the assemble phase. Writing them on the marker would duplicate
+the target's own metadata and let the two drift apart. **If you want to describe what the step
+does, put it on the target's `@task`, not on the `AutoStep`.**
 
 - Used when the very next call is to a `@task`-decorated function.
 - axiom-graph links the AutoStep to the task via a `delegates_to` edge in `graph.db`.

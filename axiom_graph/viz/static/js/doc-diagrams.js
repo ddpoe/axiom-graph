@@ -13,8 +13,10 @@ let _mermaidMonacoRegistered = false;
 let _mermaidSources = [];
 // ── Getters ─────────────────────────────────────────────────────────────────
 export function getDiagramEditorIdx() { return _diagramEditorIdx; }
+// The accumulator is append-only within a render pass: renderMarkdown() pushes
+// each section's fences onto it and indexes placeholders by its length, so
+// indices stay unique document-wide. Only clearMermaidSources() empties it.
 export function getMermaidSources() { return _mermaidSources; }
-export function setMermaidSources(sources) { _mermaidSources = sources; }
 export function clearMermaidSources() { _mermaidSources = []; }
 // ── Reset ───────────────────────────────────────────────────────────────────
 export function resetDiagrams() {

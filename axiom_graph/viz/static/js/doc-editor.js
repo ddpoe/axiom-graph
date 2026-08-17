@@ -7,7 +7,7 @@
 // =============================================================================
 import { esc, apiFetch } from './view-utils.js';
 import { getRawDoc, setRawDoc, isDirty, setDirty, getSelectedDocId, saveDoc, getPendingRenames, clearPendingRenames, addPendingRename, destroyRawMonaco, setRawMonaco, getRawMonaco, } from './doc-api.js';
-import { isMermaidSection, extractMermaidSource, runMermaid as runMermaidDiagrams, setMermaidSources, clearMermaidSources, getDiagramEditorIdx, openDiagramEditor, closeDiagramEditor, applyDiagramEditor, mountDiagramEditor, destroyDiagramEditor, } from './doc-diagrams.js';
+import { isMermaidSection, extractMermaidSource, runMermaid as runMermaidDiagrams, getMermaidSources, clearMermaidSources, getDiagramEditorIdx, openDiagramEditor, closeDiagramEditor, applyDiagramEditor, mountDiagramEditor, destroyDiagramEditor, } from './doc-diagrams.js';
 // ── State ───────────────────────────────────────────────────────────────────
 let _renderedData = null;
 let _editingSectionIdx = null;
@@ -218,7 +218,10 @@ function _buildNestedList(block, ordered) {
 export function renderMarkdown(text) {
     if (!text)
         return '<p class="doc-empty-content">No content</p>';
-    const sources = [];
+    // Mermaid sources accumulate across every renderMarkdown() call in a render
+    // pass -- one call per section -- so placeholder indices stay unique
+    // document-wide. renderDocContent() resets the accumulator per document.
+    const sources = getMermaidSources();
     let html = text;
     // Step 1: Extract fenced code blocks into placeholders.
     // They handle their own escaping via esc(); we must protect them
@@ -312,7 +315,6 @@ export function renderMarkdown(text) {
     if (!html.startsWith('<')) {
         html = `<p>${html}</p>`;
     }
-    setMermaidSources(sources);
     return html;
 }
 // ── HTML detection (for Tiptap content) ─────────────────────────────────────

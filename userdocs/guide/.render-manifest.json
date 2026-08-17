@@ -1,7 +1,7 @@
 {
   "concepts/annotations.md": {
     "doc_id": "axiom_graph::docs.consumer.concepts.annotations",
-    "hash": "5ea76e475d1c"
+    "hash": "19bc2fd4c752"
   },
   "concepts/docjson.md": {
     "doc_id": "axiom_graph::docs.consumer.concepts.docjson",
@@ -45,11 +45,11 @@
   },
   "get-started/configuration.md": {
     "doc_id": "axiom_graph::docs.consumer.get-started.configuration",
-    "hash": "eabcb9e74295"
+    "hash": "90402c392b59"
   },
   "get-started/connect-your-agent.md": {
     "doc_id": "axiom_graph::docs.consumer.get-started.connect-your-agent",
-    "hash": "b52b22b12f6e"
+    "hash": "07ca95e4c1c9"
   },
   "get-started/index.md": {
     "doc_id": "axiom_graph::docs.consumer.get-started",
@@ -57,7 +57,7 @@
   },
   "get-started/use-the-cli.md": {
     "doc_id": "axiom_graph::docs.consumer.get-started.use-the-cli",
-    "hash": "d8df31693484"
+    "hash": "da98399ae7a1"
   },
   "index.md": {
     "doc_id": "axiom_graph::docs.consumer.index",
@@ -73,6 +73,6 @@
   },
   "viz.md": {
     "doc_id": "axiom_graph::docs.consumer.viz",
-    "hash": "51341425220d"
+    "hash": "9d8b19d61aeb"
   }
 }

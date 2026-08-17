@@ -4,7 +4,8 @@ Covers the ``node_history`` table (``get_history``,
 ``get_agent_verified_nodes``, ``get_history_since``,
 ``resolve_since_cutoff``, ``list_reference_points``,
 ``filter_history_rows``, ``build_node_types_map``,
-``insert_history_row``, ``get_latest_code_change_times``).
+``insert_history_row``, ``get_latest_code_change_times``,
+``get_verification_ordering_rows``).
 """
 
 from __future__ import annotations
@@ -467,6 +468,79 @@ def get_latest_code_change_times(db_path: Path, node_ids: list[str]) -> dict[str
         return {r["node_id"]: r["latest_scanned_at"] for r in rows}
 
 
+def get_verification_ordering_rows(
+    db_path: Path,
+    node_ids: list[str],
+) -> tuple[dict[str, int], dict[str, list[tuple[int, str | None]]]]:
+    """Return per-node history rows for ordering verifications against changes.
+
+    Two batched lookups over ``node_history``, both carrying the table's
+    monotonic ``id`` so callers can order rows without reading a clock:
+
+    - **latest content-bearing change** per node, over the widest change
+      set the staleness passes use (``CONTENT_ONLY`` / ``DESC_ONLY`` /
+      ``CONTENT_AND_DESC`` / ``BECAME_CONTENT_UPDATED``) — the same set
+      as ``get_stale_annotated_nodes``, so a docstring-only drift that
+      can root a dependent is not missed.
+    - **every verification row** (``AGENT_VERIFIED`` /
+      ``MANUAL_VERIFIED``) per node, each paired with the operation
+      recorded in its ``meta`` payload under ``verification_op`` (written
+      by :func:`axiom_graph.index.mark_clean.mark_node_clean`).  Rows
+      written before that provenance existed carry ``None``.  This
+      module reports what is stored; deciding what a given operation
+      value means belongs to the caller.
+
+    Nodes with no matching row are omitted from the respective dict.
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+        node_ids: Node IDs to look up.
+
+    Returns:
+        ``(latest_change_ids, verification_ops)`` — the first maps
+        node_id to the ``node_history.id`` of its latest content-bearing
+        change; the second maps node_id to its ``(history_id,
+        verification_op)`` pairs in ascending id order.
+    """
+    if not node_ids:
+        return {}, {}
+    ids = list(node_ids)
+    placeholders = ",".join("?" for _ in ids)
+    with _connect(db_path) as conn:
+        change_rows = conn.execute(
+            f"""
+            SELECT node_id, MAX(id) AS latest_id
+            FROM node_history
+            WHERE node_id IN ({placeholders})
+              AND change_type IN ('CONTENT_ONLY', 'DESC_ONLY', 'CONTENT_AND_DESC', 'BECAME_CONTENT_UPDATED')
+            GROUP BY node_id
+            """,
+            ids,
+        ).fetchall()
+        verify_rows = conn.execute(
+            f"""
+            SELECT node_id, id, meta
+            FROM node_history
+            WHERE node_id IN ({placeholders})
+              AND change_type IN ('AGENT_VERIFIED', 'MANUAL_VERIFIED')
+            ORDER BY id
+            """,
+            ids,
+        ).fetchall()
+
+    latest_change_ids = {r["node_id"]: r["latest_id"] for r in change_rows}
+    verification_ops: dict[str, list[tuple[int, str | None]]] = {}
+    for r in verify_rows:
+        op: str | None = None
+        if r["meta"]:
+            try:
+                op = json.loads(r["meta"]).get("verification_op")
+            except Exception:
+                op = None
+        verification_ops.setdefault(r["node_id"], []).append((r["id"], op))
+    return latest_change_ids, verification_ops
+
+
 __all__ = [
     "get_history",
     "get_agent_verified_nodes",
@@ -479,4 +553,5 @@ __all__ = [
     "build_node_types_map",
     "insert_history_row",
     "get_latest_code_change_times",
+    "get_verification_ordering_rows",
 ]

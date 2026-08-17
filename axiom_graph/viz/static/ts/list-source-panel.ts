@@ -677,6 +677,11 @@ export function bindSourcePanelHandlers(): void {
   if (openDocsBtn) {
     openDocsBtn.addEventListener('click', () => {
       if (_docCurrentId) {
+        // One-shot navigation intent.  The docs view consumes this key
+        // unconditionally, so an explicit "open in docs" always wins over
+        // whichever doc happens to be selected there already — the plain
+        // 'cortex-doc-id' restore path only applies when nothing is selected.
+        sessionStorage.setItem('cortex-doc-pending', _docCurrentId);
         sessionStorage.setItem('cortex-doc-id', _docCurrentId);
         setViewFn('docs');
       }

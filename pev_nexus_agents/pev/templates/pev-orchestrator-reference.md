@@ -122,7 +122,7 @@ poetry install --extras "js viz semantic" --with dev   # poetry + extras + dev g
 # pip install -e '.[js,viz,semantic,test]'             # pip
 # uv sync --all-extras                                  # uv
 ```
-**Why parity matters:** a missing *scanner* dependency makes whole node classes flip `NOT_FOUND`/`CONTENT_UPDATED` (e.g. language-module nodes when the parser extra is absent) and injects environment noise into the cycle's staleness — seen in one project as **333 stale-in-worktree vs 12 on main**; that gap must be *detected* by the entry baseline check below, not silently absorbed as drift. A missing *test-only* dependency won't show as a stale node — it surfaces only when a test can't run (see **Env-gap recovery** below). Install the project in editable mode (not a `--no-root`-style deps-only install) so console scripts and import paths match a developer's local checkout.
+**Why parity matters:** a missing *scanner* dependency makes whole node classes flip `NOT_FOUND`/`CONTENT_UPDATED` (e.g. language-module nodes when the parser extra is absent) and injects environment noise into the cycle's staleness — a missing language-parser extra can flip hundreds of nodes where main shows a dozen; that gap must be *classified* by the entry baseline check below, not silently absorbed as drift. A missing *test-only* dependency won't show as a stale node — it surfaces only when a test can't run (see **Env-gap recovery** below). Install the project in editable mode (not a `--no-root`-style deps-only install) so console scripts and import paths match a developer's local checkout.
 
 **Note:** A per-worktree environment is created and is not auto-cleaned when the worktree is removed. Periodically clean up stale environments from the main repo (for poetry: `poetry env list` / `poetry env remove {name}`; adjust for your package manager).
 
@@ -130,9 +130,10 @@ poetry install --extras "js viz semantic" --with dev   # poetry + extras + dev g
 ```bash
 # Example (cortex): the viz frontend lives at axiom_graph/viz/static/ts
 if [ -f axiom_graph/viz/static/ts/package.json ]; then
-  cd axiom_graph/viz/static/ts && npm install
+  (cd axiom_graph/viz/static/ts && npm install)
 fi
 ```
+**Wrap a provisioning `cd` in a subshell.** A bare `cd` persists for every later Bash call in the session, so subsequent commands run from a directory they did not choose. The subshell confines the change to the step that needs it. For git specifically, prefer `git -C <path>` — see **Git Command Convention** below.
 
 **Copy axiom-graph DB into worktree:**
 ```
@@ -146,11 +147,27 @@ axiom_graph_checkout(
 `{worktree_path}` = absolute path to `.claude/worktrees/{cycle-id}`.
 
 **Entry baseline check (left bracket):**
-Before provisioning the worktree, the orchestrator ran `axiom_graph_check(project_root="{main_repo_path}")` and noted main's counts. After provisioning + `axiom_graph_checkout`, run the same check in the worktree:
+After provisioning + `axiom_graph_checkout`, run the check in the worktree:
 ```
 axiom_graph_check(project_root="{worktree_path}")
 ```
-The worktree was just created from main HEAD, so its code is identical — any *extra* `CONTENT_UPDATED`/`NOT_FOUND` beyond main's baseline is an **environment** divergence (a missing scanner extra), not a cycle change. Resolve it (install the missing dependency, re-run) before dispatching the Builder. Fewer `LINKED_STALE` than main is expected (link fan-out materializes fully only on main). Record the entry baseline in the manifest `status` section — it is the left bracket the Phase 6 pre-merge check closes.
+**This worktree result is the left bracket.** Record it in the manifest `status` section; Phase 6's pre-merge check subtracts it. Take it once, after provisioning and before any Builder work, so both brackets share one mtime regime and the delta between them is the cycle's.
+
+Main's counts, captured before provisioning, are context for classifying the worktree's baseline rather than a target it must match. Staleness is a function of mtime as well as content, and a checkout resets every mtime: main's files carry old mtimes and take the content-gated mtime fast-pass, verified without being re-parsed, while every file in the worktree is freshly stamped and falls through to the per-node ladder. A worktree therefore reads dirtier than main by whatever staleness main is masking — an amount unrelated to the cycle.
+
+Sort any worktree-vs-main gap into one of three outcomes:
+
+| Class | What it is | Action |
+|---|---|---|
+| **Env divergence** | A missing scanner dependency flips whole node classes — e.g. every module node for a language whose parser extra is absent. | **Block.** Install the dependency, `axiom_graph_build`, re-run. |
+| **Pre-existing debt** | Latent staleness main is masking behind the fast-pass. Provisioning does not touch it, and it surfaces on main too once those files are touched. | **Record and subtract, then proceed.** Name the mechanism in the manifest. |
+| **Structural** | Paths untracked in main that a worktree cannot materialize. | **Note and proceed.** |
+
+Fewer `LINKED_STALE` than main is expected and is not a divergence (link fan-out materializes fully only on main).
+
+**Telling env divergence from pre-existing debt.** Env divergence responds to provisioning: install the dependency, rebuild, and the class disappears. Pre-existing debt does not. Confirm debt by naming the mechanism — which scanner or dispatch path cannot re-derive those nodes — and record that mechanism alongside the count.
+
+**Diagnose by reading the hashing path, not by re-measuring.** `CONTENT_UPDATED` is sticky: `mark_clean` and `reverify` retire it, its cause going away does not. Once nodes have flipped, later `axiom_graph_check` calls return the same count regardless of what changed in between, so two different tree states read identically. Settle the cause by reading the scanner's hashing path and recomputing a hash by hand. Keep diagnostics read-only — commands that rewrite the working tree (`checkout-index`, re-checkouts, bulk file rewrites) replace the evidence being measured.
 
 **Env-gap recovery (test parity):** if the Builder or Reviewer later reports a test that *couldn't run* because a dependency main declares is missing (vs. a test that *failed*), install that dependency to restore parity, rebuild the worktree index (`axiom_graph_build`), and continue (re-dispatch the Reviewer if it was its Pass 0). Do NOT install a dependency main doesn't declare — a brand-new library a test needs is the Builder's to add to `pyproject`/lockfile and is reviewed like any other change.
 

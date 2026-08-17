@@ -86,11 +86,14 @@ def _scan_file(
     nodes: list[AxiomNode],
     edges: list[AxiomEdge],
 ) -> None:
+    # Sample the mtime BEFORE reading the bytes — see scan_module for the
+    # rationale (stamping an mtime newer than the bytes we indexed makes the
+    # next build skip the file permanently).
+    file_mtime = md_file.stat().st_mtime
     text = md_file.read_text(encoding="utf-8", errors="replace")
     rel_path = md_file.relative_to(project_root).as_posix()
     stem = md_file.stem  # e.g. "architecture"
     file_hash = hash16(text)
-    file_mtime = md_file.stat().st_mtime
 
     # Tokenise
     tokens = _md.parse(text)

@@ -232,7 +232,7 @@ LINKED_STALE is sticky — Pass 1 actions do NOT auto-clear any Pass 2 entries. 
 
 Perform the planned actions one at a time:
   - mark_clean    → axiom_graph_mark_clean (per-node verification)
-  - reverify      → axiom_graph_reverify (root-offender verification; cascade-clears the LINKED_STALE rooted at the source per your approved plan entry; it skips and reports entries also stale via other offenders — those still need their own planned action)
+  - reverify      → axiom_graph_reverify (root-offender verification; cascade-clears the LINKED_STALE rooted at the source per your approved plan entry; it skips and reports entries still outstanding via other offenders — those need their own planned action, but reverifies compose, so a plan that reverifies every offender behind an entry clears it on the last one)
   - update_section → axiom_graph_update_section (use the proposed-content from your plan entry)
   - update_doc_meta → axiom_graph_update_doc_meta
   - delete_link   → axiom_graph_delete_link

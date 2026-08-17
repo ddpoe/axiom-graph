@@ -158,9 +158,11 @@ def _migrate_v1_legacy_to_envelope(conn: sqlite3.Connection) -> None:
                 if tombstoned:
                     logger.info("migration v1: skipping tombstoned orphan section %s", sec_id)
                     continue
-                location = doc_paths.get(doc_id) or (
-                    "docs/" + doc_id.split("::", 1)[-1].removeprefix("docs.").replace(".", "/") + ".json"
-                )
+                # The ``docs`` row is the only trustworthy source of a doc's
+                # file path.  Reconstructing one from the id is not possible:
+                # the id's dots stand for both directory separators and dots
+                # in filenames, so the mapping back to a path is ambiguous.
+                location = doc_paths.get(doc_id) or ""
                 conn.execute(
                     """
                     INSERT INTO nodes

@@ -22,6 +22,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Provenance recorded on every verification history row: which operation
+# wrote it.  Rides the existing ``node_history.meta`` JSON payload (no new
+# column, no migration).  ``db/history.py`` reads the same key/value pair
+# with inline SQL literals -- keep the two in step.
+VERIFICATION_OP_META_KEY = "verification_op"
+VERIFICATION_OP_MARK_CLEAN = "mark_clean"
+VERIFICATION_OP_REVERIFY = "reverify"
+
 
 def compute_current_hashes(
     node: "AxiomNode",
@@ -57,7 +65,7 @@ def compute_current_hashes(
 
 @task(
     purpose="Record verification history, compute current hashes, write verification snapshot, and reset baselines",
-    inputs="db_path, project_root, AxiomNode, reason string, verified_by identifier",
+    inputs="db_path, project_root, AxiomNode, reason string, verified_by identifier, verification_op provenance marker",
     outputs="None — side effects: history row, verification snapshot, and baseline reset written to DB",
 )
 def mark_node_clean(
@@ -66,6 +74,8 @@ def mark_node_clean(
     node: "AxiomNode",
     reason: str,
     verified_by: str,
+    *,
+    verification_op: str = VERIFICATION_OP_MARK_CLEAN,
 ) -> None:
     """Record verification and reset baseline hashes for one node.
 
@@ -86,9 +96,16 @@ def mark_node_clean(
         node: The AxiomNode to mark clean.
         reason: Brief explanation for the verification.
         verified_by: Identifier (e.g. ``'human'``, ``'agent:model'``).
+        verification_op: Which operation wrote this verification --
+            :data:`VERIFICATION_OP_MARK_CLEAN` (the default) or
+            :data:`VERIFICATION_OP_REVERIFY`.  Recorded in the history
+            row's ``meta`` payload under
+            :data:`VERIFICATION_OP_META_KEY`.  The payload is written
+            whether or not a *reason* was supplied, so a blank-reason
+            verification still carries its provenance.
     """
     change_type = "AGENT_VERIFIED" if verified_by.startswith("agent") else "MANUAL_VERIFIED"
-    meta = json.dumps({"reason": reason}) if reason else None
+    meta = json.dumps({"reason": reason, VERIFICATION_OP_META_KEY: verification_op})
     db.insert_history_row(
         db_path,
         node_id=node.id,

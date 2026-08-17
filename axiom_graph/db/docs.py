@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 
 from axiom_annotations import Step, task
@@ -190,6 +191,209 @@ def delete_doc_by_id(
 # ---------------------------------------------------------------------------
 
 
+def _doc_section_suffixes(conn: sqlite3.Connection, old_id: str) -> list[str]:
+    """Return every section suffix currently attached to *old_id*.
+
+    A section's identity can survive in more tables than one: an unverified
+    section has ``nodes`` and ``edges`` rows, a purged-then-re-added one may
+    have only history, and a verified one carries a ``node_verification``
+    row.  A rename that enumerates from a single table silently strands the
+    rest, so the union of all four is taken.
+
+    Args:
+        conn: Open SQLite connection.
+        old_id: The document envelope ID being renamed from.
+
+    Returns:
+        Section suffixes (the part after ``{old_id}::``), sorted.
+    """
+    prefix = old_id + "::"
+    like = prefix + "%"
+    suffixes: set[str] = set()
+    queries = (
+        ("SELECT id AS nid FROM nodes WHERE id LIKE ?", (like,)),
+        ("SELECT DISTINCT node_id AS nid FROM node_history WHERE node_id LIKE ?", (like,)),
+        ("SELECT node_id AS nid FROM node_verification WHERE node_id LIKE ?", (like,)),
+        ("SELECT DISTINCT from_id AS nid FROM edges WHERE from_id LIKE ?", (like,)),
+        ("SELECT DISTINCT to_id AS nid FROM edges WHERE to_id LIKE ?", (like,)),
+    )
+    for sql, params in queries:
+        for row in conn.execute(sql, params).fetchall():
+            nid = row["nid"]
+            if isinstance(nid, str) and nid.startswith(prefix):
+                suffixes.add(nid[len(prefix) :])
+    return sorted(suffixes)
+
+
+@task(
+    purpose="Migrate a doc's ledger, history, verification, and edges from an old id to a new one, covering sections as well as the envelope",
+    inputs="open connection, old_id, new_id, file_path",
+    outputs="None (side effect: rename ledger written, history/verification/edges moved)",
+)
+def record_doc_rename_conn(
+    conn: sqlite3.Connection,
+    old_id: str,
+    new_id: str,
+    file_path: str,
+) -> None:
+    """Migrate one document's identity on an already-open connection.
+
+    Takes a connection so a bulk rename can run as one transaction: a
+    failure partway through then rolls the whole batch back instead of
+    leaving a half-migrated index.
+
+    Section verification is migrated alongside the envelope's.  Sections are
+    the overwhelming majority of a document's verified nodes, and
+    ``node_verification.node_id`` is a foreign key onto ``nodes(id)`` with
+    ``PRAGMA foreign_keys=ON`` -- so the new ``nodes`` rows must already
+    exist (see :func:`rekey_doc_identity`) or the update is silently
+    dropped by ``OR IGNORE``.
+
+    Args:
+        conn: Open SQLite connection (caller owns the transaction).
+        old_id: The old doc node ID being renamed from.
+        new_id: The new doc node ID being renamed to.
+        file_path: File path recorded in the ``node_renames`` ledger.
+    """
+    now = _now_utc()
+    口 = Step(
+        step_num=1,
+        name="Record the envelope rename and migrate its rows",
+        purpose="Write the ledger entry, then move the envelope's history, verification, and edges",
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO node_renames (old_id, new_id, renamed_at, file_path) VALUES (?, ?, ?, ?)",
+        (old_id, new_id, now, file_path),
+    )
+    conn.execute("UPDATE node_history SET node_id = ? WHERE node_id = ?", (new_id, old_id))
+    conn.execute(
+        "UPDATE OR IGNORE node_verification SET node_id = ? WHERE node_id = ?",
+        (new_id, old_id),
+    )
+    _migrate_edges(conn, old_id, new_id)
+
+    口 = Step(
+        step_num=2,
+        name="Migrate every section identity",
+        purpose="Move each section's ledger entry, history, verification, and edges to the new envelope",
+    )
+    for suffix in _doc_section_suffixes(conn, old_id):
+        old_sec_id = old_id + "::" + suffix
+        new_sec_id = new_id + "::" + suffix
+        口 = Step(
+            step_num=2.1,
+            name="Migrate one section",
+            purpose="Move a single section's ledger entry, history, verification, and edges",
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO node_renames (old_id, new_id, renamed_at, file_path) VALUES (?, ?, ?, ?)",
+            (old_sec_id, new_sec_id, now, file_path),
+        )
+        conn.execute("UPDATE node_history SET node_id = ? WHERE node_id = ?", (new_sec_id, old_sec_id))
+        conn.execute(
+            "UPDATE OR IGNORE node_verification SET node_id = ? WHERE node_id = ?",
+            (new_sec_id, old_sec_id),
+        )
+        _migrate_edges(conn, old_sec_id, new_sec_id)
+
+
+@dataclass(frozen=True)
+class RekeyCounts:
+    """Node rows materialised under a new document identity.
+
+    The two are counted apart rather than summed because a document's
+    envelope row and its section rows can go missing independently: an
+    index holding section rows but no envelope row would make
+    ``sections = total - 1`` undercount by one.
+
+    Attributes:
+        envelope: Whether the document envelope's ``nodes`` row was cloned.
+        sections: Number of section ``nodes`` rows cloned.
+    """
+
+    envelope: bool = False
+    sections: int = 0
+
+
+@task(
+    purpose="Materialise a document's node, doc, tag, and FTS rows under a new id so the new identity exists before dependent rows move onto it",
+    inputs="open connection, old_id, new_id, optional new file_path",
+    outputs="RekeyCounts — whether the envelope row was cloned, and how many section rows were",
+)
+def rekey_doc_identity(
+    conn: sqlite3.Connection,
+    old_id: str,
+    new_id: str,
+    new_file_path: str | None = None,
+) -> RekeyCounts:
+    """Clone a document's identity rows onto *new_id*, leaving the old ones.
+
+    ``node_verification.node_id`` is a foreign key onto ``nodes(id)``, so a
+    rename cannot move verification onto an identity that does not exist
+    yet.  Materialising the new rows first is what makes verification --
+    and every other dependent row -- survive the move.  The old rows are
+    left in place for the caller to retire.
+
+    Args:
+        conn: Open SQLite connection (caller owns the transaction).
+        old_id: The document envelope ID being renamed from.
+        new_id: The document envelope ID being renamed to.
+        new_file_path: File path for the new ``docs`` row.  Defaults to the
+            old row's path -- a doc-ID migration moves the identity, not the
+            file.
+
+    Returns:
+        A :class:`RekeyCounts` describing what was actually cloned.
+    """
+    pairs = [(old_id, new_id, False)]
+    pairs.extend((old_id + "::" + s, new_id + "::" + s, True) for s in _doc_section_suffixes(conn, old_id))
+
+    envelope_cloned = False
+    sections_cloned = 0
+    for old_node_id, new_node_id, is_section in pairs:
+        row = conn.execute("SELECT * FROM nodes WHERE id = ?", (old_node_id,)).fetchone()
+        if row is None:
+            continue
+        columns = list(row.keys())
+        values = [new_node_id if col == "id" else row[col] for col in columns]
+        placeholders = ",".join("?" * len(columns))
+        conn.execute(
+            f"INSERT OR REPLACE INTO nodes ({','.join(columns)}) VALUES ({placeholders})",
+            values,
+        )
+        if is_section:
+            sections_cloned += 1
+        else:
+            envelope_cloned = True
+        conn.execute(
+            "INSERT OR IGNORE INTO tags (node_id, tag) SELECT ?, tag FROM tags WHERE node_id = ?",
+            (new_node_id, old_node_id),
+        )
+        conn.execute("DELETE FROM node_fts WHERE id = ?", (new_node_id,))
+        conn.execute(
+            "INSERT INTO node_fts (id, level_1, level_2) SELECT ?, level_1, level_2 FROM node_fts WHERE id = ?",
+            (new_node_id, old_node_id),
+        )
+
+    doc_row = conn.execute("SELECT * FROM docs WHERE id = ?", (old_id,)).fetchone()
+    if doc_row is not None:
+        columns = list(doc_row.keys())
+        values = []
+        for col in columns:
+            if col == "id":
+                values.append(new_id)
+            elif col == "file_path" and new_file_path is not None:
+                values.append(new_file_path)
+            else:
+                values.append(doc_row[col])
+        placeholders = ",".join("?" * len(columns))
+        conn.execute(
+            f"INSERT OR REPLACE INTO docs ({','.join(columns)}) VALUES ({placeholders})",
+            values,
+        )
+    return RekeyCounts(envelope=envelope_cloned, sections=sections_cloned)
+
+
 def record_doc_rename(
     db_path: Path,
     old_id: str,
@@ -207,61 +411,11 @@ def record_doc_rename(
         new_id: The new doc node ID being renamed to.
         file_path: File path for the node_renames record.
         project_root: If provided, DocJSON files on disk will be patched
-            to update link references from old_id to new_id.
+            to update link references from old_id to new_id, including
+            references to its sections.
     """
-    now = _now_utc()
     with _connect(db_path) as conn:
-        # Record the rename
-        conn.execute(
-            "INSERT OR IGNORE INTO node_renames (old_id, new_id, renamed_at, file_path) VALUES (?, ?, ?, ?)",
-            (old_id, new_id, now, file_path),
-        )
-        # Migrate history rows: old parent + old sections -> new equivalents
-        # Parent node: old_id -> new_id
-        conn.execute(
-            "UPDATE node_history SET node_id = ? WHERE node_id = ?",
-            (new_id, old_id),
-        )
-        # Section nodes: old_id::sec -> new_id::sec
-        old_prefix = old_id + "::"
-        rows = conn.execute(
-            "SELECT DISTINCT node_id FROM node_history WHERE node_id LIKE ?",
-            (old_prefix + "%",),
-        ).fetchall()
-        for r in rows:
-            old_sec_id = r["node_id"]
-            suffix = old_sec_id[len(old_prefix) :]
-            new_sec_id = new_id + "::" + suffix
-            conn.execute(
-                "UPDATE node_history SET node_id = ? WHERE node_id = ?",
-                (new_sec_id, old_sec_id),
-            )
-            conn.execute(
-                "INSERT OR IGNORE INTO node_renames (old_id, new_id, renamed_at, file_path) VALUES (?, ?, ?, ?)",
-                (old_sec_id, new_sec_id, now, file_path),
-            )
-
-        # Migrate verification (if any)
-        conn.execute(
-            "UPDATE OR IGNORE node_verification SET node_id = ? WHERE node_id = ?",
-            (new_id, old_id),
-        )
-
-        # Migrate edges: parent node
-        _migrate_edges(conn, old_id, new_id)
-        # Migrate edges: section nodes (old_id::sec -> new_id::sec)
-        sec_edges = conn.execute(
-            "SELECT DISTINCT from_id, to_id FROM edges WHERE from_id LIKE ? OR to_id LIKE ?",
-            (old_prefix + "%", old_prefix + "%"),
-        ).fetchall()
-        migrated_sec_ids: set[str] = set()
-        for row in sec_edges:
-            for col_id in (row["from_id"], row["to_id"]):
-                if col_id.startswith(old_prefix) and col_id not in migrated_sec_ids:
-                    suffix = col_id[len(old_prefix) :]
-                    new_sec_id = new_id + "::" + suffix
-                    _migrate_edges(conn, col_id, new_sec_id)
-                    migrated_sec_ids.add(col_id)
+        record_doc_rename_conn(conn, old_id, new_id, file_path)
 
     # Patch DocJSON files on disk if project_root is provided
     if project_root is not None:
@@ -932,23 +1086,30 @@ def index_doc_sections_fts(db_path: Path) -> int:
     resurrection branch that re-inserted nodes from orphaned
     ``doc_sections`` rows is retired with that table).
 
+    The refresh is deliberately issued as one bulk ``DELETE`` plus one
+    ``executemany`` rather than a statement pair per section.  ``node_fts`` is
+    an FTS5 virtual table, and FTS5 cannot carry a secondary index on a
+    column, so ``DELETE FROM node_fts WHERE id = ?`` has no index to use and
+    degrades to a full scan of the FTS table.  Issuing one such delete per
+    section makes the pass quadratic in the number of sections and turns it
+    into the dominant cost of a build; the bulk form scans once.
+
     Args:
         db_path: Path to the axiom-graph DB file.
 
     Returns:
         Number of doc sections indexed.
     """
-    count = 0
     with _connect(db_path) as conn:
         sections = conn.execute(f"SELECT id, level_1, level_2 FROM nodes WHERE {_SECTION_FILTER_SQL}").fetchall()
-        for sec in sections:
-            conn.execute("DELETE FROM node_fts WHERE id = ?", (sec["id"],))
-            conn.execute(
-                "INSERT INTO node_fts (id, level_1, level_2) VALUES (?, ?, ?)",
-                (sec["id"], sec["level_1"] or "", sec["level_2"] or ""),
-            )
-            count += 1
-    return count
+        # Subquery rather than an ``IN (?, ?, ...)`` parameter list so the
+        # statement stays within SQLITE_MAX_VARIABLE_NUMBER at any doc count.
+        conn.execute(f"DELETE FROM node_fts WHERE id IN (SELECT id FROM nodes WHERE {_SECTION_FILTER_SQL})")
+        conn.executemany(
+            "INSERT INTO node_fts (id, level_1, level_2) VALUES (?, ?, ?)",
+            [(sec["id"], sec["level_1"] or "", sec["level_2"] or "") for sec in sections],
+        )
+    return len(sections)
 
 
 __all__ = [
@@ -958,6 +1119,9 @@ __all__ = [
     "delete_doc_by_id",
     # Renames
     "record_doc_rename",
+    "record_doc_rename_conn",
+    "rekey_doc_identity",
+    "RekeyCounts",
     "record_code_rename",
     # Upserts + reads
     "upsert_doc",

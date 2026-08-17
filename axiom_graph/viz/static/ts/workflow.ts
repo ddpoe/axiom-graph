@@ -420,7 +420,7 @@ async function selectWorkflow(wf: any): Promise<void> {
   if (!stepsCol) return;
   stepsCol.innerHTML = '<div class="wf-status">Loading steps\u2026</div>';
   try {
-    const data = await apiFetch(`/api/workflow/${wf.id}/steps`);
+    const data = await apiFetch(`/api/workflow/${wf.id}/steps?expand=true`);
     renderDetail(stepsCol, data, wf);
     if (data.func.module) openSource(data.func.module, data.func.line_start || 1);
   } catch (err: any) {
@@ -452,11 +452,16 @@ function renderDetail(stepsCol: HTMLElement, data: any, wf: any): void {
   } else {
     html += '<ol class="wf-steps">';
     for (const step of steps) {
-      const isMinor = step.step_number.toString().includes('.');
-      html += `<li class="wf-step${isMinor ? ' wf-step-minor' : ''}" data-line="${step.line || ''}">`;
+      // Expanded payloads carry an explicit depth; fall back to the flat
+      // major/minor split when the response predates it.
+      const depth = typeof step.depth === 'number'
+        ? step.depth
+        : (step.step_number.toString().includes('.') ? 1 : 0);
+      html += `<li class="wf-step${depth > 0 ? ' wf-step-minor' : ''}" style="--wf-depth:${depth}" data-line="${step.line || ''}" data-path="${esc(step.location || '')}">`;
       html += `<div class="wf-step-num">${esc(step.step_number)}</div><div class="wf-step-body">`;
       html += `<div class="wf-step-name">${esc(step.name)}${step.is_auto ? '<span class="wf-badge wf-badge-auto">auto</span>' : ''}</div>`;
       if (step.purpose) html += `<div class="wf-step-purpose">${esc(step.purpose)}</div>`;
+      if (step.note) html += `<div class="wf-step-note">${esc(step.note)}</div>`;
       const stepMeta: string[] = [];
       if (step.inputs) stepMeta.push(`in: ${esc(step.inputs)}`);
       if (step.outputs) stepMeta.push(`out: ${esc(step.outputs)}`);
@@ -479,10 +484,16 @@ function renderDetail(stepsCol: HTMLElement, data: any, wf: any): void {
 
   // Wire events
   stepsCol.querySelectorAll('.wf-step[data-line]').forEach(li => {
-    const line = parseInt((li as HTMLElement).dataset.line || '', 10);
+    const el = li as HTMLElement;
+    const line = parseInt(el.dataset.line || '', 10);
     if (!line) return;
+    // The step marker's own file, which under expansion is often not the
+    // envelope's module: an AutoStep's delegate target declares its steps in
+    // whatever file it lives in. Falling back to the envelope keeps payloads
+    // that predate the `location` field working.
+    const path = el.dataset.path || _workflowModule;
     li.addEventListener('click', () => {
-      if (_workflowModule && _currentSourcePath !== _workflowModule) openSource(_workflowModule, line);
+      if (path && _currentSourcePath !== path) openSource(path, line);
       else jumpToLine(line);
     });
   });

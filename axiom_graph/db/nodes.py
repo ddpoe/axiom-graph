@@ -452,6 +452,89 @@ def get_undocumented_nodes(
 
 
 # ---------------------------------------------------------------------------
+# Workflow step rows
+# ---------------------------------------------------------------------------
+
+# Every marker kind that is stored as a workflow step row.  Keyed on
+# ``subtype`` alone, never on ``source``, so a step emitted by a future
+# JS/TS or state-machine scanner is read by the same queries as one the
+# Python AST scanner emitted.
+STEP_NODE_SUBTYPES: tuple[str, ...] = ("step", "autostep")
+
+# SQLite's default host-parameter ceiling is 999; stay well inside it.
+_LOCATION_CHUNK = 400
+
+
+def get_step_node_ids_by_location_conn(
+    conn: sqlite3.Connection,
+    locations: set[str] | frozenset[str],
+) -> dict[str, set[str]]:
+    """Return the stored step/autostep node IDs at each of *locations*.
+
+    A step row's ``location`` is the file that *declares* its marker —
+    cross-module delegation never moves it — so this is the read that lets a
+    build diff the step rows it has recorded for a file against the ones that
+    file justifies today.
+
+    Args:
+        conn: Open SQLite connection (caller manages the transaction).
+        locations: Repo-relative file paths to read.  Read in chunks, so an
+            arbitrarily large set is safe.
+
+    Returns:
+        Mapping of file location to the set of step/autostep node IDs stored
+        there.  Locations holding no step rows are absent from the mapping,
+        never present with an empty set.
+    """
+    result: dict[str, set[str]] = {}
+    ordered = list(locations)
+    subtype_ph = ",".join("?" * len(STEP_NODE_SUBTYPES))
+    for start in range(0, len(ordered), _LOCATION_CHUNK):
+        chunk = ordered[start : start + _LOCATION_CHUNK]
+        loc_ph = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            f"SELECT id, location FROM nodes "  # noqa: S608 - placeholders only
+            f"WHERE subtype IN ({subtype_ph}) AND location IN ({loc_ph})",
+            (*STEP_NODE_SUBTYPES, *chunk),
+        ).fetchall()
+        for row in rows:
+            result.setdefault(row["location"], set()).add(row["id"])
+    return result
+
+
+def count_parentless_step_nodes_by_location_conn(conn: sqlite3.Connection) -> dict[str, int]:
+    """Return, per file, how many step rows have no enclosing workflow left.
+
+    A step row whose declaring function was deleted or moved loses its parent
+    envelope, and the ``composes`` edge cascades away with it — leaving a row
+    no envelope can enumerate.  Counting those is a single query needing no
+    scan, which is what makes it usable as a build-time signal.
+
+    It is a proxy, not a census: a step row whose envelope is still alive (a
+    workflow whose markers were renumbered, say) has a ``composes`` parent and
+    is invisible here.
+
+    Args:
+        conn: Open SQLite connection (caller manages the transaction).
+
+    Returns:
+        Mapping of file location to the number of parentless step/autostep
+        rows stored there.  Files with none are absent from the mapping.
+    """
+    subtype_ph = ",".join("?" * len(STEP_NODE_SUBTYPES))
+    rows = conn.execute(
+        f"SELECT n.location AS location, COUNT(*) AS n FROM nodes n "  # noqa: S608 - placeholders only
+        f"WHERE n.subtype IN ({subtype_ph}) "
+        "AND NOT EXISTS ("
+        "    SELECT 1 FROM edges e WHERE e.to_id = n.id AND e.edge_type = 'composes'"
+        ") "
+        "GROUP BY n.location",
+        STEP_NODE_SUBTYPES,
+    ).fetchall()
+    return {row["location"]: row["n"] for row in rows}
+
+
+# ---------------------------------------------------------------------------
 # Deletes
 # ---------------------------------------------------------------------------
 
@@ -710,6 +793,10 @@ __all__ = [
     "query_children",
     "all_nodes",
     "get_undocumented_nodes",
+    # Workflow step rows
+    "STEP_NODE_SUBTYPES",
+    "get_step_node_ids_by_location_conn",
+    "count_parentless_step_nodes_by_location_conn",
     # Deletes
     "delete_nodes_by_location",
     "delete_node_by_id",

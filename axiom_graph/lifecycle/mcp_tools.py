@@ -722,6 +722,9 @@ def axiom_graph_mark_clean(
     when you have read the current code and documentation and confirmed
     they are consistent.
 
+    It records a verification for the node it names: LINKED_STALE on that node
+    clears when the verification is newer than the linked code's last change.
+
     Args:
         project_root: Absolute path to the indexed project.
         node_id: Single node to mark clean (used when node_ids is omitted).
@@ -845,6 +848,7 @@ def axiom_graph_reverify(
         parts.append(
             f"\nSkipped — also stale via other offenders ({len(result.skipped)}):\n"
             + "\n".join(f"- {nid} (other offenders: {', '.join(offs)})" for nid, offs in sorted(result.skipped.items()))
+            + f"\n{_api.REVERIFY_SKIP_HINT}"
         )
     parts.append(f"Reason: {reason}")
     return "\n".join(parts)

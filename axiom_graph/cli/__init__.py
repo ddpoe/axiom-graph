@@ -73,6 +73,17 @@ from axiom_graph.cli import indexing as _indexing  # noqa: E402, F401
 from axiom_graph.cli import rendering as _rendering  # noqa: E402, F401
 from axiom_graph.cli import inspection as _inspection  # noqa: E402, F401
 
+# ``cli.migration`` follows the ADR-019 import rules from day one (it never
+# imports ``axiom_graph.cli``), so its group is attached here rather than by
+# a ``@main.group`` decorator inside the module.
+from axiom_graph.cli.migration import (  # noqa: E402
+    doc_ids_group,
+    cmd_doc_ids_preview,
+    cmd_doc_ids_execute,
+)
+
+main.add_command(doc_ids_group)
+
 # Re-export individual command callables so tests and direct importers can
 # reach them as ``from axiom_graph.cli import cmd_build``.
 from axiom_graph.cli.indexing import (  # noqa: E402, F401
@@ -113,6 +124,9 @@ __all__ = [
     "rename_group",
     "cmd_rename_apply",
     "cmd_rename_revert",
+    "doc_ids_group",
+    "cmd_doc_ids_preview",
+    "cmd_doc_ids_execute",
     "cmd_render",
     "cmd_viz",
     "cmd_export",

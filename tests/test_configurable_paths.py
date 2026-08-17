@@ -490,6 +490,43 @@ def test_doc_listing_shows_which_docs_root_each_doc_lives_in(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Tier 2 -- /api/docs rows carry each doc's path, not just its id
+# ---------------------------------------------------------------------------
+
+
+@_skip_no_fastapi
+@workflow(
+    purpose="Verify GET /api/docs reports file_path for docs in every configured root, since doc ids alone cannot name the root",
+)
+def test_api_docs_listing_carries_file_path_for_every_root(tmp_path):
+    """Every listed doc names its file, so its docs root stays recoverable.
+
+    Doc ids flatten all configured roots into one ``docs.`` namespace, so
+    ``file_path`` is the only field separating a doc in a secondary root from
+    one sitting at the top of the primary root.
+    """
+    from axiom_graph.index import builder
+
+    project = _multi_root_project(tmp_path)
+    _write_docjson(project / "docs" / "primary.json", "Primary")
+    _write_docjson(project / "specs" / "secondary.json", "Secondary")
+    builder.build(project)
+
+    client = _setup_viz_server_against(project)
+    resp = client.get("/api/docs")
+    assert resp.status_code == 200
+
+    by_id = {d["id"]: d for d in resp.json()["docs"]}
+    primary = by_id.get("proj::docs.primary")
+    secondary = by_id.get("proj::docs.secondary")
+    assert primary is not None, f"primary-root doc missing from listing: {sorted(by_id)}"
+    assert secondary is not None, f"secondary-root doc missing from listing: {sorted(by_id)}"
+
+    assert primary["file_path"] == "docs/primary.json", f"got {primary['file_path']!r}"
+    assert secondary["file_path"] == "specs/secondary.json", f"got {secondary['file_path']!r}"
+
+
+# ---------------------------------------------------------------------------
 # Tier 1/2 -- write_doc targets a chosen docs root
 # ---------------------------------------------------------------------------
 

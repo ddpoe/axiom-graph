@@ -784,7 +784,9 @@ def axiom_graph_mark_clean(
 
     Records an AGENT_VERIFIED history row per node; on the next check, any node
     whose content still matches is promoted from CONTENT_UPDATED, DESC_UPDATED,
-    or RENAMED back to VERIFIED.  Does not clear LINKED_STALE by fiat.
+    or RENAMED back to VERIFIED.  It records a verification for the node it
+    names: LINKED_STALE on that node clears when the verification is newer than
+    the linked code's last change.
 
     Args:
         project_root: Absolute path to the indexed project.

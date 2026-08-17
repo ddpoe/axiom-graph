@@ -46,7 +46,10 @@ _STALENESS_CAUSE_MESSAGES: dict[str, str] = {
     RENAMED: "This node's identity moved — a scoped-similarity rename was applied, migrating history and edges from the old ID.",
     NOT_FOUND: "The source file or function no longer exists at the indexed location.",
     LINKED_STALE: "A linked code node changed after this documentation or test was last written.",
-    BROKEN_LINK: "This node has a documents or validates edge pointing to a node that no longer exists in the index.",
+    BROKEN_LINK: (
+        "A documents, validates, or delegates_to edge in this node's scope points at a node that is not in the index. "
+        "A delegate finding is attributed to the composing workflow or task, which may not be the node holding the edge."
+    ),
 }
 
 

@@ -43,13 +43,20 @@ from axiom_graph.index.status import (
 
 
 def get_file_mtime(db_path: Path, location: str) -> float | None:
-    """Return stored file_mtime from the module/doc node for this location, or None."""
+    """Return the stored file_mtime for this location, or None.
+
+    A location can carry a stored mtime on more than one row — a Markdown
+    file stamps its file node and every section node.  ``MAX`` is what makes
+    this point lookup agree with :func:`get_all_file_mtimes` for those
+    locations; an arbitrary row would let the two readers disagree about the
+    same file.
+    """
     with _connect(db_path) as conn:
         row = conn.execute(
-            "SELECT file_mtime FROM nodes WHERE location = ? AND file_mtime IS NOT NULL LIMIT 1",
+            "SELECT MAX(file_mtime) AS mtime FROM nodes WHERE location = ? AND file_mtime IS NOT NULL",
             (location,),
         ).fetchone()
-        return row["file_mtime"] if row else None
+        return row["mtime"] if row else None
 
 
 def get_all_file_mtimes(db_path: Path) -> dict[str, float]:

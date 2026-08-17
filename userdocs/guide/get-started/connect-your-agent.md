@@ -1,4 +1,4 @@
-<!-- generated from axiom_graph::docs.consumer.get-started.connect-your-agent @ b52b22b12f6e; do not edit -->
+<!-- generated from axiom_graph::docs.consumer.get-started.connect-your-agent @ 07ca95e4c1c9; do not edit -->
 
 # Connect Your Agent
 
@@ -151,7 +151,7 @@ The server exposes its tools grouped by concern. Every tool takes `project_root`
 | `axiom_graph_report` | Impact report since a checkpoint, SHA, or timestamp |
 | `axiom_graph_history` / `axiom_graph_list_reference_points` | Change timeline; available baselines |
 | `axiom_graph_mark_clean` | Record agent verification (clears promotable own_status); reports inherited/mixed LINKED_STALE honestly on composite targets rather than a silent no-op |
-| `axiom_graph_reverify` | Verify a node and clear the LINKED_STALE it caused in one operation (composite-aware, skips dependents stale via other offenders) |
+| `axiom_graph_reverify` | Verify a node and clear the LINKED_STALE it caused in one operation (composite-aware; skips dependents still outstanding via other offenders, and reverifies compose — the last offender's reverify clears them) |
 | `axiom_graph_apply_rename` / `axiom_graph_revert_rename` | Manually weld / un-weld a missed rename |
 | `axiom_graph_checkout` | Isolated read-only DB snapshot |
 | `axiom_graph_purge_node` | Remove a node from the index |
@@ -180,7 +180,7 @@ axiom_graph_drift_query(project_root, filter="LINKED_STALE",
 
 **Isolate reads.** `axiom_graph_checkout` produces a read-only DB snapshot, useful for parallel analysis while a build runs elsewhere.
 
-**Clear it once fixed.** `axiom_graph_mark_clean` records that an agent re-verified a node, promoting drifted-but-now-correct `own_status` back to VERIFIED. `LINKED_STALE` is not mark-cleanable by fiat — the prose or test actually has to be updated.
+**Clear it once fixed.** `axiom_graph_mark_clean` records that an agent re-verified a node, promoting drifted-but-now-correct `own_status` back to VERIFIED. Marking that same node clean also clears its `LINKED_STALE` once the verification postdates the linked code's last change.
 
 This loop is also why these docs stay honest. Published consumer pages are DocJSON nodes linked through a dev-doc proxy to the code; because `consumer` is a transitive tag, a consumer page inherits `LINKED_STALE` when the code beneath it drifts. That inherited staleness is the signal to update the page; mark-clean / verification clears it; `render-site` republishes. This very site is built that way — axiom-graph dogfoods its own staleness engine. See [staleness](../concepts/staleness.md) and [the docs-honesty loop](../examples/docs-honesty-loop.md) for the full story, and [the mesh](../concepts/the-mesh.md) for how the typed edges underpin all of it.
 

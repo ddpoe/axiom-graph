@@ -15,7 +15,7 @@ import {
 } from './doc-api.js';
 import {
   isMermaidSection, extractMermaidSource, runMermaid as runMermaidDiagrams, getMermaidSources,
-  setMermaidSources, clearMermaidSources, getDiagramEditorIdx,
+  clearMermaidSources, getDiagramEditorIdx,
   openDiagramEditor, closeDiagramEditor, applyDiagramEditor,
   mountDiagramEditor, destroyDiagramEditor,
 } from './doc-diagrams.js';
@@ -237,7 +237,10 @@ function _buildNestedList(block: string, ordered: boolean): string {
 export function renderMarkdown(text: string): string {
   if (!text) return '<p class="doc-empty-content">No content</p>';
 
-  const sources: string[] = [];
+  // Mermaid sources accumulate across every renderMarkdown() call in a render
+  // pass -- one call per section -- so placeholder indices stay unique
+  // document-wide. renderDocContent() resets the accumulator per document.
+  const sources = getMermaidSources();
   let html = text;
 
   // Step 1: Extract fenced code blocks into placeholders.
@@ -339,7 +342,6 @@ export function renderMarkdown(text: string): string {
     html = `<p>${html}</p>`;
   }
 
-  setMermaidSources(sources);
   return html;
 }
 

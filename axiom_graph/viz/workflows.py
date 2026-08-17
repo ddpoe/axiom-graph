@@ -30,6 +30,7 @@ from axiom_graph.viz._core import (
     _parse_level3_lines,
     _sort_step_rows,
     _step_count_for_envelope,
+    _step_rows_by_ids,
     _steps_for_envelope,
 )
 
@@ -124,8 +125,68 @@ def _envelopes_as_items(subtype: str) -> list[dict]:
     return items
 
 
-def _step_row_to_dict(conn: sqlite3.Connection, step_row: sqlite3.Row) -> dict:
-    """Transform a step node row into a frontend-facing step dict."""
+def _delegate_target_purpose(conn: sqlite3.Connection, func_id: str) -> str | None:
+    """Purpose declared on the envelope that annotates *func_id*, if any.
+
+    An ``AutoStep`` marker carries no purpose of its own — the intent lives on
+    the ``@task`` / ``@workflow`` it delegates to.  Used by the expansion path
+    so AutoStep rows read as something more than a bare function name.
+    """
+    row = conn.execute(
+        """SELECT n.dflow_meta
+           FROM edges e
+           JOIN nodes n ON n.id = e.from_id
+           WHERE e.to_id = ?
+             AND e.edge_type = 'annotates'
+             AND n.node_type = 'composite_process'
+           LIMIT 1""",
+        (func_id,),
+    ).fetchone()
+    if row is None or not row["dflow_meta"]:
+        return None
+    try:
+        meta = json.loads(row["dflow_meta"])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return meta.get("purpose") or None
+
+
+def _step_row_to_dict(
+    conn: sqlite3.Connection,
+    step_row: sqlite3.Row,
+    *,
+    rendered_step_num: str | None = None,
+    depth: int | None = None,
+    note: str | None = None,
+) -> dict:
+    """Transform a step node row into a frontend-facing step dict.
+
+    Args:
+        conn: Open connection to the graph database.
+        step_row: Row for the step/autostep node.
+        rendered_step_num: Dotted step number from transitive expansion
+            (e.g. ``"2.3.1"``).  When ``None`` the authored ``step_num_raw``
+            is used, which is the single-envelope behaviour.
+        depth: Nesting depth for expanded rows — ``0`` for steps declared on
+            the requested envelope itself.  Passing any value (including
+            ``0``) marks this an expansion row: ``depth`` and ``note`` join
+            the payload, and an AutoStep with no purpose of its own inherits
+            one from its delegate target.  ``None`` leaves the payload
+            byte-identical to the unexpanded shape.
+        note: Expansion annotation (cycle detected / target not annotated).
+
+    Returns:
+        The frontend-facing step dict.  It carries two independent
+        file/line pairs, which are not interchangeable:
+
+        - ``location`` / ``line`` — where the step *marker itself* is
+          written.  Under transitive expansion this is frequently a
+          different module from the envelope that was requested, because
+          an AutoStep's delegate target declares its own steps.
+        - ``cortex_location`` / ``cortex_line_start`` — where the
+          delegate *target* is defined.  ``None`` for a step that
+          delegates to nothing.
+    """
     from axiom_graph.viz import server
 
     meta: dict = {}
@@ -153,11 +214,15 @@ def _step_row_to_dict(conn: sqlite3.Connection, step_row: sqlite3.Row) -> dict:
 
     line = _parse_envelope_line_start(step_row["level_3_location"])
 
+    purpose = meta.get("purpose")
+    if depth is not None and is_auto and not purpose and target_id:
+        purpose = _delegate_target_purpose(conn, target_id)
+
     step_num_raw = meta.get("step_num_raw") or ""
-    return {
-        "step_number": step_num_raw,
+    payload = {
+        "step_number": rendered_step_num if rendered_step_num is not None else step_num_raw,
         "name": meta.get("name"),
-        "purpose": meta.get("purpose"),
+        "purpose": purpose,
         "inputs": meta.get("inputs"),
         "outputs": meta.get("outputs"),
         "critical": meta.get("critical"),
@@ -166,8 +231,50 @@ def _step_row_to_dict(conn: sqlite3.Connection, step_row: sqlite3.Row) -> dict:
         "cortex_node_id": target_id,
         "cortex_location": cortex_location,
         "cortex_line_start": cortex_line_start,
+        "location": step_row["location"],
         "line": line,
     }
+    if depth is not None:
+        payload["depth"] = depth
+        payload["note"] = note
+    return payload
+
+
+def _expanded_step_dicts(conn: sqlite3.Connection, envelope_id: str) -> list[dict]:
+    """Frontend-facing step dicts for an envelope's transitive AutoStep tree.
+
+    Delegates the walk to :func:`workflow_expanded_steps`, then hydrates each
+    returned node ID into the same dict shape the single-envelope path emits,
+    plus ``depth`` and ``note``.  The expander's ordering is authoritative and
+    is deliberately not re-sorted — dotted numbers like ``"2.10"`` do not
+    survive the numeric sort the flat path uses.
+    """
+    from axiom_graph.viz import server
+    from axiom_graph.workflows.api import workflow_expanded_steps
+
+    if server._PROJECT_ROOT is None:
+        return []
+
+    expanded = workflow_expanded_steps(server._PROJECT_ROOT, envelope_id)
+    if not expanded:
+        return []
+
+    rows_by_id = _step_rows_by_ids(conn, [e.step_node_id for e in expanded])
+    out: list[dict] = []
+    for entry in expanded:
+        row = rows_by_id.get(entry.step_node_id)
+        if row is None:
+            continue
+        out.append(
+            _step_row_to_dict(
+                conn,
+                row,
+                rendered_step_num=entry.rendered_step_num,
+                depth=max(len(entry.context_chain) - 1, 0),
+                note=entry.note,
+            )
+        )
+    return out
 
 
 @workflows_router.get("/api/workflows")
@@ -490,8 +597,17 @@ def get_test_detail_by_cortex_id(cortex_id: str) -> dict:
     }
 
 
-def _envelope_steps_payload(envelope_id: str) -> dict:
-    """Build the ``{func, steps}`` payload for an envelope node id."""
+def _envelope_steps_payload(envelope_id: str, *, expand: bool = False) -> dict:
+    """Build the ``{func, steps}`` payload for an envelope node id.
+
+    Args:
+        envelope_id: Node ID of the envelope to describe.
+        expand: When ``True``, ``steps`` carries the transitive AutoStep tree
+            with dotted step numbers, a ``depth`` per row, and AutoStep
+            purposes resolved from their delegate targets.  When ``False``
+            (the default) only the envelope's own direct step children are
+            returned, in the shape callers have always received.
+    """
     from axiom_graph.viz import server
 
     if server._DB_PATH is None:
@@ -519,9 +635,12 @@ def _envelope_steps_payload(envelope_id: str) -> dict:
 
         target_id = _annotated_function_id(conn, env_row["id"])
 
-        step_rows = _steps_for_envelope(conn, env_row["id"])
-        step_rows = _sort_step_rows(list(step_rows))
-        steps = [_step_row_to_dict(conn, sr) for sr in step_rows]
+        if expand:
+            steps = _expanded_step_dicts(conn, env_row["id"])
+        else:
+            step_rows = _steps_for_envelope(conn, env_row["id"])
+            step_rows = _sort_step_rows(list(step_rows))
+            steps = [_step_row_to_dict(conn, sr) for sr in step_rows]
     except HTTPException:
         conn.close()
         raise
@@ -617,9 +736,13 @@ def get_test_steps(func_id: str) -> dict:
 
 
 @workflows_router.get("/api/workflow/{func_id:path}/steps")
-def get_workflow_steps(func_id: str) -> dict:
-    """Ordered steps for a @workflow envelope (graph.db-backed)."""
-    return _envelope_steps_payload(func_id)
+def get_workflow_steps(func_id: str, expand: bool = False) -> dict:
+    """Ordered steps for a @workflow envelope (graph.db-backed).
+
+    Set ``?expand=true`` to receive the transitive AutoStep tree instead of
+    only the envelope's own step markers.
+    """
+    return _envelope_steps_payload(func_id, expand=expand)
 
 
 @workflows_router.get("/api/source")

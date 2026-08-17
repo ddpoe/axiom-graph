@@ -39,16 +39,23 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import shutil
 import sqlite3
 import subprocess
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
-from axiom_annotations import task, Step
+from axiom_annotations import task, workflow, Step
 
 from axiom_graph.config import AxiomGraphConfig, db_path_for
 from axiom_graph.index import builder, db
+from axiom_graph.index.mark_clean import (
+    VERIFICATION_OP_MARK_CLEAN,
+    VERIFICATION_OP_REVERIFY,
+)
 from axiom_graph.index.staleness import record_staleness
 from axiom_graph.index.status import (
     BECAME_BROKEN_LINK,
@@ -78,7 +85,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class BuildSummary:
-    """Result of :func:`build_index`."""
+    """Result of :func:`build_index`.
+
+    Attributes:
+        files_skipped_mtime: Code files the mtime fast-pass skipped.
+        docs_skipped_mtime: Markdown and DocJSON files the mtime fast-pass
+            skipped.  Counted apart from ``files_skipped_mtime`` because
+            doc files are walked by their own scanners; without it there is
+            no observable evidence that a doc file was left unread.
+    """
 
     files_scanned: int
     files_skipped_mtime: int
@@ -92,6 +107,7 @@ class BuildSummary:
     staleness_total: int = 0
     staleness_stale: int = 0
     annotation_findings: list = field(default_factory=list)
+    docs_skipped_mtime: int = 0
 
 
 @dataclass
@@ -140,9 +156,10 @@ class ReverifyResult:
     - ``cleared``: nodes whose persisted LINKED_STALE cleared during
       this operation (superset of the cascade set — includes aggregates
       cleared purely by composite inheritance in the final recompute).
-    - ``skipped``: nodes attributed partly to the source but also stale
-      via other root offenders — left LINKED_STALE, mapped to the
-      blocking offender IDs.
+    - ``skipped``: nodes attributed partly to the source but still
+      outstanding via other root offenders — left LINKED_STALE, mapped
+      to those offender IDs.  Offenders already reverified are not
+      listed; the map shrinks as the composition is completed.
     - ``before_linked_stale`` / ``after_linked_stale``: persisted
       LINKED_STALE counts at entry and after the recompute.
     """
@@ -154,6 +171,15 @@ class ReverifyResult:
     skipped: dict[str, list[str]] = field(default_factory=dict)
     before_linked_stale: int = 0
     after_linked_stale: int = 0
+
+
+#: One-line action a presentation surface appends to reverify's skip
+#: block.  Defined here so every surface renders the same string; the
+#: layout of the block stays with the surface.  It names the action and
+#: deliberately does not repeat the offender IDs printed above it.
+REVERIFY_SKIP_HINT = (
+    "Reverify each offender listed above — a dependent clears once every offender behind it is reverified."
+)
 
 
 @dataclass
@@ -346,6 +372,7 @@ def build_index(
         broken_links_flagged=summary.get("broken_links_flagged", 0) or 0,
         warnings=list(summary.get("warnings", [])),
         annotation_findings=list(summary.get("annotation_findings", []) or []),
+        docs_skipped_mtime=summary.get("docs_skipped_mtime", 0) or 0,
     )
 
     # Compute, record transition events, and persist staleness.
@@ -470,6 +497,7 @@ def mark_clean_nodes(
     reason: str,
     *,
     verified_by: str,
+    verification_op: str = VERIFICATION_OP_MARK_CLEAN,
 ) -> MarkCleanResult:
     """Record AGENT_VERIFIED / MANUAL_VERIFIED for one or more nodes.
 
@@ -485,6 +513,11 @@ def mark_clean_nodes(
         reason: Free-form reason recorded in the history meta.
         verified_by: Verifier identifier (``"human"``, ``"agent"``,
             ``"agent:claude-sonnet-4-6"``, ...).  Required keyword.
+        verification_op: Which operation is writing these verifications,
+            recorded as provenance in each history row's ``meta``
+            payload.  Defaults to
+            :data:`~axiom_graph.index.mark_clean.VERIFICATION_OP_MARK_CLEAN`;
+            :func:`reverify_node` sets it for the source it names.
 
     Returns:
         :class:`MarkCleanResult` with marked vs not_found IDs plus the
@@ -539,7 +572,7 @@ def mark_clean_nodes(
         if node is None:
             not_found.append(nid)
             continue
-        mark_node_clean(db_path, root, node, reason, verified_by)
+        mark_node_clean(db_path, root, node, reason, verified_by, verification_op=verification_op)
         marked.append(nid)
 
     # Classifications only apply to nodes that were actually marked.
@@ -569,13 +602,20 @@ def reverify_node(
        configuration as ``check``.
     3. Resolve every stale entry's via chain to its leaf root offenders
        (:func:`axiom_graph.index.staleness.resolve_root_offenders`).
-    4. Select nodes whose entire root set falls within the source set;
-       nodes also stale via *other* offenders are skipped and reported
-       (under-clearing is acceptable, over-clearing is not).
-    5. Clear via :func:`mark_clean_nodes` — verification rows remain the
+    4. Narrow each root set to the offenders that are still outstanding:
+       offenders already reverified since their last change drop out
+       (:func:`axiom_graph.index.staleness.already_reverified_offenders`).
+       **Reverifies compose** — reverifying every offender behind a
+       dependent reaches the same end state as marking that dependent
+       clean directly, so the last reverify in the series clears it.
+    5. Select nodes whose outstanding offenders all fall within the
+       source set; nodes still outstanding via *other* offenders are
+       skipped and reported (under-clearing is acceptable,
+       over-clearing is not).
+    6. Clear via :func:`mark_clean_nodes` — verification rows remain the
        only clearing mechanism; cascade rows carry
        ``[reverify:<source>]`` provenance in reason/history.
-    6. Finish with the shared staleness recompute (the same single-writer
+    7. Finish with the shared staleness recompute (the same single-writer
        path ``check`` uses), so aggregates cleared by composite
        inheritance are visible in this call's own report.
 
@@ -597,6 +637,7 @@ def reverify_node(
     """
     from axiom_graph.index.staleness import (
         _get_linked_stale_ids,
+        already_reverified_offenders,
         expand_composes_subtree,
         resolve_root_offenders,
     )
@@ -621,6 +662,19 @@ def reverify_node(
     source_set = {source_node_id} | expand_composes_subtree(db_path, source_node_id)
     roots_map = resolve_root_offenders(stale_map)
 
+    # Reverifies compose: an offender reverified since its own last change
+    # is no longer outstanding, so a series of reverifies adds up.  Read
+    # once for every root offender in play, then decided by the pure
+    # primitive.  Computed before any write below, so this call never
+    # discounts its own source mid-flight (the source is in source_set).
+    all_roots = {rid for roots in roots_map.values() for rid in roots}
+    latest_change_ids, verification_ops = db.get_verification_ordering_rows(db_path, sorted(all_roots))
+    already_reverified = already_reverified_offenders(
+        all_roots,
+        latest_change_ids=latest_change_ids,
+        verification_ops=verification_ops,
+    )
+
     selected: list[str] = []
     skipped: dict[str, list[str]] = {}
     for nid, roots in sorted(roots_map.items()):
@@ -630,17 +684,30 @@ def reverify_node(
         root_set = set(roots)
         if not root_set or not (root_set & source_set):
             # Unattributable (empty root set) or rooted entirely at other
-            # offenders — untouched, conservatively.
+            # offenders — untouched, conservatively.  Evaluated on the RAW
+            # root set: narrowing here would make a dependent whose
+            # remaining offenders lie outside the source set look
+            # unrelated, silently dropping it from the skip report
+            # instead of reporting what is still outstanding.
             continue
-        if root_set <= source_set:
+        outstanding = root_set - already_reverified
+        if outstanding <= source_set:
             selected.append(nid)
         else:
-            skipped[nid] = sorted(root_set - source_set)
+            skipped[nid] = sorted(outstanding - source_set)
 
     # ADR boundary: verification rows via the mark_clean machinery remain
-    # the ONLY clearing mechanism.  Source first (plain reason), then the
+    # the ONLY clearing mechanism.  Source first (plain reason, marked as
+    # reverify-written so it becomes a term in the composition), then the
     # cascade set with reverify-of-source provenance.
-    mark_clean_nodes(db_path, root, [source_node_id], reason, verified_by=verified_by)
+    mark_clean_nodes(
+        db_path,
+        root,
+        [source_node_id],
+        reason,
+        verified_by=verified_by,
+        verification_op=VERIFICATION_OP_REVERIFY,
+    )
     if selected:
         cascade_reason = f"[reverify:{source_node_id}] {reason}" if reason else f"[reverify:{source_node_id}]"
         mark_clean_nodes(db_path, root, selected, cascade_reason, verified_by=verified_by)
@@ -1634,3 +1701,591 @@ def recover_deleted_source(
         return git_utils.get_old_body(project_root, preserved_sha, location, None, None)
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Doc-ID migration (plan / preview / execute)
+# ---------------------------------------------------------------------------
+
+
+#: Directories never scanned for prose doc-ID references.
+_PROSE_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        ".axiom_graph",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "__pycache__",
+        "node_modules",
+        ".venv",
+        "venv",
+        "dist",
+        "build",
+    }
+)
+
+#: Extensions treated as binary and skipped by the prose scan.
+_PROSE_SKIP_SUFFIXES = frozenset(
+    {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".ico",
+        ".pdf",
+        ".zip",
+        ".gz",
+        ".tar",
+        ".db",
+        ".sqlite",
+        ".sqlite3",
+        ".whl",
+        ".exe",
+        ".dll",
+        ".so",
+        ".dylib",
+        ".pyc",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".eot",
+        ".mp4",
+        ".webm",
+        ".mp3",
+        ".onnx",
+        ".bin",
+    }
+)
+
+#: Largest file the prose scan will read.
+_PROSE_MAX_BYTES = 2_000_000
+
+#: The prose scan never counts a reference the migration rewrites.  On disk
+#: those are ``links[].node_id`` entries, one per line in DocJSON.
+_LINK_LINE_PREFIX = '"node_id"'
+
+
+@dataclass(frozen=True)
+class ProseReference:
+    """One textual doc-ID reference the migration will not rewrite.
+
+    Attributes:
+        file_path: Repo-relative path of the file containing the reference.
+        line: 1-based line number.
+        text: The matched reference, exactly as written.
+        doc_id: The document envelope the reference resolves to, or ``None``
+            when the reference does not match any document on disk.
+        is_section_reference: ``True`` when the reference names a section
+            rather than the document envelope.
+    """
+
+    file_path: str
+    line: int
+    text: str
+    doc_id: str | None
+    is_section_reference: bool
+
+
+@dataclass
+class DocIdMigrationPlan:
+    """Everything a doc-ID migration would do, computed without writing.
+
+    Attributes:
+        project_id: Project ID prefix.
+        docs_roots: Configured docs roots that exist on disk.
+        documents: One old -> new mapping per document envelope.
+        sections: One old -> new mapping per section node.
+        collisions: Duplicate groups in the *projected* ID set.  Non-empty
+            means execute mode is unreachable.
+        current_collisions: Duplicate groups in the current ID set — the
+            overlaps that already exist today.
+        dotted_filenames: Repo-relative paths with extra dots in the stem.
+        prose_in_docjson_content: References inside DocJSON section content.
+        prose_elsewhere: References in every other file in the repository.
+        unreadable: Files under a docs root that could not be read or
+            parsed, plus documents that yielded no section identity.
+            Ordinary JSON data files are *not* listed — they are not
+            documents and nothing about them is a finding.
+        revert_supported: Whether a per-document revert path exists.  Always
+            ``False`` — rollback is restoring the backup.
+    """
+
+    project_id: str
+    docs_roots: list[str] = field(default_factory=list)
+    documents: list = field(default_factory=list)
+    sections: list = field(default_factory=list)
+    collisions: list = field(default_factory=list)
+    current_collisions: list = field(default_factory=list)
+    dotted_filenames: list[str] = field(default_factory=list)
+    prose_in_docjson_content: list[ProseReference] = field(default_factory=list)
+    prose_elsewhere: list[ProseReference] = field(default_factory=list)
+    unreadable: list[str] = field(default_factory=list)
+    revert_supported: bool = False
+
+    @property
+    def document_count(self) -> int:
+        """Number of document envelopes the migration would move."""
+        return len(self.documents)
+
+    @property
+    def section_count(self) -> int:
+        """Number of section nodes the migration would move."""
+        return len(self.sections)
+
+    @property
+    def total_nodes(self) -> int:
+        """Total node identities the migration would move."""
+        return len(self.documents) + len(self.sections)
+
+    @property
+    def blocked(self) -> bool:
+        """Whether a doc-ID collision blocks execution.
+
+        Both classes count.  A duplicate in the *projected* set would create
+        the very overwrite the migration exists to prevent; a duplicate in
+        the *current* set means the index already holds one identity for two
+        files, so there is no coherent identity to move.
+        """
+        return bool(self.collisions or self.current_collisions)
+
+    @property
+    def blocking_collisions(self) -> list:
+        """Every collision group that makes execute mode unreachable."""
+        return list(self.collisions) + list(self.current_collisions)
+
+    def as_mapping(self) -> dict[str, str]:
+        """Return the document-level old -> new mapping."""
+        return {m.old_id: m.new_id for m in self.documents}
+
+
+@dataclass
+class DocIdMigrationResult:
+    """Outcome of an executed doc-ID migration.
+
+    Attributes:
+        executed: Whether the index was written.
+        reason: Machine-readable refusal / abort reason when not executed.
+        backup_path: Where the pre-write database copy was written.
+        documents_migrated: Document envelopes moved.
+        sections_migrated: Section nodes moved.
+        files_patched: DocJSON files whose links were rewritten on disk.
+        doc_files_read: DocJSON files opened by the link rewrite — one pass
+            over the tree, not one pass per rename.
+        aborted_at: The document ID the batch failed on, when it aborted.
+        error: The failure text, when it aborted.
+        restored_from_backup: Whether the DB was restored after an abort.
+        plan: The plan the run gated on.
+    """
+
+    executed: bool
+    reason: str | None = None
+    backup_path: Path | None = None
+    documents_migrated: int = 0
+    sections_migrated: int = 0
+    files_patched: int = 0
+    doc_files_read: int = 0
+    aborted_at: str | None = None
+    error: str | None = None
+    restored_from_backup: bool = False
+    plan: DocIdMigrationPlan | None = None
+
+
+def _prose_pattern(project_id: str) -> re.Pattern[str]:
+    """Return the regex matching a maximal doc-ID reference for *project_id*.
+
+    Matches the longest ``{project_id}::docs.<path>[::<section>]`` token, so a
+    reference to a section is never miscounted as a reference to its document
+    envelope — a document ID is a prefix of every one of its section IDs.
+
+    Args:
+        project_id: Project ID prefix.
+
+    Returns:
+        A compiled pattern.
+    """
+    segment = r"[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)*"
+    return re.compile(rf"{re.escape(project_id)}::docs\.{segment}(?:::{segment})?")
+
+
+def _classify_reference(text: str, known_doc_ids: set[str]) -> tuple[str | None, bool]:
+    """Resolve a matched reference to its owning document envelope.
+
+    Args:
+        text: The matched reference token.
+        known_doc_ids: Every document envelope ID derived from disk.
+
+    Returns:
+        ``(doc_id, is_section_reference)``.  ``doc_id`` is ``None`` when the
+        reference resolves to no document on disk.
+    """
+    parts = text.split("::")
+    if len(parts) >= 3:
+        envelope = "::".join(parts[:2])
+        return (envelope if envelope in known_doc_ids else None), True
+    return (text if text in known_doc_ids else None), False
+
+
+def _scan_text_for_references(
+    rel_path: str,
+    text: str,
+    pattern: re.Pattern[str],
+    known_doc_ids: set[str],
+    *,
+    skip_link_lines: bool,
+) -> list[ProseReference]:
+    """Collect doc-ID references from a file's text, one record per match.
+
+    Args:
+        rel_path: Repo-relative path, used in the returned records.
+        text: Full file text.
+        pattern: Compiled reference pattern.
+        known_doc_ids: Every document envelope ID derived from disk.
+        skip_link_lines: When ``True``, lines carrying a ``links[].node_id``
+            entry are ignored — those references *are* rewritten, so counting
+            them in a not-patched report would be a lie.
+
+    Returns:
+        One :class:`ProseReference` per match, in file order.
+    """
+    out: list[ProseReference] = []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        if skip_link_lines and line.lstrip().startswith(_LINK_LINE_PREFIX):
+            continue
+        for match in pattern.finditer(line):
+            doc_id, is_section = _classify_reference(match.group(0), known_doc_ids)
+            out.append(
+                ProseReference(
+                    file_path=rel_path,
+                    line=lineno,
+                    text=match.group(0),
+                    doc_id=doc_id,
+                    is_section_reference=is_section,
+                )
+            )
+    return out
+
+
+@task(
+    purpose="Enumerate textual doc-ID references the migration will not rewrite, split into DocJSON content and everything else",
+    inputs="project root, project_id, enumerated DocJSON files, known doc ids, excluded dirs",
+    outputs="(in_docjson_content, elsewhere) — ProseReference lists with file and line",
+)
+def scan_doc_id_prose_references(
+    root: Path,
+    project_id: str,
+    doc_files: list,
+    known_doc_ids: set[str],
+    *,
+    exclude_dirs: tuple[str, ...] = (),
+) -> tuple[list[ProseReference], list[ProseReference]]:
+    """Return doc-ID references in DocJSON prose and in the rest of the repo.
+
+    Two buckets, deliberately distinguishable: references inside DocJSON
+    section content are data axiom-graph owns; references anywhere else are
+    not.  Neither bucket is rewritten by the migration — ``links[].node_id``
+    entries, which *are* rewritten, are excluded from the DocJSON bucket.
+
+    Args:
+        root: Absolute project root.
+        project_id: Project ID prefix.
+        doc_files: ``DocFile`` records for the DocJSON *documents* under the
+            docs roots.  Anything else under a docs root is scanned as an
+            ordinary repository file, not as DocJSON content.
+        known_doc_ids: Every document envelope ID derived from disk.
+        exclude_dirs: Additional directory names to skip.
+
+    Returns:
+        ``(in_docjson_content, elsewhere)``.
+    """
+    pattern = _prose_pattern(project_id)
+    docjson_paths = {f.path.resolve() for f in doc_files}
+
+    in_content: list[ProseReference] = []
+    for doc_file in doc_files:
+        try:
+            text = doc_file.path.read_text(encoding="utf-8", errors="replace")
+        except OSError:  # pragma: no cover - unreadable file
+            continue
+        in_content.extend(
+            _scan_text_for_references(
+                doc_file.rel_path,
+                text,
+                pattern,
+                known_doc_ids,
+                skip_link_lines=True,
+            )
+        )
+
+    skip_dirs = _PROSE_SKIP_DIRS | set(exclude_dirs)
+    needle = f"{project_id}::docs."
+    elsewhere: list[ProseReference] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+        for name in filenames:
+            path = Path(dirpath) / name
+            if path.suffix.lower() in _PROSE_SKIP_SUFFIXES:
+                continue
+            try:
+                if path.resolve() in docjson_paths:
+                    continue
+                if path.stat().st_size > _PROSE_MAX_BYTES:
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:  # pragma: no cover - unreadable file
+                continue
+            if needle not in text:
+                continue
+            rel = path.relative_to(root).as_posix()
+            elsewhere.extend(_scan_text_for_references(rel, text, pattern, known_doc_ids, skip_link_lines=False))
+
+    return in_content, elsewhere
+
+
+@task(
+    purpose="Compute the complete doc-ID migration plan without writing anything",
+    inputs="db_path, project root",
+    outputs="DocIdMigrationPlan — projection, collision verdict, advisories, prose buckets",
+)
+def plan_doc_id_migration(db_path: Path, root: Path) -> DocIdMigrationPlan:
+    """Project every doc-ID move and gate it, writing nothing.
+
+    The projection enumerates DocJSON files **from disk** rather than from the
+    ``docs`` table: table rows only cover whatever the last build happened to
+    walk, and the build's mtime fast-pass means that is not the whole tree.
+
+    Every ``*.json`` under a docs root is enumerated, then classified.  Only
+    DocJSON documents are planned against: ordinary JSON data files beside
+    the docs never become doc nodes, so they get no projected ID, no
+    collision candidacy, no advisory, and no say in the gate.  Files that
+    cannot be read or parsed have no identity either, but are reported in
+    ``unreadable`` alongside documents that yielded no sections.
+
+    Args:
+        db_path: Path to the axiom-graph DB.  Not read — accepted so plan and
+            execute share one signature shape.
+        root: Absolute project root.
+
+    Returns:
+        A :class:`DocIdMigrationPlan`.  ``blocked`` is ``True`` when two
+        *documents* share one doc ID — in the projected set, which would
+        recreate the overwrite this migration exists to remove, or in the
+        current set, where there is no coherent identity to move.
+    """
+    from axiom_graph.index import doc_ids  # noqa: PLC0415
+
+    root = Path(root).resolve()
+    config = AxiomGraphConfig.load(root)
+    project_id = config.project_id or root.name
+
+    scan = doc_ids.classify_doc_files(doc_ids.enumerate_doc_files(root, config.scan.docs_dirs))
+    documents = scan.documents
+    projection = doc_ids.project_doc_ids(project_id, documents)
+    known_doc_ids = {m.old_id for m in projection.documents}
+
+    in_content, elsewhere = scan_doc_id_prose_references(
+        root,
+        project_id,
+        documents,
+        known_doc_ids,
+        exclude_dirs=tuple(config.scan.exclude_dirs or ()),
+    )
+
+    return DocIdMigrationPlan(
+        project_id=project_id,
+        docs_roots=[entry for entry, _abs in doc_ids.resolve_docs_roots(root, config.scan.docs_dirs)],
+        documents=projection.documents,
+        sections=projection.sections,
+        collisions=doc_ids.find_collisions(projection.new_id_sources),
+        current_collisions=doc_ids.find_collisions(doc_ids.current_doc_id_index(project_id, documents)),
+        dotted_filenames=doc_ids.dotted_filenames(documents),
+        prose_in_docjson_content=in_content,
+        prose_elsewhere=elsewhere,
+        unreadable=sorted(set(scan.unreadable) | set(projection.unreadable)),
+    )
+
+
+def _order_doc_renames(mapping: dict[str, str]) -> list[str] | None:
+    """Order document renames so no rename lands on a live identity.
+
+    The collision gate proves the *destination* set is injective; it does not
+    prove any arbitrary order is safe.  A projected new ID can equal some
+    other document's current old ID, so that document has to move out of the
+    way first.
+
+    Args:
+        mapping: Old -> new document IDs.
+
+    Returns:
+        Old IDs in a safe order, or ``None`` when the constraints form a
+        cycle (two documents trading identities) and no order exists.
+    """
+    old_ids = set(mapping)
+    # ``blockers[a]`` holds the documents that must move before ``a`` does.
+    blockers: dict[str, set[str]] = {old: set() for old in mapping}
+    for old, new in mapping.items():
+        if new in old_ids and new != old:
+            blockers[old].add(new)
+
+    ordered: list[str] = []
+    remaining = dict(blockers)
+    while remaining:
+        ready = sorted(old for old, deps in remaining.items() if not deps)
+        if not ready:
+            return None
+        for old in ready:
+            ordered.append(old)
+            del remaining[old]
+        for deps in remaining.values():
+            deps.difference_update(ready)
+    return ordered
+
+
+def _backup_db(db_path: Path) -> Path:
+    """Copy the index to a timestamped sibling and return its path.
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+
+    Returns:
+        Path to the backup copy.
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup = db_path.parent / f"{db_path.name}.pre-doc-id-migration-{stamp}"
+    db.vacuum_into(db_path, backup)
+    return backup
+
+
+@workflow(
+    purpose="Migrate every document and section doc id in a project, gating on collisions and backing the index up before any write",
+    inputs="db_path, project root, optional precomputed plan",
+    outputs="DocIdMigrationResult — counts, backup path, and abort detail",
+)
+def execute_doc_id_migration(
+    db_path: Path,
+    root: Path,
+    *,
+    plan: DocIdMigrationPlan | None = None,
+) -> DocIdMigrationResult:
+    """Migrate every doc and section identity in *root*.  Irreversible.
+
+    The collision gate is re-run immediately before writing, so a tree that
+    grew a duplicate since the preview is refused rather than half-migrated.
+    A timestamped copy of the database is taken before the first write and
+    reported back; the whole batch then runs in one transaction, and any
+    failure rolls it back and restores the copy rather than leaving a
+    partially-migrated index.
+
+    What survives: the rename ledger, node history, verification for
+    documents *and* sections, graph edges, and ``links[].node_id``
+    references on disk.  What does not: prose references to doc IDs (they
+    are reported by :func:`plan_doc_id_migration`, never rewritten), and
+    reversibility -- there is no per-document revert path.
+
+    A rebuild is deliberately not run afterwards.  Under a derivation that
+    still produces the old IDs, a rebuild re-creates the identities this
+    call retired.
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+        root: Absolute project root.
+        plan: A previously computed plan.  Ignored for gating -- the gate
+            always re-runs -- and accepted only to avoid recomputing the
+            prose scan for the report.
+
+    Returns:
+        A :class:`DocIdMigrationResult`.
+    """
+    from axiom_graph.index.link_maintenance import patch_doc_links_batch  # noqa: PLC0415
+
+    root = Path(root).resolve()
+
+    口 = Step(
+        step_num=1,
+        name="Re-plan and gate",
+        purpose="Recompute the projection from disk and refuse when any two projected ids collide",
+        critical="Execute mode is unreachable while a collision exists — the gate is re-run here, not trusted from the preview",
+    )
+    fresh = plan_doc_id_migration(db_path, root)
+    if fresh.blocked:
+        return DocIdMigrationResult(executed=False, reason="collision", plan=fresh)
+    mapping = fresh.as_mapping()
+    if not mapping:
+        return DocIdMigrationResult(executed=False, reason="no_documents", plan=fresh)
+    order = _order_doc_renames(mapping)
+    if order is None:
+        return DocIdMigrationResult(executed=False, reason="rename_cycle", plan=fresh)
+
+    口 = Step(
+        step_num=2,
+        name="Back the index up",
+        purpose="Take a timestamped copy of the database before the first write and report where it went",
+    )
+    backup_path = _backup_db(db_path)
+
+    口 = Step(
+        step_num=3,
+        name="Migrate every identity in one transaction",
+        purpose="Materialise the new rows, move history/verification/edges, retire the old rows; abort the whole run on the first failure",
+    )
+    file_paths = {m.old_id: m.file_path for m in fresh.documents}
+    documents_migrated = 0
+    sections_migrated = 0
+    old_id = order[0]
+    try:
+        with db._connect(db_path) as conn:
+            for old_id in order:
+                口 = Step(
+                    step_num=3.1,
+                    name="Migrate one document identity",
+                    purpose="Clone the new rows, move history/verification/edges onto them, retire the old rows",
+                )
+                new_id = mapping[old_id]
+                file_path = file_paths.get(old_id, "")
+                sections_migrated += db.rekey_doc_identity(conn, old_id, new_id, file_path).sections
+                db.record_doc_rename_conn(conn, old_id, new_id, file_path)
+                db.delete_doc_by_id(
+                    conn,
+                    old_id,
+                    reason_meta={"actor": "doc-id-migration", "reason": f"renamed to {new_id}"},
+                )
+                documents_migrated += 1
+    except Exception as exc:
+        logger.error("doc-id migration aborted at %s: %s", old_id, exc)
+        restored = False
+        try:
+            shutil.copy2(backup_path, db_path)
+            restored = True
+        except OSError:  # pragma: no cover - restore failure
+            logger.error("could not restore %s from %s", db_path, backup_path)
+        return DocIdMigrationResult(
+            executed=False,
+            reason="aborted",
+            backup_path=backup_path,
+            aborted_at=old_id,
+            error=str(exc),
+            restored_from_backup=restored,
+            plan=fresh,
+        )
+
+    口 = Step(
+        step_num=4,
+        name="Rewrite on-disk links in a single pass",
+        purpose="Apply the whole map to every DocJSON links[].node_id in one walk of the doc tree",
+    )
+    files_patched, files_read = patch_doc_links_batch(root, mapping)
+
+    口 = Step(
+        step_num=5,
+        name="Report",
+        purpose="Return counts, the backup path, and the plan the run gated on",
+    )
+    return DocIdMigrationResult(
+        executed=True,
+        backup_path=backup_path,
+        documents_migrated=documents_migrated,
+        sections_migrated=sections_migrated,
+        files_patched=files_patched,
+        doc_files_read=files_read,
+        plan=fresh,
+    )

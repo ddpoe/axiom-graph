@@ -160,6 +160,10 @@ def scan_single_json_doc(
         name="Parse JSON and create document composite node",
         purpose="Read file, validate keys, derive doc ID, create composite AxiomNode and doc record",
     )
+    # Sample the mtime BEFORE reading the bytes.  Stamping a value newer than
+    # the bytes we indexed would let the next build skip the file permanently;
+    # stamping an older value only costs a redundant re-scan.
+    file_mtime = json_file.stat().st_mtime
     raw_text = json_file.read_text(encoding="utf-8", errors="replace")
     data = json.loads(raw_text)
 
@@ -218,7 +222,7 @@ def scan_single_json_doc(
         level_2=raw_text[:4000] if raw_text else None,
         level_3_location=rel_path,
         tags=doc_tags,
-        file_mtime=json_file.stat().st_mtime,
+        file_mtime=file_mtime,
     )
     nodes.append(doc_node)
 

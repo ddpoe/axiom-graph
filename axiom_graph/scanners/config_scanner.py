@@ -113,11 +113,14 @@ def scan_config_dir(
         if skip_dirs and any(part in skip_dirs for part in rel.parts):
             continue
 
-        # mtime fast-pass
+        # mtime fast-pass.  One stat serves both the fast-pass and the stamp
+        # below, and it is taken BEFORE the read so the stamped value can
+        # never be newer than the bytes we indexed.
         rel_path = rel.as_posix()
+        file_mtime = path.stat().st_mtime
         if stored_mtimes:
             stored = stored_mtimes.get(rel_path)
-            if file_unchanged_since(stored, path.stat().st_mtime):
+            if file_unchanged_since(stored, file_mtime):
                 files_skipped += 1
                 continue
 
@@ -130,7 +133,6 @@ def scan_config_dir(
         dotpath = _dotpath(rel_path)
         node_id = f"{project_id}::{prefix}.{dotpath}"
         file_hash = hash16(text)
-        file_mtime = path.stat().st_mtime
 
         summary = _first_line(text)
         title = path.name

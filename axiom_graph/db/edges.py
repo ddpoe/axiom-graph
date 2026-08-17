@@ -113,47 +113,77 @@ def all_edges(db_path: Path) -> list[AxiomEdge]:
         return [_row_to_edge(r) for r in rows]
 
 
-def get_outbound_documents_targets_conn(
+def get_outbound_edge_targets_conn(
     conn: sqlite3.Connection,
     from_id: str,
+    edge_type: str,
 ) -> set[str]:
-    """Return the set of ``to_id`` for outbound ``documents`` edges from ``from_id``.
+    """Return the set of ``to_id`` for outbound edges of one type from ``from_id``.
 
-    Scoped strictly to ``edge_type='documents'`` — other edge types are not
-    returned.  Used by the build-time reconciliation pass to detect orphan
-    documents edges whose targets are no longer in a section's JSON ``links``.
+    Scoped strictly to the requested ``edge_type`` — edges of any other type
+    are not returned.  Used by the build-time reconciliation passes to diff a
+    source's stored edge set against the set its file justifies today.
 
     Args:
         conn: Open SQLite connection (caller manages transaction).
-        from_id: Source node ID (typically a doc section node).
+        from_id: Source node ID.
+        edge_type: The single edge type to read (e.g. ``"documents"``,
+            ``"delegates_to"``).
 
     Returns:
         Set of target node IDs.  Empty set when no matching edges exist.
     """
     rows = conn.execute(
-        "SELECT to_id FROM edges WHERE from_id = ? AND edge_type = 'documents'",
-        (from_id,),
+        "SELECT to_id FROM edges WHERE from_id = ? AND edge_type = ?",
+        (from_id, edge_type),
     ).fetchall()
     return {r["to_id"] for r in rows}
 
 
-def delete_documents_edge_conn(
+def get_edge_source_ids_conn(
+    conn: sqlite3.Connection,
+    edge_type: str,
+) -> set[str]:
+    """Return every node ID that has at least one outbound edge of ``edge_type``.
+
+    One bulk read that lets a reconciliation pass narrow its candidate
+    sources to those that actually hold a stored edge of the type, instead of
+    querying once per node the build walked.
+
+    Args:
+        conn: Open SQLite connection (caller manages transaction).
+        edge_type: The single edge type to read.
+
+    Returns:
+        Set of source node IDs.  Empty set when no such edges exist.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT from_id FROM edges WHERE edge_type = ?",
+        (edge_type,),
+    ).fetchall()
+    return {r["from_id"] for r in rows}
+
+
+def delete_edge_conn(
     conn: sqlite3.Connection,
     from_id: str,
     to_id: str,
+    edge_type: str,
     actor: str = "build:reconcile",
 ) -> bool:
-    """Delete a specific outbound ``documents`` edge and emit LINK_REMOVED history.
+    """Delete one specific outbound edge and emit LINK_REMOVED history.
 
     Co-locates the DELETE and the history-row emit so they share one
-    transaction — callers always get atomic semantics.  Restricted to
-    ``edge_type='documents'`` by construction (composes/validates etc.
-    cannot be deleted via this primitive).
+    transaction — callers always get atomic semantics.  Only the edge of the
+    requested ``edge_type`` between the two nodes is removed; edges of other
+    types between the same pair are untouched by construction.
 
     Args:
         conn: Open SQLite connection (caller manages transaction).
         from_id: Source node ID of the edge to delete.
         to_id: Target node ID of the edge to delete.
+        edge_type: Type of the edge to delete (e.g. ``"documents"``,
+            ``"delegates_to"``).
         actor: Value written into the history meta's ``actor`` field.
             Defaults to ``"build:reconcile"`` for the build-time path;
             other callers (tool path) pass ``"agent"``.
@@ -161,7 +191,7 @@ def delete_documents_edge_conn(
     Returns:
         True if an edge row was deleted, False if no matching edge existed.
     """
-    edge_id = f"{from_id}::documents::{to_id}"
+    edge_id = f"{from_id}::{edge_type}::{to_id}"
     cursor = conn.execute("DELETE FROM edges WHERE id = ?", (edge_id,))
     if cursor.rowcount == 0:
         return False
@@ -178,7 +208,7 @@ def delete_documents_edge_conn(
             None,
             json.dumps(
                 {
-                    "edge_type": "documents",
+                    "edge_type": edge_type,
                     "source": from_id,
                     "target": to_id,
                     "actor": actor,
@@ -188,6 +218,51 @@ def delete_documents_edge_conn(
         ),
     )
     return True
+
+
+def get_outbound_documents_targets_conn(
+    conn: sqlite3.Connection,
+    from_id: str,
+) -> set[str]:
+    """Return the set of ``to_id`` for outbound ``documents`` edges from ``from_id``.
+
+    Named entry point for the documents path — a thin wrapper over
+    :func:`get_outbound_edge_targets_conn` pinned to ``documents``.
+
+    Args:
+        conn: Open SQLite connection (caller manages transaction).
+        from_id: Source node ID (typically a doc section node).
+
+    Returns:
+        Set of target node IDs.  Empty set when no matching edges exist.
+    """
+    return get_outbound_edge_targets_conn(conn, from_id, "documents")
+
+
+def delete_documents_edge_conn(
+    conn: sqlite3.Connection,
+    from_id: str,
+    to_id: str,
+    actor: str = "build:reconcile",
+) -> bool:
+    """Delete a specific outbound ``documents`` edge and emit LINK_REMOVED history.
+
+    Named entry point for the documents path — a thin wrapper over
+    :func:`delete_edge_conn` pinned to ``documents``, so a documents edge can
+    never be deleted with another type's history row.
+
+    Args:
+        conn: Open SQLite connection (caller manages transaction).
+        from_id: Source node ID of the edge to delete.
+        to_id: Target node ID of the edge to delete.
+        actor: Value written into the history meta's ``actor`` field.
+            Defaults to ``"build:reconcile"`` for the build-time path;
+            other callers (tool path) pass ``"agent"``.
+
+    Returns:
+        True if an edge row was deleted, False if no matching edge existed.
+    """
+    return delete_edge_conn(conn, from_id, to_id, "documents", actor=actor)
 
 
 def _migrate_edges(conn: sqlite3.Connection, old_id: str, new_id: str) -> None:
@@ -233,6 +308,9 @@ __all__ = [
     "upsert_edge_conn",
     "query_edges",
     "all_edges",
+    "get_outbound_edge_targets_conn",
+    "get_edge_source_ids_conn",
+    "delete_edge_conn",
     "get_outbound_documents_targets_conn",
     "delete_documents_edge_conn",
 ]

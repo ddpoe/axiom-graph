@@ -11,7 +11,7 @@ Covers:
 
 from __future__ import annotations
 
-from tests.conftest import seed_section_row
+from tests.conftest import seed_section_node, seed_section_row
 
 import hashlib
 from unittest.mock import patch
@@ -464,6 +464,68 @@ class TestDocSectionFTS:
         ids = [n.id for n in nodes]
         assert "test::mod::func" in ids
         assert "test::docs.guide::staleness" not in ids
+
+    def test_reindex_collapses_duplicate_fts_rows_for_a_section(self, db_path):
+        """A section carrying several node_fts rows is left with exactly one, holding current text."""
+        section_id = "test::docs.guide::overview"
+        with db._connect(db_path) as conn:
+            seed_section_node(conn, section_id, heading="Overview", content="hash comparison")
+            for _ in range(3):
+                conn.execute(
+                    "INSERT INTO node_fts (id, level_1, level_2) VALUES (?, ?, ?)",
+                    (section_id, "superseded heading", "superseded content"),
+                )
+
+        indexed = db.index_doc_sections_fts(db_path)
+
+        assert indexed == 1
+        with db._connect(db_path) as conn:
+            rows = conn.execute("SELECT level_1, level_2 FROM node_fts WHERE id = ?", (section_id,)).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["level_1"] == "Overview"
+        assert rows[0]["level_2"] == "hash comparison"
+
+    def test_reindex_leaves_fts_rows_that_are_not_section_nodes_untouched(self, db_path):
+        """Rows for code nodes, and orphan rows with no backing node, survive a reindex."""
+        node = _make_node("test::mod::func", "hash comparison helper")
+        with db._connect(db_path) as conn:
+            db.upsert_node_conn(conn, node, discovery_only=False)
+            seed_section_node(conn, "test::docs.guide::overview", heading="Overview", content="hash comparison")
+            # Section-shaped id with no backing ``nodes`` row: a purged section
+            # must not be resurrected, and its stray row must not be collected.
+            conn.execute(
+                "INSERT INTO node_fts (id, level_1, level_2) VALUES (?, ?, ?)",
+                ("test::docs.guide::purged", "Purged", "orphan row"),
+            )
+
+        db.index_doc_sections_fts(db_path)
+
+        with db._connect(db_path) as conn:
+            code_rows = conn.execute("SELECT level_1 FROM node_fts WHERE id = ?", ("test::mod::func",)).fetchall()
+            orphan_rows = conn.execute(
+                "SELECT level_1 FROM node_fts WHERE id = ?", ("test::docs.guide::purged",)
+            ).fetchall()
+        assert len(code_rows) == 1
+        assert code_rows[0]["level_1"] == "hash comparison helper"
+        assert len(orphan_rows) == 1
+        assert orphan_rows[0]["level_1"] == "Purged"
+
+    def test_reindex_normalizes_null_section_content_to_empty_string(self, db_path):
+        """A heading-only section indexes its NULL content as an empty string."""
+        section_id = "test::docs.guide::blank"
+        with db._connect(db_path) as conn:
+            seed_section_node(conn, section_id, heading="Blank", content="")
+            # ``nodes.level_2`` is the one of the two indexed columns that is
+            # nullable, so it is where the reindex has to coalesce.
+            conn.execute("UPDATE nodes SET level_2 = NULL WHERE id = ?", (section_id,))
+
+        db.index_doc_sections_fts(db_path)
+
+        with db._connect(db_path) as conn:
+            row = conn.execute("SELECT level_1, level_2 FROM node_fts WHERE id = ?", (section_id,)).fetchone()
+        assert row is not None
+        assert row["level_1"] == "Blank"
+        assert row["level_2"] == ""
 
 
 # ---------------------------------------------------------------------------

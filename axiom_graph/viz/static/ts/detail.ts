@@ -468,7 +468,31 @@ function mergeSteps(cortexSteps: any, dflowData: any): any[] {
     }
   }
 
-  return Array.from(merged.values()).sort((a, b) => Number(a.step_number) - Number(b.step_number));
+  return Array.from(merged.values()).sort((a, b) => compareStepNumbers(a.step_number, b.step_number));
+}
+
+/**
+ * Order dotted step numbers segment by segment ("3.2" before "3.10").
+ *
+ * Coercing the whole string with Number() is wrong in two ways: it is NaN
+ * beyond one dot ("2.3.1"), and at one dot it reads the number as a decimal,
+ * so "3.10" ties with "3.1" and sorts ahead of "3.2". A shorter number sorts
+ * before its own children, so "3" precedes "3.1".
+ */
+function compareStepNumbers(a: unknown, b: unknown): number {
+  const segments = (v: unknown): number[] =>
+    String(v ?? '').split('.').map(s => {
+      const n = parseInt(s, 10);
+      return Number.isNaN(n) ? 0 : n;
+    });
+  const as = segments(a);
+  const bs = segments(b);
+  for (let i = 0; i < Math.max(as.length, bs.length); i++) {
+    const av = i < as.length ? as[i] : -1;
+    const bv = i < bs.length ? bs[i] : -1;
+    if (av !== bv) return av - bv;
+  }
+  return 0;
 }
 
 function renderStepItem(s: any): string {

@@ -146,6 +146,43 @@ def _steps_for_envelope(conn: sqlite3.Connection, envelope_id: str) -> list[sqli
     ).fetchall()
 
 
+def _step_rows_by_ids(conn: sqlite3.Connection, step_ids: list[str]) -> dict[str, sqlite3.Row]:
+    """Fetch step/autostep node rows by ID, keyed by node ID.
+
+    Companion to :func:`_steps_for_envelope` for callers that already know
+    which step nodes they want.  The transitive expansion path needs this
+    because its walk yields node IDs spanning several envelopes, so no single
+    ``composes`` query covers them.
+
+    Args:
+        conn: Open connection to the graph database.
+        step_ids: Node IDs to fetch.  Unknown IDs are simply absent from the
+            result rather than raising.
+
+    Returns:
+        Mapping of node ID to row.  Empty when ``step_ids`` is empty.
+    """
+    if not step_ids:
+        return {}
+    out: dict[str, sqlite3.Row] = {}
+    # Chunked to stay under SQLite's bound-variable limit on deep trees.
+    for start in range(0, len(step_ids), 500):
+        chunk = step_ids[start : start + 500]
+        placeholders = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            f"""
+            SELECT n.id, n.title, n.location, n.level_1, n.level_2,
+                   n.level_3_location, n.dflow_meta, n.subtype
+            FROM nodes n
+            WHERE n.id IN ({placeholders})
+            """,
+            chunk,
+        ).fetchall()
+        for row in rows:
+            out[row["id"]] = row
+    return out
+
+
 def _delegates_target(conn: sqlite3.Connection, step_id: str) -> str | None:
     """Return the function node that an AutoStep ``delegates_to``, if any."""
     row = conn.execute(

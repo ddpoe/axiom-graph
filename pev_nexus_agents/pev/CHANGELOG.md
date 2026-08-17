@@ -8,13 +8,37 @@ The PEV plugin drives the `axiom-graph` MCP server, so each plugin release has a
 
 | PEV plugin     | Requires axiom-graph |
 |----------------|----------------------|
-| 1.4.0 and up   | ≥ 2.2.0              |
+| 1.4.1 and up   | ≥ 2.3.0              |
+| 1.4.0          | ≥ 2.2.0              |
 | 1.2.0 – 1.3.0  | ≥ 2.1.0              |
 | 1.0.0 – 1.1.1  | 2.0.x                |
+
+**Why 1.4.1 needs ≥ 2.3.0:** the clean-action guidance now tells agents that reverifies compose — that working through a skipped dependent's named offenders clears it on the last one. That is only true from server 2.3.0; on 2.2.0 a dependent with two or more offenders can never be cleared by `reverify` in any order, so an agent following this guidance against a 2.2.0 server would reverify each offender in turn and never see the dependent clear. Nothing crashes — the failure is a wasted loop and a dependent left `LINKED_STALE` — but the guidance is wrong below 2.3.0, so the floor moves.
+
+> **Note on the floor's version number.** This row was first written as `≥ 2.2.1`, naming the patch release the composing-reverify fix was then expected to ship in. That release never happened — by the time the server shipped, the same window had also gained new CLI surface and a new staleness signal, making it 2.3.0. There is no 2.2.1 and there will not be one. Plugin 1.4.1 reaches the marketplace for the first time alongside server 2.3.0, so the floor is stated correctly from its first published version.
 
 **Why 1.4.0 needs ≥ 2.2.0:** the clean-action toolsets now include `axiom_graph_reverify`, an MCP tool first shipped by the server in 2.2.0. Running PEV 1.4.0 against a 2.1.x server will fail the moment the Auditor or dev-shard attempts a `reverify` call.
 
 **Why 1.2.0 needs ≥ 2.1.0:** the agents now call `axiom_graph_patch_section`, an MCP tool first shipped by the server in 2.1.0. Running PEV 1.2.0 against the public 2.0.x server will fail the moment an agent attempts a `patch_section` edit.
+
+## [1.4.1] — 2026-08-11
+
+> **Requires axiom-graph ≥ 2.3.0** (see [Compatibility](#compatibility)) — the reverify guidance corrected here describes composing reverifies, which the server only does from 2.3.0. The entry baseline also gains a gap classification. No consumer migration.
+
+### Added
+
+- **Entry baseline classification.** The Phase 1 entry check sorts any worktree-vs-main gap into one of three outcomes: *env divergence* (a missing scanner dependency flipping whole node classes — block, install, `axiom_graph_build`, re-run), *pre-existing debt* (latent staleness provisioning does not touch — record with its mechanism, subtract, proceed), or *structural* (paths untracked in main that a worktree cannot materialize — note and proceed).
+
+### Changed
+
+- **The left bracket is the worktree's own entry check.** `axiom_graph_check(project_root="{worktree_path}")`, taken once after provisioning and before any Builder work, is the baseline Phase 6 subtracts. Main's counts are now context for classifying that baseline rather than a target it must match. Staleness is a function of mtime as well as content and a checkout resets every mtime, so main (old mtimes, taking the content-gated fast-pass) and a fresh worktree (every file re-parsed through the per-node ladder) are not directly comparable — a worktree reads dirtier by whatever staleness main is masking, an amount unrelated to the cycle. Bracketing worktree-to-worktree keeps both ends in one mtime regime. Manifest `status` entries record the worktree counts, main's counts as context, and the classification.
+- **Diagnosis guidance for `CONTENT_UPDATED`.** The flag is retired only by `mark_clean`/`reverify`, so `axiom_graph_check` returns the same counts regardless of what changed in between and two different tree states read identically. The orchestrator reference now directs agents to settle the cause by reading the scanner's hashing path and recomputing a hash by hand, and to keep diagnostics read-only so tree-rewriting commands do not replace the evidence being measured.
+
+### Fixed
+
+- **Provisioning `cd` is wrapped in a subshell.** The frontend-install snippet in the orchestrator reference used a bare `cd`, which persists for every later Bash call in the session and leaves subsequent commands running from a directory they did not choose. It is now `(cd path && npm install)`, confining the change to that step.
+
+- **Reverify guidance told agents a skipped dependent was a dead end.** Three skills — `pev-auditor` (Step 4b verb choice), `pev-audit-dev-docs` (the Pass-2 verb table), and `pev-instance` ("Close the staleness loop") — described `axiom_graph_reverify` as conservatively skipping dependents "also stale via other offenders," full stop. That matched server 2.2.0, where a dependent with two or more root offenders genuinely could not be cleared by `reverify` in any order, so the skip list was terminal and an agent's only route was `mark_clean` on each dependent. From server 2.3.0 **reverifies compose**: an offender reverified since its own last change stops counting against its dependents, so working through a skipped dependent's named offenders clears it when the last one lands. All three skills now say so, and the skip report is described as what is still *outstanding* rather than a fixed blocking set. The verb-choice rule is unchanged — `reverify` is still only for changes inconsequential to dependents, still guarded by the pre-flight cascade skim, and dependents that describe the changed aspect are still prose-updated and `mark_clean`ed individually first.
 
 ## [1.4.0] — 2026-07-24
 
