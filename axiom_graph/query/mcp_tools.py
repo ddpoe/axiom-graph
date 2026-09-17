@@ -308,7 +308,9 @@ def axiom_graph_search(
 
     2. **LIKE-AND fallback** -- substring scan, all tokens must appear
        somewhere in the text.  Same AND semantics as FTS but no ranking.
-       Fires when FTS returns nothing (e.g. query used unsupported syntax).
+       Fires whenever stage 1 produced no *results* -- because it matched
+       nothing, because ``node_type`` / ``scope`` / ``tag`` filtered every
+       match away, or because the query used unsupported syntax.
 
     3. **LIKE-OR fallback** -- substring scan, *any* token matches.  Broad
        and low-confidence; capped at 10 results regardless of ``max_results``.
@@ -341,6 +343,10 @@ def axiom_graph_search(
         node_type: Restrict results to a single node type:
             ``"atomic_process"`` for functions/methods,
             ``"composite_process"`` for modules, or omit to search all types.
+            Any other value raises ``ValueError`` rather than returning an
+            empty result.  This is a structural type, not a source filter --
+            docs are *not* ``node_type="doc"``; use ``scope="docs"`` to
+            restrict results to documentation.
         mode: Search mode: ``"keyword"`` (default) uses FTS5 full-text
             matching. ``"semantic"`` uses embedding-based vector similarity
             search (deprecated as of 2.1.0; slated for removal in 3.0 --

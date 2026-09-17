@@ -13,11 +13,13 @@ Tools:
 
 from __future__ import annotations
 
+import json
 import logging
 
 from axiom_graph.workflows.api import (
     StateMachineDetail,
     workflow_detail as _api_workflow_detail,
+    workflow_detail_to_dict as _api_workflow_detail_to_dict,
     workflow_list as _api_workflow_list,
 )
 
@@ -93,6 +95,7 @@ def axiom_graph_workflow_detail(
     project_root: str,
     workflow_id: str,
     verbose: bool = False,
+    format: str = "text",
 ) -> str:
     """Show envelope detail: ordered steps for a workflow / task, or
     the state tree (with transitions) for an xstate state machine.
@@ -111,10 +114,16 @@ def axiom_graph_workflow_detail(
         verbose: When ``True``, include purpose, inputs, outputs, and
             critical fields on the workflow header and on each step.
             (No additional fields are unlocked for state machines.)
+        format: ``"text"`` (the default) for the human-readable outline,
+            or ``"json"`` for the envelope's full structured form —
+            the same per-workflow shape the export bundle carries.
     """
     detail = _api_workflow_detail(project_root, workflow_id)
     if detail is None:
         return f"ERROR: Workflow '{workflow_id}' not found in the axiom-graph index."
+
+    if format == "json":
+        return json.dumps(_api_workflow_detail_to_dict(detail), indent=2)
 
     if isinstance(detail, StateMachineDetail):
         return _format_state_machine_detail(detail, verbose=verbose)

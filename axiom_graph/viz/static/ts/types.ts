@@ -293,3 +293,52 @@ export interface AppState {
   searchQuery: string;
   searchResultNodes: AxiomNode[] | null;
 }
+
+/** Where a step's delegate target is defined, as carried in a step payload. */
+export interface WorkflowStepTarget {
+  id: string;
+  name: string;
+  location: string;
+  line: number;
+}
+
+/** One row of a workflow / test step payload. */
+export interface WorkflowStep {
+  step_number: string;
+  name: string | null;
+  purpose: string | null;
+  inputs: string | null;
+  outputs: string | null;
+  critical: string | null;
+  calls_function: string | null;
+  is_auto: boolean;
+  cortex_node_id: string | null;
+  /** The resolved delegate target, or null when the step calls nothing. */
+  target: WorkflowStepTarget | null;
+  /** The file the step marker itself is written in. */
+  location: string | null;
+  /** The line of the step marker inside `location`. */
+  line: number | null;
+  /** Present only on expanded payloads. */
+  depth?: number;
+  note?: string | null;
+}
+
+/** Envelope header carried alongside the steps. */
+export interface WorkflowStepsFunc {
+  id: string;
+  name: string;
+  purpose: string | null;
+  inputs: string | null;
+  outputs: string | null;
+  critical: string | null;
+  line_start: number | null;
+  module: string | null;
+  cortex_node_id: string | null;
+}
+
+/** Response shape of /api/workflow/{id}/steps and /api/test/{id}/steps. */
+export interface WorkflowStepsPayload {
+  func: WorkflowStepsFunc;
+  steps: WorkflowStep[];
+}

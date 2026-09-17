@@ -29,6 +29,7 @@ from pathlib import Path
 from axiom_annotations import Step, task
 
 from axiom_graph.models import AxiomNode
+from axiom_graph.ontology import NodeType
 
 from axiom_graph.db._core import (
     _connect,
@@ -968,8 +969,10 @@ def fts_search(
 ) -> tuple[list[AxiomNode], str, int]:
     """Full-text search over level_1 and level_2.
 
-    First tries FTS5 for ranked exact/prefix matching.  If FTS5 returns
-    nothing (or raises due to a non-FTS5 query syntax), falls back to a
+    First tries FTS5 for ranked exact/prefix matching.  If that stage
+    yields no *results* -- because FTS5 matched nothing, because
+    ``node_type`` / ``scope`` / ``tag`` filtered every match away, or
+    because the query used non-FTS5 syntax and raised -- falls back to a
     two-stage LIKE scan:
       Stage 1 — AND: all tokens must appear (precise).
       Stage 2 — OR: any token must appear (broad, last resort, capped at 10).
@@ -980,7 +983,11 @@ def fts_search(
         Maximum number of nodes returned.  ``like_or`` results are further
         capped at ``min(max_results, 10)`` because that mode is low-confidence.
     node_type:
-        If given, only nodes of this type are returned (e.g. ``atomic_process``).
+        If given, only nodes of this type are returned.  Must name a
+        :class:`~axiom_graph.ontology.NodeType` member; any other value
+        raises ``ValueError`` rather than silently matching nothing.  This
+        is a structural type, not a source filter -- to restrict results to
+        documentation use ``scope='docs'``.
     scope:
         Filter results by source: ``'code'`` excludes docjson nodes,
         ``'docs'`` includes only docjson nodes, ``'all'`` or ``None`` includes
@@ -991,7 +998,20 @@ def fts_search(
     (nodes, mode, total_found)
         ``mode`` is one of ``"fts"``, ``"like_and"``, ``"like_or"``.
         ``total_found`` is the count before the ``max_results`` cap was applied.
+
+    Raises
+    ------
+    ValueError
+        If ``node_type`` is not a recognised node type.
     """
+    if node_type is not None and node_type not in NodeType.__members__:
+        raise ValueError(
+            f"Unknown node_type {node_type!r}; valid values are: "
+            f"{', '.join(NodeType.__members__)}.  node_type is a structural "
+            "type, not a source filter -- to search documentation use "
+            "scope='docs'."
+        )
+
     type_filter = " AND node_type = ?" if node_type else ""
     type_params: list[str] = [node_type] if node_type else []
 
@@ -1039,8 +1059,12 @@ def fts_search(
                 ids + type_params,
             ).fetchall()
             nodes = _apply_tag_filter(conn, [_row_to_node(r) for r in rows])
-            total = len(nodes)
-            return nodes[:max_results], "fts", total
+            # Only the post-filter set decides whether this stage answered.
+            # When node_type / scope / tag removes every FTS hit the LIKE
+            # stages below still run: the ladder turns on "no results", not
+            # on "no FTS rows".
+            if nodes:
+                return nodes[:max_results], "fts", len(nodes)
 
         tokens = [t for t in query.split() if t]
         if not tokens:

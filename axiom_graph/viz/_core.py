@@ -183,15 +183,6 @@ def _step_rows_by_ids(conn: sqlite3.Connection, step_ids: list[str]) -> dict[str
     return out
 
 
-def _delegates_target(conn: sqlite3.Connection, step_id: str) -> str | None:
-    """Return the function node that an AutoStep ``delegates_to``, if any."""
-    row = conn.execute(
-        "SELECT to_id FROM edges WHERE from_id = ? AND edge_type = 'delegates_to' LIMIT 1",
-        (step_id,),
-    ).fetchone()
-    return row["to_id"] if row else None
-
-
 def _sort_step_rows(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
     """Sort step rows by numeric step_num_raw from dflow_meta."""
 

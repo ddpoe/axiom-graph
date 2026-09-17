@@ -961,6 +961,7 @@ def axiom_graph_workflow_detail(
     project_root: str,
     workflow_id: str,
     verbose: bool = False,
+    format: str = "text",
 ) -> str:
     """Show ordered steps for a single workflow or task function.
 
@@ -972,8 +973,11 @@ def axiom_graph_workflow_detail(
         workflow_id: Function name or axiom-graph node ID.
         verbose: When ``True``, include purpose, inputs, outputs, and
             critical fields.
+        format: ``"text"`` (the default) for the human-readable outline,
+            or ``"json"`` for the envelope's full structured form -- the
+            same per-workflow shape the export bundle carries.
     """
-    return _impl_workflow_detail(project_root, workflow_id, verbose)
+    return _impl_workflow_detail(project_root, workflow_id, verbose, format=format)
 
 
 # ---------------------------------------------------------------------------

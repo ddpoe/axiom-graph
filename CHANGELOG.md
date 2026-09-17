@@ -6,6 +6,59 @@ All notable changes to axiom-graph are recorded here. Format follows [Keep a Cha
 > `axiom-graph-v*` — `axiom_graph` Python package (this CHANGELOG); `pev-v*` and `hook-spike-v*` —
 > Claude Code plugins under `pev_nexus_agents/` (see `pev_nexus_agents/pev/CHANGELOG.md`).
 
+## [Unreleased]
+
+## [2.4.0] - 2026-09-17
+
+Fresh-install fix release. A new `pip install axiom-graph` resolved mcp 2.x and the MCP server crashed on start; `mcp` is now capped below 2. The release also carries the offline workflow export, AutoSteps that report the intent of the function they call, links through package re-exports, and a search that no longer returns a confident empty result when its filters drop every ranked hit.
+
+### Added
+
+- **Workflow export.** Pick workflows in the dashboard's Workflows view and download a single HTML file that opens with no server, no checkout and no network. It shows each workflow's step outline and lets you click through to the code behind every step, including code the steps delegate to: the file carries every workflow's module, every step marker's file and every delegate target's file, with targets pulled in transitively so no click-through dead-ends. The page has syntax highlighting, light and dark themes, a contents list for multi-workflow exports, folding for child steps and for step intent, and a search across all the carried files. The same bundle is served as JSON at `GET /api/workflow-export?ids=<id>,<id>&format=json`, and `format=html` returns the page. Highlighting uses Pygments, now part of the `viz` extra; without it the code renders as plain text.
+- **`axiom_graph_workflow_detail` takes `format="json"`.** It returns the envelope's full structured form, the same per-workflow shape the export bundle carries. The default `format="text"` output is unchanged.
+
+### Changed
+
+- **AutoSteps now report the intent of the function they call.** An `AutoStep` marker has no purpose, inputs, outputs or `critical` of its own; that intent lives on the `@task` or `@workflow` it delegates to, as `AutoStep`'s own documentation has always said. Those fields are now resolved from the target everywhere steps appear: the dashboard's workflow and test views, the export, and `axiom_graph_workflow_detail` with `verbose=True`. Values written on the marker still win. In 2.3.0 the dashboard inherited only the purpose and MCP inherited nothing, so the same step read as purposeful in the browser and blank through MCP.
+- **The dashboard and the MCP tools can no longer name different delegate targets for one step.** Each surface had its own lookup over an unordered result, one taking the first row and the other the last, so they could disagree and the answer could change between builds. Delegate resolution now lives in one shared accessor with one tiebreak (the lexicographically smallest target).
+- **Viz HTTP API: the step payload's `cortex_location` and `cortex_line_start` are replaced by a nested `target` object** carrying the delegate target's `id`, `name`, `location` and `line`. Each step also carries its own marker's `location` and `line`, which are not the target's. Anything reading the two removed keys from `/api/workflow/{id}/steps` needs updating. `workflows.api.StepRow` gains `location`, `line`, `depth`, `note` and `target`, all with defaults.
+
+### Fixed
+
+- **`axiom_graph_search` returned nothing when `node_type`, `scope` or `tag` filtered out every ranked hit.** The keyword fallback stages decided whether to run by looking at the ranked hits *before* filtering, so a query whose ranked hits were all filtered away returned an empty result and never tried the substring fallbacks its documentation promises. The fallbacks now run on the filtered result.
+- **`axiom_graph_search` accepted any `node_type`.** A value outside the ontology (for example `node_type="doc"` or `node_type="function"`, which are not node types) matched nothing and came back as a clean empty result. It is now rejected with an error that lists the valid node types.
+- **A fresh `pip install axiom-graph` produced an MCP server that crashed on start.** The `mcp` dependency had no upper bound, so an install that didn't go through `poetry.lock` resolved mcp 2.x, which removed the `mcp.server.fastmcp` module the server imports. `python -m axiom_graph.mcp_server` died with `ModuleNotFoundError: No module named 'mcp.server.fastmcp'`, and Claude Code showed the server only as `failed`. `mcp` is now capped at `<2`, so installs resolve 1.x. Environments built from the lock were never affected: it pins 1.27.2. **If you're on 2.3.0, run `pip install 'mcp<2'`** in the environment the server runs from. Moving to the mcp 2.x API is left for a later release.
+- **A test or `AutoStep` that reached a function through a package re-export got no link to it.** axiom-graph links a test to each function it calls (`validates`) and an `AutoStep` to the function it runs (`delegates_to`). Those links are what flag the test or step when the function changes. A caller could import the function through a package `__init__.py` that re-exports it: `from pkg import func`, where `pkg/__init__.py` does `from .impl import func`. That caller got neither link. The test kept only a dependency on the package and never went stale when `func` changed, and the `AutoStep` dangled as `BROKEN_LINK`. Three gaps compounded:
+  - Named re-exports (`from .impl import func`, with or without `as`) recorded nothing; only `*` re-exports did.
+  - The build-time re-export walk served `delegates_to` only, so a `validates` target was dropped even behind a correctly marked star re-export.
+  - Relative imports inside an `__init__.py` resolved one package too high (next entry).
+
+  Both re-export forms are now recorded on the importing module's dependency edge. The walk follows named bindings before star sources and carries aliases across hops, and `validates` targets go through the same walk. One case is deliberately left as before: a call built from an attribute chain the import does not spell (`import pkg; pkg.sub.func()`). It keeps its previous behaviour rather than risk resolving to an unrelated `func` that `pkg` re-exports.
+- **Relative imports inside a package's `__init__.py` resolved against the parent package.** `from .resolve import x` in `pkg/sub/__init__.py` was looked up as `pkg.resolve`. It was dropped if that module did not exist, and attached to the wrong module if it did. A `from .core import *` there wrote no re-export marker, so star resolution never switched on for the most common shim layout. Imports inside a package's own `__init__.py` now resolve against the package itself: at module level, inside functions and under guards.
+- **A test's `validates` link was dropped when the function it called lived in a file the build skipped as unchanged.** The build decided whether a link target existed from the nodes of the files it had just scanned. So adding or editing a test without touching the code it tests lost the link, until some later build happened to rescan both files. Targets are now checked against the live index: this build's nodes, plus the nodes of unchanged files that still exist. `NOT_FOUND` leftovers of a moved function do not count, so a caller links to where the function now lives rather than to its old id.
+
+### Upgrading an existing index
+
+The re-export and `validates` links above appear only for files a build rescans, and a build skips files whose mtime has not changed. So an existing index gains nothing until its files are rescanned. To backfill, clear the stored file mtimes on `.axiom_graph/graph.db` with any SQLite client:
+
+```sql
+UPDATE nodes SET file_mtime = NULL;
+```
+
+Then run `axiom-graph build`. This is non-destructive: baselines, verification records and history are kept. Do not use `axiom-graph init` for this; it deletes the index.
+
+An index from before this release has no re-export markers. A build over one that still finds unresolved links warns and names this recipe. That happens on roughly the first incremental build after upgrading. After that, markers written by earlier builds keep the warning quiet. Treat this note as the reference.
+
+### Coming in 3.0.0
+
+The next major release changes three things you will have to act on. 2.4.0 changes none of them.
+
+- **Doc IDs change form.** Document and section IDs move to per-root namespacing, and running `axiom-graph doc-ids execute` becomes a required upgrade step. `axiom-graph doc-ids preview` already shows what every ID in your project will become and whether any two would collide; it is read-only and safe to run now. Keep leaving `execute` alone on 2.x.
+- **`.docjson` becomes the default DocJSON extension.** New documents are written as `.docjson`. Existing `.json` documents are still read.
+- **Semantic search is removed**, as ADR-020 announced in 2.1.0: `mode="semantic"` on `axiom_graph_search`, the `[semantic]` and `[semantic-torch]` extras, and the viz and CLI toggles. Keyword search, the default, stays.
+
+The first rebuild may show tests as `LINKED_STALE` whose target changed while the link was missing. That is pre-existing debt becoming visible, not a regression.
+
 ## [2.3.0] - 2026-08-16
 
 Workflow-graph correctness release. Delegation chains the Python scanner used to drop — method-to-method calls on `self`/`cls`, receivers imported inside a function body, calls routed through a re-export shim — now resolve; superseded delegate edges are retired instead of accumulating; a delegate target that names nothing is reported rather than written as a plausible-looking id; and `Step` / `AutoStep` markers declared inside a loop or `try` body stop being silently discarded. Alongside that: preview tooling for a future doc-id namespace migration (which changes no ids in this release), rename-engine repairs that were losing section verification, a build that no longer spends most of its time re-indexing FTS, an mtime fast-pass that recovers instead of dying permanently, composing reverifies, and six viz fixes.

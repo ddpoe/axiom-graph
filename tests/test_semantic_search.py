@@ -611,6 +611,60 @@ class TestSearchParameters:
         assert "test::mod::func" in ids
         assert "test::docs.guide::staleness" in ids
 
+    def test_filtered_out_fts_hits_fall_through_to_like(self, db_path):
+        """A scope filter that removes every FTS hit still runs the LIKE fallback."""
+        # Only the code node carries "widget" as a whole word, so it is the sole
+        # FTS match -- and scope='docs' filters it out.  The doc section says
+        # "Widgets", which FTS tokenises separately but LIKE still matches.
+        node = _make_node("test::mod::func", "widget parsing")
+        with db._connect(db_path) as conn:
+            db.upsert_node_conn(conn, node, discovery_only=False)
+            db.upsert_doc(
+                conn,
+                {
+                    "id": "test::docs.guide",
+                    "title": "Guide",
+                    "tags": None,
+                    "file_path": "docs/guide.json",
+                    "desc_hash": "abc",
+                    "updated_at": "2026-01-01T00:00:00",
+                },
+            )
+            seed_section_row(
+                conn,
+                {
+                    "id": "test::docs.guide::overview",
+                    "doc_id": "test::docs.guide",
+                    "heading": "Widgets parsing overview",
+                    "level": 2,
+                    "tags": None,
+                    "content": "notes on widgets",
+                    "desc_hash": "def",
+                    "parent_id": None,
+                    "depth": 0,
+                    "position": 0,
+                    "updated_at": "2026-01-01T00:00:00",
+                },
+            )
+
+        db.index_doc_sections_fts(db_path)
+
+        nodes, mode, total = db.fts_search(db_path, "widget", scope="docs")
+
+        assert [n.id for n in nodes] == ["test::docs.guide::overview"]
+        assert mode == "like_and"
+        assert total == 1
+
+    def test_unknown_node_type_is_rejected(self, db_path):
+        """An unrecognised node_type raises instead of silently matching nothing."""
+        with pytest.raises(ValueError) as excinfo:
+            db.fts_search(db_path, "anything", node_type="doc")
+
+        message = str(excinfo.value)
+        assert "doc" in message
+        assert "atomic_process" in message
+        assert "composite_process" in message
+
 
 # ---------------------------------------------------------------------------
 # Deprecation (ADR-020)

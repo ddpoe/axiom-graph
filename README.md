@@ -1,4 +1,4 @@
-<!-- generated from axiom_graph::docs.consumer.readme @ cd1f13588e96; do not edit -->
+<!-- generated from axiom_graph::docs.consumer.readme @ 03bdbb958b33; do not edit -->
 
 # axiom-graph
 
@@ -84,6 +84,8 @@ The MCP server is how AI agents interact with axiom-graph. It uses stdio transpo
 ```
 
 **Any other client** — the entry point is `axiom-graph-mcp` (an installed console script) or `python -m axiom_graph.mcp_server`; both speak JSON-RPC over stdio with logs on stderr. VS Code (Copilot / Continue) configuration and logging options (`AXIOM_GRAPH_LOG_LEVEL`, `AXIOM_GRAPH_LOG_FILE`) are covered in the [documentation](https://axiom-graph.readthedocs.io).
+
+**If your client shows the server as `failed`**, run the same command by hand (`/path/to/your/venv/bin/python -m axiom_graph.mcp_server`) to see the error. `ModuleNotFoundError: No module named 'mcp.server.fastmcp'` means the environment has mcp 2.x: upgrade to axiom-graph 2.4.0 or later, or run `pip install 'mcp<2'`.
 
 ## Links
 

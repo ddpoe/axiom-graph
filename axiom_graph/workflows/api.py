@@ -19,7 +19,7 @@ Public surface:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -29,13 +29,22 @@ from axiom_graph.index.paths import db_path as _db_path
 from axiom_graph.scanners.node_hashing import parse_node_title
 
 __all__ = [
+    "WorkflowGraph",
+    "build_workflow_graph",
+    "load_workflow_graph",
+    "DelegateTarget",
+    "step_delegate_target",
     "WorkflowRow",
     "workflow_list",
     "StepRow",
     "WorkflowDetail",
     "workflow_detail",
+    "workflow_detail_to_dict",
     "ExpandedStep",
     "workflow_expanded_steps",
+    "WorkflowBundle",
+    "workflow_export_bundle",
+    "workflow_bundle_to_dict",
     "Transition",
     "StateRow",
     "StateMachineDetail",
@@ -47,28 +56,196 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
-def _load_graph(project_root: str | Path):
-    """Return (nodes_by_id, composes_out, delegates_out, annotates_rev).
+STEP_SUBTYPES = frozenset({"step", "autostep"})
 
-    Single-pass loader used by ``workflow_expanded_steps`` and
-    ``workflow_detail``.  All four structures come from a single DB open.
+
+@dataclass(frozen=True)
+class WorkflowGraph:
+    """An in-memory snapshot of the index structures the workflow API walks.
+
+    Produced once by :func:`load_workflow_graph` and handed to every
+    accessor that needs it, so a caller expanding many envelopes pays for
+    one read of the index rather than one read per envelope.
+
+    Attributes:
+        nodes_by_id: Every indexed node, keyed by node ID.
+        composes_out: Envelope / state node ID to the list of node IDs it
+            composes, in edge-scan order.
+        delegates_out: Step or AutoStep node ID to the target node IDs it
+            delegates to, in edge-scan order.  Restricted to step sources
+            by construction, so a state machine's transition fan-out is
+            deliberately absent — no consumer reads delegation for a
+            state, and the machine path builds its transitions from a
+            separate scan.  Read it through
+            :func:`step_delegate_target`, which is where the choice
+            between several recorded targets is made.
+        annotates_rev: Annotated node ID to the list of envelope node IDs
+            that annotate it.
     """
-    ag_db = _db_path(str(project_root))
-    if not ag_db.exists():
-        return {}, {}, {}, {}
-    nodes = {n.id: n for n in db.all_nodes(ag_db)}
-    edges = db.all_edges(ag_db)
+
+    nodes_by_id: dict = field(default_factory=dict)
+    composes_out: dict[str, list[str]] = field(default_factory=dict)
+    delegates_out: dict[str, list[str]] = field(default_factory=dict)
+    annotates_rev: dict[str, list[str]] = field(default_factory=dict)
+
+    def __bool__(self) -> bool:
+        """True when the graph holds at least one node."""
+        return bool(self.nodes_by_id)
+
+
+def build_workflow_graph(nodes_by_id: dict, edges) -> WorkflowGraph:
+    """Fold nodes and edges into the structures the workflow API walks.
+
+    Args:
+        nodes_by_id: Every node, keyed by node ID.
+        edges: Every edge, in any order.
+
+    Returns:
+        The populated :class:`WorkflowGraph`.  ``delegates_to`` edges
+        whose source is not a ``step`` / ``autostep`` node are dropped, so
+        the delegate map describes step delegation only.
+    """
     composes_out: dict[str, list[str]] = {}
-    delegates_out: dict[str, str] = {}
+    delegates_out: dict[str, list[str]] = {}
     annotates_rev: dict[str, list[str]] = {}
     for e in edges:
         if e.edge_type == "composes":
             composes_out.setdefault(e.from_id, []).append(e.to_id)
         elif e.edge_type == "delegates_to":
-            delegates_out[e.from_id] = e.to_id
+            source = nodes_by_id.get(e.from_id)
+            if source is None or source.subtype not in STEP_SUBTYPES:
+                continue
+            delegates_out.setdefault(e.from_id, []).append(e.to_id)
         elif e.edge_type == "annotates":
             annotates_rev.setdefault(e.to_id, []).append(e.from_id)
-    return nodes, composes_out, delegates_out, annotates_rev
+    return WorkflowGraph(
+        nodes_by_id=nodes_by_id,
+        composes_out=composes_out,
+        delegates_out=delegates_out,
+        annotates_rev=annotates_rev,
+    )
+
+
+def load_workflow_graph(project_root: str | Path) -> WorkflowGraph:
+    """Read the index once into a :class:`WorkflowGraph`.
+
+    Args:
+        project_root: Path to the indexed project.
+
+    Returns:
+        A populated :class:`WorkflowGraph`, or an empty one when the
+        axiom-graph DB is absent.
+    """
+    ag_db = _db_path(str(project_root))
+    if not ag_db.exists():
+        return WorkflowGraph()
+    nodes = {n.id: n for n in db.all_nodes(ag_db)}
+    return build_workflow_graph(nodes, db.all_edges(ag_db))
+
+
+def _load_graph(project_root: str | Path) -> WorkflowGraph:
+    """Internal alias for :func:`load_workflow_graph`."""
+    return load_workflow_graph(project_root)
+
+
+@dataclass(frozen=True)
+class DelegateTarget:
+    """What a step delegates to, and the intent that target declares.
+
+    Attributes:
+        id: Node ID of the function the step calls.
+        name: Short function name, or the node ID's trailing segment when
+            the target node itself is absent from the index.
+        location: Path to the target's source file, relative to the
+            project root and forward-slash separated.  Empty string when
+            the target node is not in the index.
+        line: 1-based line number of the target's definition, or ``0``
+            when unknown.
+        purpose: ``purpose`` declared on the target's ``@workflow`` /
+            ``@task`` envelope.  Empty when the target is undecorated.
+        inputs: ``inputs`` declared on the target's envelope, else empty.
+        outputs: ``outputs`` declared on the target's envelope, else
+            empty.
+        critical: ``critical`` declared on the target's envelope, else
+            empty.
+    """
+
+    id: str
+    name: str
+    location: str
+    line: int
+    purpose: str = ""
+    inputs: str = ""
+    outputs: str = ""
+    critical: str = ""
+
+
+def _envelope_id_for(graph: WorkflowGraph, annotated_id: str) -> str | None:
+    """Return the envelope annotating *annotated_id*, or ``None``.
+
+    Deterministic when several envelopes somehow annotate one node: the
+    lexicographically smallest envelope ID wins, matching the delegate
+    tiebreak so every surface names the same envelope.
+    """
+    envelopes = graph.annotates_rev.get(annotated_id)
+    if not envelopes:
+        return None
+    return min(envelopes)
+
+
+def step_delegate_target(step_node_id: str, graph: WorkflowGraph) -> DelegateTarget | None:
+    """Resolve what a step delegates to, in one place for every surface.
+
+    This is the only resolution path in the project: the viz dashboard,
+    the MCP tools and the export bundle all read a step's callee through
+    this function, so they cannot name different targets for the same
+    step.
+
+    Args:
+        step_node_id: Node ID of the ``step`` / ``autostep`` marker.
+        graph: An already-loaded :class:`WorkflowGraph`.  The accessor
+            never opens the index itself, so a caller resolving many
+            steps pays a single read.
+
+    Returns:
+        A :class:`DelegateTarget`, or ``None`` when the step calls
+        nothing.  A step whose target is present but undecorated resolves
+        to a target with empty intent fields rather than ``None``, and a
+        step whose target is missing from the index resolves to a target
+        with an empty ``location`` — neither raises.
+    """
+    recorded = graph.delegates_out.get(step_node_id)
+    if not recorded:
+        return None
+    # One tiebreak, expressed once: the lexicographically smallest target
+    # wins.  A step is expected to hold exactly one target; when the index
+    # holds several, every surface still names the same one, and the answer
+    # does not reshuffle when the index is rebuilt in a different order.
+    target_id = min(recorded)
+
+    target_node = graph.nodes_by_id.get(target_id)
+    if target_node is None:
+        return DelegateTarget(
+            id=target_id,
+            name=target_id.rsplit("::", 1)[-1],
+            location="",
+            line=0,
+        )
+
+    envelope_id = _envelope_id_for(graph, target_id)
+    envelope = graph.nodes_by_id.get(envelope_id) if envelope_id else None
+    meta = envelope.dflow_meta if envelope is not None and isinstance(envelope.dflow_meta, dict) else {}
+
+    return DelegateTarget(
+        id=target_id,
+        name=parse_node_title(target_node).last,
+        location=(target_node.location or "").replace("\\", "/"),
+        line=_func_line_from_level_3(target_node.level_3_location),
+        purpose=str(meta.get("purpose") or ""),
+        inputs=str(meta.get("inputs") or ""),
+        outputs=str(meta.get("outputs") or ""),
+        critical=str(meta.get("critical") or ""),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +319,10 @@ def workflow_list(
         absent.
     """
     project_root_str = str(project_root)
-    nodes_by_id, composes_out, _delegates, annotates_rev = _load_graph(project_root_str)
+    graph = load_workflow_graph(project_root_str)
+    nodes_by_id = graph.nodes_by_id
+    composes_out = graph.composes_out
+    annotates_rev = graph.annotates_rev
     if not nodes_by_id:
         return []
 
@@ -277,6 +457,8 @@ def _step_num_raw(node) -> str:
 def workflow_expanded_steps(
     project_root: str | Path,
     workflow_node_id: str,
+    *,
+    graph: WorkflowGraph | None = None,
 ) -> list[ExpandedStep]:
     """Expand a workflow's step tree transitively, renumbering child steps.
 
@@ -292,15 +474,23 @@ def workflow_expanded_steps(
         workflow_node_id: Node ID of the envelope (``{…}@workflow``) OR of
             the annotated function.  Both are accepted — the function-ID
             form is resolved to its envelope via inbound ``annotates``.
+        graph: An already-loaded :class:`WorkflowGraph` to walk.  Pass one
+            when expanding several envelopes so the index is read once
+            rather than once per envelope; omit it and the index is read
+            for this call alone.
 
     Returns:
         Ordered list of :class:`ExpandedStep`.  Empty when the envelope is
         unknown or has no step children.  Never raises.
     """
     try:
-        nodes_by_id, composes_out, delegates_out, annotates_rev = _load_graph(project_root)
+        if graph is None:
+            graph = load_workflow_graph(project_root)
     except Exception:
         return []
+
+    nodes_by_id = graph.nodes_by_id
+    composes_out = graph.composes_out
 
     if not nodes_by_id:
         return []
@@ -311,10 +501,10 @@ def workflow_expanded_steps(
         return []
     if envelope.node_type != "composite_process" or envelope.subtype not in ("workflow", "task"):
         # Try to resolve as the annotated function.
-        envs = annotates_rev.get(workflow_node_id, [])
-        if not envs:
+        env_id = _envelope_id_for(graph, workflow_node_id)
+        if env_id is None:
             return []
-        envelope = nodes_by_id.get(envs[0])
+        envelope = nodes_by_id.get(env_id)
         if envelope is None:
             return []
 
@@ -332,7 +522,8 @@ def workflow_expanded_steps(
             rendered = ".".join(str(p) for p in rendered_parts)
             # Emit the outer step entry.
             if step.subtype == "autostep":
-                target_id = delegates_out.get(step.id)
+                delegated = step_delegate_target(step.id, graph)
+                target_id = delegated.id if delegated else None
                 note: str | None = None
                 if target_id is None:
                     # AutoStep without a delegates_to target (no call followed).
@@ -344,8 +535,8 @@ def workflow_expanded_steps(
                         )
                     )
                     continue
-                inner_envs = annotates_rev.get(target_id, [])
-                if not inner_envs:
+                inner_env_id = _envelope_id_for(graph, target_id)
+                if inner_env_id is None:
                     out.append(
                         ExpandedStep(
                             rendered_step_num=rendered,
@@ -355,7 +546,6 @@ def workflow_expanded_steps(
                         )
                     )
                     continue
-                inner_env_id = inner_envs[0]
                 if inner_env_id in visited:
                     out.append(
                         ExpandedStep(
@@ -425,6 +615,24 @@ class StepRow:
             calls nothing.
         delegates_to_node_id: Axiom-graph node ID for the callee, or
             ``None`` when the step calls nothing.
+        location: Path to the file the step *marker itself* is written
+            in, relative to the project root and forward-slash separated.
+            Under transitive expansion this is frequently a different
+            module from the envelope that was requested, because an
+            AutoStep's delegate target declares its own steps.
+        line: 1-based line number of the step marker inside
+            ``location``.  ``0`` when unknown.  Not interchangeable with
+            ``target.line``.
+        depth: Outline nesting level, read off ``step_num`` — ``0`` for
+            ``"3"``, ``1`` for ``"3.1"``, ``2`` for ``"3.1.1"``.  This is a
+            property of the number the author wrote, not of how the step
+            was reached: a minor step an envelope declares in its own file
+            nests exactly as deep as one pulled in through an AutoStep.
+        note: Why expansion stopped at this step, when it did:
+            ``"target not annotated"`` or ``"cycle detected at {id}"``.
+            ``None`` for an ordinary row.
+        target: The resolved delegate target and the intent it declares,
+            or ``None`` when the step calls nothing.
     """
 
     step_num: str
@@ -436,6 +644,11 @@ class StepRow:
     is_auto: bool
     delegates_to_name: str | None
     delegates_to_node_id: str | None
+    location: str = ""
+    line: int = 0
+    depth: int = 0
+    note: str | None = None
+    target: DelegateTarget | None = None
 
 
 @dataclass(frozen=True)
@@ -657,9 +870,64 @@ def _build_state_machine_detail(
     )
 
 
+def _step_row(expanded: ExpandedStep, step_node, graph: WorkflowGraph) -> StepRow:
+    """Build one :class:`StepRow` from an expander entry and its node.
+
+    The step's own file and line come from the marker node; the delegate
+    target and the intent it declares come from
+    :func:`step_delegate_target`, which is the project's single
+    resolution path.  An ``AutoStep`` carries no intent of its own — the
+    marker has nowhere to put it — so the target's ``purpose`` /
+    ``inputs`` / ``outputs`` / ``critical`` fill any field the step left
+    blank.  An authored value always wins over an inherited one.
+
+    Args:
+        expanded: The expander entry naming the step and its position.
+        step_node: The indexed ``step`` / ``autostep`` node.
+        graph: An already-loaded :class:`WorkflowGraph`.
+
+    Returns:
+        The populated :class:`StepRow`.
+    """
+    s_meta = step_node.dflow_meta if isinstance(step_node.dflow_meta, dict) else {}
+    is_auto = step_node.subtype == "autostep"
+    target = step_delegate_target(step_node.id, graph)
+
+    purpose = str(s_meta.get("purpose") or "")
+    inputs = str(s_meta.get("inputs") or "")
+    outputs = str(s_meta.get("outputs") or "")
+    critical = str(s_meta.get("critical") or "")
+    name = str(s_meta.get("name") or step_node.level_0 or "")
+    if is_auto and target is not None:
+        purpose = purpose or target.purpose
+        inputs = inputs or target.inputs
+        outputs = outputs or target.outputs
+        critical = critical or target.critical
+        name = name or target.name
+
+    return StepRow(
+        step_num=expanded.rendered_step_num,
+        name=name,
+        purpose=purpose,
+        inputs=inputs,
+        outputs=outputs,
+        critical=critical,
+        is_auto=is_auto,
+        delegates_to_name=target.id.rsplit("::", 1)[-1] if target else None,
+        delegates_to_node_id=target.id if target else None,
+        location=(step_node.location or "").replace("\\", "/"),
+        line=_func_line_from_level_3(step_node.level_3_location),
+        depth=expanded.rendered_step_num.count("."),
+        note=expanded.note,
+        target=target,
+    )
+
+
 def workflow_detail(
     project_root: str | Path,
     workflow_id: str | int,
+    *,
+    graph: WorkflowGraph | None = None,
 ) -> "WorkflowDetail | StateMachineDetail | None":
     """Fetch one axiom-graph envelope as a structured detail dataclass.
 
@@ -669,6 +937,14 @@ def workflow_detail(
     names (the legacy integer-ID lookup is gone; the axiom-graph
     index has no counterpart).
 
+    Args:
+        project_root: Path to the indexed project.
+        workflow_id: Envelope node ID, annotated-function node ID, or
+            plain function name.
+        graph: An already-loaded :class:`WorkflowGraph`.  Pass one when
+            describing several envelopes so the index is read once rather
+            than once per envelope.
+
     Returns:
         - :class:`WorkflowDetail` for ``workflow``/``task`` envelopes.
         - :class:`StateMachineDetail` for ``state_machine`` envelopes
@@ -676,7 +952,11 @@ def workflow_detail(
         - ``None`` when no matching envelope exists.
     """
     project_root_str = str(project_root)
-    nodes_by_id, composes_out, delegates_out, annotates_rev = _load_graph(project_root_str)
+    if graph is None:
+        graph = load_workflow_graph(project_root_str)
+    nodes_by_id = graph.nodes_by_id
+    composes_out = graph.composes_out
+    annotates_rev = graph.annotates_rev
     if not nodes_by_id:
         return None
 
@@ -690,8 +970,8 @@ def workflow_detail(
         pass
     else:
         # Try: key is the annotated function ID.
-        envs = annotates_rev.get(lookup_key, [])
-        envelope = nodes_by_id.get(envs[0]) if envs else None
+        env_id = _envelope_id_for(graph, lookup_key)
+        envelope = nodes_by_id.get(env_id) if env_id else None
         if envelope is None:
             # Fall back to name resolution.
             envelope = _resolve_envelope_by_name(nodes_by_id, lookup_key)
@@ -720,32 +1000,14 @@ def workflow_detail(
     file_path = file_path.replace("\\", "/")
     line = _func_line_from_level_3(func_node.level_3_location if func_node else envelope.level_3_location)
 
-    # Build expanded step rows.
-    exp = workflow_expanded_steps(project_root_str, envelope.id)
+    # Build expanded step rows, reusing the graph this call already loaded.
+    exp = workflow_expanded_steps(project_root_str, envelope.id, graph=graph)
     step_rows: list[StepRow] = []
     for e in exp:
         step_node = nodes_by_id.get(e.step_node_id)
         if step_node is None:
             continue
-        s_meta = step_node.dflow_meta if isinstance(step_node.dflow_meta, dict) else {}
-        is_auto = step_node.subtype == "autostep"
-        delegated_id = delegates_out.get(step_node.id)
-        delegated_name: str | None = None
-        if delegated_id:
-            delegated_name = delegated_id.rsplit("::", 1)[-1]
-        step_rows.append(
-            StepRow(
-                step_num=e.rendered_step_num,
-                name=str(s_meta.get("name") or step_node.level_0 or ""),
-                purpose=str(s_meta.get("purpose") or ""),
-                inputs=str(s_meta.get("inputs") or ""),
-                outputs=str(s_meta.get("outputs") or ""),
-                critical=str(s_meta.get("critical") or ""),
-                is_auto=is_auto,
-                delegates_to_name=delegated_name,
-                delegates_to_node_id=delegated_id,
-            )
-        )
+        step_rows.append(_step_row(e, step_node, graph))
 
     # Derive the displayed function name.
     func_display_name = parse_node_title(func_node).last if func_node else parse_node_title(envelope).last
@@ -763,3 +1025,139 @@ def workflow_detail(
         steps=step_rows,
         coverage_targets=[],
     )
+
+
+# ---------------------------------------------------------------------------
+# Serialization + export bundle
+# ---------------------------------------------------------------------------
+
+
+def workflow_detail_to_dict(detail: "WorkflowDetail | StateMachineDetail") -> dict:
+    """Serialize one envelope's structured detail to JSON-ready data.
+
+    This is the only serializer for a workflow's structured form.  The
+    export bundle's per-workflow entries and the MCP tool's JSON output
+    both come through here, so the two surfaces cannot describe the same
+    workflow differently.  Nested rows (:class:`StepRow`,
+    :class:`DelegateTarget`, :class:`StateRow`, :class:`Transition`) are
+    emitted whole — a projection down to a narrower key set would be a
+    second serializer.
+
+    Args:
+        detail: The dataclass returned by :func:`workflow_detail`.
+
+    Returns:
+        A nested ``dict`` / ``list`` structure safe to hand to
+        ``json.dumps``.
+    """
+    return asdict(detail)
+
+
+@dataclass(frozen=True)
+class WorkflowBundle:
+    """A self-contained description of a set of workflows and their code.
+
+    Attributes:
+        workflows: One detail entry per selected envelope, in the order
+            they were requested.
+        sources: Project-relative file path to that file's full text.
+            Deduplicated — a file shared by several workflows appears
+            once.
+    """
+
+    workflows: list = field(default_factory=list)
+    sources: dict[str, str] = field(default_factory=dict)
+
+
+def _bundle_source_paths(details: list) -> list[str]:
+    """Every project-relative file a set of workflow details refers to.
+
+    The union covers three kinds of file, because a reader clicking
+    through the bundle can reach all three: the file each workflow is
+    defined in, the file each step marker is written in (often another
+    module, once expansion walks into a delegate target), and the file
+    each delegate target is defined in.  Target files are included even
+    when the target's own workflow was never selected, or the
+    click-through dead-ends.
+
+    Args:
+        details: The workflow detail entries going into a bundle.
+
+    Returns:
+        Sorted, deduplicated project-relative paths.
+    """
+    paths: set[str] = set()
+    for detail in details:
+        if getattr(detail, "file", ""):
+            paths.add(detail.file)
+        for step in getattr(detail, "steps", []):
+            if step.location:
+                paths.add(step.location)
+            if step.target is not None and step.target.location:
+                paths.add(step.target.location)
+    return sorted(paths)
+
+
+def workflow_export_bundle(
+    project_root: str | Path,
+    workflow_ids: list[str],
+) -> WorkflowBundle:
+    """Assemble the selected workflows and every source file they reach.
+
+    The index is read once and reused for every selected envelope, so
+    exporting forty workflows costs one graph read plus the forty
+    envelopes rather than forty graph reads.
+
+    Args:
+        project_root: Path to the indexed project.
+        workflow_ids: Envelope node IDs, annotated-function node IDs, or
+            plain function names.  Unknown IDs are skipped rather than
+            raising; repeated IDs are collapsed.
+
+    Returns:
+        A :class:`WorkflowBundle`.  Files that cannot be read are omitted
+        from ``sources`` rather than failing the whole export.
+    """
+    root = Path(str(project_root))
+    graph = load_workflow_graph(root)
+
+    details: list = []
+    seen: set = set()
+    for workflow_id in workflow_ids:
+        detail = workflow_detail(root, workflow_id, graph=graph)
+        if detail is None:
+            continue
+        identity = (detail.name, detail.file, detail.line)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        details.append(detail)
+
+    sources: dict[str, str] = {}
+    for rel_path in _bundle_source_paths(details):
+        candidate = root / rel_path
+        try:
+            sources[rel_path] = candidate.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+    return WorkflowBundle(workflows=details, sources=sources)
+
+
+def workflow_bundle_to_dict(bundle: WorkflowBundle) -> dict:
+    """Serialize a :class:`WorkflowBundle` to JSON-ready data.
+
+    Per-workflow entries go through :func:`workflow_detail_to_dict`, the
+    same serializer the MCP tool's JSON mode uses, so a workflow reads
+    identically in both places.
+
+    Args:
+        bundle: The bundle to serialize.
+
+    Returns:
+        ``{"workflows": [...], "sources": {path: text}}``.
+    """
+    return {
+        "workflows": [workflow_detail_to_dict(detail) for detail in bundle.workflows],
+        "sources": dict(bundle.sources),
+    }

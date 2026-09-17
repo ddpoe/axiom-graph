@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from axiom_graph.index import builder
 from axiom_graph.viz import server
+from axiom_graph.workflows.api import workflow_detail
 
 
 def _write(path: Path, content: str) -> Path:
@@ -140,3 +141,26 @@ def test_unexpanded_steps_also_carry_location(tmp_path):
 
     steps = resp.json()["steps"]
     assert [s["location"] for s in steps] == ["pipe.py", "pipe.py", "pipe.py"]
+
+
+@workflow(
+    purpose="Every surface that builds a step payload names the same delegate target and inherits the same intent"
+)
+def test_all_step_surfaces_report_one_answer_for_a_delegating_step(tmp_path):
+    envelope_id = _build_delegating_workflow(tmp_path)
+    client = _setup_server(tmp_path)
+
+    detail = workflow_detail(tmp_path, envelope_id)
+    structured = next(row for row in detail.steps if row.step_num == "2")
+    expanded = {
+        s["step_number"]: s
+        for s in client.get(f"/api/workflow/{envelope_id}/steps", params={"expand": "true"}).json()["steps"]
+    }["2"]
+    flat = {s["step_number"]: s for s in client.get(f"/api/workflow/{envelope_id}/steps").json()["steps"]}["2"]
+
+    assert structured.target is not None
+    assert structured.target.id == expanded["target"]["id"] == flat["target"]["id"]
+    for field_name in ("purpose", "inputs", "outputs", "critical"):
+        inherited = getattr(structured, field_name)
+        assert inherited == (expanded[field_name] or "") == (flat[field_name] or "")
+    assert structured.purpose == "Assemble the protein table"

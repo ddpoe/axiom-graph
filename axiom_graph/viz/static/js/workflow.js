@@ -2,6 +2,7 @@
 // workflow.ts -- Workflow outline view: filter panel + two-panel step explorer
 // =============================================================================
 import { esc, apiFetch, refreshSvg, collapseAllSvg } from './view-utils.js';
+import { openExportPicker } from './export-modal.js';
 import { ensureMonaco } from './view-utils.js';
 // Callbacks to avoid circular imports
 let selectNodeFn = () => { };
@@ -194,6 +195,8 @@ function render() {
           <span>Workflows</span>
           <div class="doc-sidebar-actions">
             <button class="doc-action-btn" id="wf-collapse-btn" title="Expand All" style="transition:transform .2s">${collapseAllSvg}</button>
+            <button class="doc-action-btn" id="wf-export-btn"
+                    title="Export selected workflows as a standalone HTML file">&#8681;</button>
             <button class="doc-action-btn" id="wf-refresh-btn"
                     title="Refresh: run axiom-graph build to discover new workflows">
               ${refreshSvg}
@@ -226,6 +229,9 @@ function render() {
     const collapseBtn = container.querySelector('#wf-collapse-btn');
     if (collapseBtn)
         collapseBtn.addEventListener('click', () => _toggleCollapseAll());
+    const exportBtn = container.querySelector('#wf-export-btn');
+    if (exportBtn)
+        exportBtn.addEventListener('click', () => openExportPicker(rawItems().map(w => ({ id: String(w.id), name: String(w.name), module: String(w.module || '') }))));
 }
 function roleToggleHtml() {
     return `
@@ -471,11 +477,11 @@ function renderDetail(stepsCol, data, wf) {
     else {
         html += '<ol class="wf-steps">';
         for (const step of steps) {
-            // Expanded payloads carry an explicit depth; fall back to the flat
-            // major/minor split when the response predates it.
+            // Expanded payloads carry an explicit depth; derive the same value
+            // from the dotted number when the response predates the field.
             const depth = typeof step.depth === 'number'
                 ? step.depth
-                : (step.step_number.toString().includes('.') ? 1 : 0);
+                : step.step_number.toString().split('.').length - 1;
             html += `<li class="wf-step${depth > 0 ? ' wf-step-minor' : ''}" style="--wf-depth:${depth}" data-line="${step.line || ''}" data-path="${esc(step.location || '')}">`;
             html += `<div class="wf-step-num">${esc(step.step_number)}</div><div class="wf-step-body">`;
             html += `<div class="wf-step-name">${esc(step.name)}${step.is_auto ? '<span class="wf-badge wf-badge-auto">auto</span>' : ''}</div>`;
@@ -495,7 +501,7 @@ function renderDetail(stepsCol, data, wf) {
             if (step.cortex_node_id) {
                 html += `<div class="wf-step-actions">
           <button class="wf-step-link" data-node-id="${esc(step.cortex_node_id)}">&#x229e; Graph</button>
-          <button class="wf-step-link wf-step-source-link" data-path="${esc(step.cortex_location || '')}" data-line="${step.cortex_line_start || 1}">&lt;&gt; Source</button>
+          <button class="wf-step-link wf-step-source-link" data-path="${esc(step.target?.location || '')}" data-line="${step.target?.line || 1}">&lt;&gt; Source</button>
         </div>`;
             }
             else if (step.calls_function) {

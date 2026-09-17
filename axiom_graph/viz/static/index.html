@@ -202,6 +202,7 @@
         </div>
       </div>
 
+
       <section class="filter-section" id="staleness-section">
         <h4 class="filter-label">Staleness</h4>
         <div id="staleness-summary"></div>
@@ -261,6 +262,23 @@
         <div id="sidebar-stats"></div>
       </section>
     </aside>
+
+      <!-- Workflow export picker. Lives outside #sidebar: the workflows
+           view hides that whole aside, which would take the modal with it. -->
+      <div id="wf-export-overlay" class="since-modal-overlay hidden">
+        <div class="since-modal">
+          <div class="since-modal-top-bar">
+            <input type="text" id="wf-export-search" class="since-modal-search" placeholder="Search workflows..." spellcheck="false">
+            <button id="wf-export-select-all" class="since-modal-apply-range-btn">Select all</button>
+          </div>
+          <div class="since-modal-range-bar">
+            <span id="wf-export-count"></span>
+            <button id="wf-export-run" class="since-modal-apply-range-btn">Export HTML</button>
+          </div>
+          <div id="wf-export-list" class="since-modal-commit-list"></div>
+          <div class="since-modal-hint">Check workflows or whole modules, then export. Esc to close.</div>
+        </div>
+      </div>
 
     <main id="main">
       <div id="graph-view">

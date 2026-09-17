@@ -211,7 +211,7 @@ def scan_module(
         step_num=3,
         name="Module-level import analysis and name_map",
         purpose="Walk the imports that are direct children of the module to build name_map (bound name → module node ID) and emit module-level depends_on edges",
-        outputs="name_map dict, external_pkg_ids set, depends_on edges appended — an edge to a module this one star-imports carries a reexport marker for the build-time resolver",
+        outputs="name_map dict, external_pkg_ids set, depends_on edges appended — an edge to a module this one re-exports from carries a marker (star, and/or bound name → original name) for the build-time resolver",
     )
     # -----------------------------------------------------------------------
     # Import analysis — statements that are direct children of the module
@@ -223,7 +223,14 @@ def scan_module(
     #   _resolve_import returns None for anything outside the project.
     # Both module-level depends_on edges and name_map are built in one pass
     # so name_map is available when _collect_functions emits function-level edges.
-    current_package_parts = dotpath.split(".")[:-1]  # e.g. ["pm"] for pm/cli.py
+    # Inside a package's own __init__.py the package IS this module, so a
+    # relative import anchors on it rather than on its parent — which is how
+    # Python resolves it.  A project-root __init__.py (dotpath "__init__")
+    # has no package above it and anchors on the root.
+    if basename == "__init__.py":
+        current_package_parts = [] if dotpath == "__init__" else dotpath.split(".")
+    else:
+        current_package_parts = dotpath.split(".")[:-1]  # e.g. ["pm"] for pm/cli.py
     # name_map: bound_name -> (module_node_id, original_name_or_None)
     # original_name is set for "from X import Y" bindings so we can resolve
     # Y to a function-level node ID. It is None for whole-module bindings —
@@ -238,13 +245,17 @@ def scan_module(
         package_parts=current_package_parts,
     )
     name_map: dict[str, tuple[str, str | None]] = dict(module_scan.bindings)
+    binding_spellings: dict[str, str] = dict(module_scan.spellings)
     external_pkg_ids: set[str] = set(module_scan.external_ids)
 
+    # A module-level import makes the imported name an attribute of this
+    # module, so every one is a re-export as far as a caller routed through
+    # this module is concerned.  The edge to a module this one re-exports
+    # from carries a durable marker so the build-time resolver can follow
+    # the relation later; the edge itself is an ordinary dependency.
+    named_reexports = _named_reexports(module_scan.bindings)
     for target_id in sorted(module_scan.module_targets):
-        # A module this one re-exports from carries a durable marker so the
-        # build-time resolver can follow the re-export relation later.  The
-        # edge itself is an ordinary dependency; only the marker is new.
-        meta = {"reexport": "star"} if target_id in module_scan.star_sources else None
+        meta = _reexport_meta(target_id in module_scan.star_sources, named_reexports.get(target_id))
         edges.append(make_edge("depends_on", module_id, target_id, meta=meta))
     for ext_id in sorted(module_scan.external_ids):
         edges.append(make_edge("depends_on", module_id, ext_id))
@@ -324,6 +335,7 @@ def scan_module(
         is_rule_enabled=is_rule_enabled,
         project_root=project_root,
         package_parts=current_package_parts,
+        binding_spellings=binding_spellings,
     )
 
     # Emit stub nodes for external packages and tag the module
@@ -333,13 +345,19 @@ def scan_module(
             pkg_name = ext_id.split("::")[-1]
             nodes.append(_make_external_node(ext_id, pkg_name))
 
-    # Deduplicate edges by id
-    seen: set[str] = set()
+    # Deduplicate edges by id.  When one target is reached both through a
+    # spelled path and through an unspelled chain, the spelled form wins: it
+    # is not a guess, so the resolver may treat it as any other target.
+    seen: dict[str, int] = {}
     unique_edges: list[AxiomEdge] = []
     for e in edges:
         if e.id not in seen:
-            seen.add(e.id)
+            seen[e.id] = len(unique_edges)
             unique_edges.append(e)
+        elif (unique_edges[seen[e.id]].meta or {}).get(UNSPELLED_CHAIN_KEY) and not (e.meta or {}).get(
+            UNSPELLED_CHAIN_KEY
+        ):
+            unique_edges[seen[e.id]] = e
 
     return nodes, unique_edges
 
@@ -359,12 +377,17 @@ class _ImportScan(NamedTuple):
         external_ids: External package stub ids this scope depends on.
         star_sources: Subset of ``module_targets`` this scope re-exports
             from via ``from X import *``.
+        spellings: ``{bound_name: dotted_path}`` for bindings that spell a
+            path below the bound name — ``import a.b`` binds ``a`` to the
+            ``a.b`` module and spells ``b``.  Every other binding spells
+            nothing and is absent.
     """
 
     bindings: dict[str, tuple[str, str | None]]
     module_targets: set[str]
     external_ids: set[str]
     star_sources: set[str]
+    spellings: dict[str, str]
 
 
 # Statements that open a new binding scope.  An import inside one binds
@@ -432,6 +455,7 @@ def _scan_imports(
     module_targets: set[str] = set()
     external_ids: set[str] = set()
     star_sources: set[str] = set()
+    spellings: dict[str, str] = {}
 
     for imp_node in import_nodes:
         if isinstance(imp_node, ast.Import):
@@ -441,6 +465,12 @@ def _scan_imports(
                     bound = alias.asname or alias.name.split(".")[0]
                     bindings[bound] = (target_id, None)  # whole-module binding
                     module_targets.add(target_id)
+                    # `import a.b` binds `a` to the a.b module and spells `b`;
+                    # an aliased import spells nothing below its alias.
+                    if alias.asname is None and "." in alias.name:
+                        spellings[bound] = alias.name.split(".", 1)[1]
+                    else:
+                        spellings.pop(bound, None)
                 elif target_id is None:
                     ext_id = _external_node_id(alias.name, project_id)
                     if ext_id:
@@ -479,13 +509,15 @@ def _scan_imports(
                 # The imported name IS a module — bind it as a namespace so
                 # `name.f()` resolves inside the file that defines `f`.
                 bindings[bound] = (submodule_id, None)
+                spellings.pop(bound, None)
                 module_targets.add(submodule_id)
             elif submodule_id is None and target_id != module_id:
                 # alias.name is the original name in the source module, so a
                 # function-level node id can be constructed from it later.
                 bindings[bound] = (target_id, alias.name)
+                spellings.pop(bound, None)
 
-    return _ImportScan(bindings, module_targets, external_ids, star_sources)
+    return _ImportScan(bindings, module_targets, external_ids, star_sources, spellings)
 
 
 def _attribute_target_id(binding: tuple[str, str | None], attr_name: str) -> str:
@@ -507,6 +539,136 @@ def _attribute_target_id(binding: tuple[str, str | None], attr_name: str) -> str
     if original is None:
         return f"{mod_id}::{attr_name}"
     return f"{mod_id}::{original}.{attr_name}"
+
+
+# Edge-meta keys read by the build-time link resolver.  ``REEXPORT_STAR_KEY``
+# keeps the shape earlier releases wrote and read (any truthy value marks a
+# star source).  Named bindings live under a key of their own, so a reader
+# that predates them sees nothing on a named-only edge instead of a star
+# source it would over-resolve through.
+REEXPORT_STAR_KEY = "reexport"
+REEXPORT_NAMES_KEY = "reexport_names"
+# Marks a link target built by dropping attribute-chain components the import
+# binding never spelled, e.g. ``import pkg; pkg.sub.func()`` → ``pkg::func``.
+UNSPELLED_CHAIN_KEY = "unspelled_chain"
+
+
+def _named_reexports(bindings: dict[str, tuple[str, str | None]]) -> dict[str, dict[str, str]]:
+    """Group a scope's named bindings by the module each one came from.
+
+    Args:
+        bindings: ``{bound_name: (module_node_id, original_name_or_None)}``.
+            Whole-module bindings (original None) are namespace bindings,
+            not re-exported names, and are left out.
+
+    Returns:
+        ``{source_module_id: {bound_name: original_name}}``.
+    """
+    grouped: dict[str, dict[str, str]] = {}
+    for bound, (source_id, original) in bindings.items():
+        if original is not None:
+            grouped.setdefault(source_id, {})[bound] = original
+    return grouped
+
+
+def _reexport_meta(is_star: bool, names: dict[str, str] | None) -> dict | None:
+    """Return the re-export marker for one module-level dependency edge.
+
+    Args:
+        is_star: Whether the module star-imports the edge's target.
+        names: ``{bound_name: original_name}`` the module binds from the
+            target, or None.
+
+    Returns:
+        The marker dict, or None when the edge re-exports nothing.
+    """
+    meta: dict = {}
+    if is_star:
+        meta[REEXPORT_STAR_KEY] = "star"
+    if names:
+        meta[REEXPORT_NAMES_KEY] = dict(sorted(names.items()))
+    return meta or None
+
+
+def _next_call(stmt: ast.stmt) -> ast.Call | None:
+    """Return the call a statement makes directly, if it makes one.
+
+    Args:
+        stmt: A statement following an AutoStep marker.
+
+    Returns:
+        The ``ast.Call`` for ``f()``, ``x = f()``, ``x: T = f()`` or
+        ``return f()``, else None.
+    """
+    if isinstance(stmt, (ast.Assign, ast.Expr, ast.AnnAssign, ast.Return)) and isinstance(stmt.value, ast.Call):
+        return stmt.value
+    return None
+
+
+def _unspelled_chain(func_ref: ast.Attribute, spellings: dict[str, str]) -> bool:
+    """Return whether an attribute call's middle chain differs from its binding's spelling.
+
+    The target of ``root.a.b.attr()`` is built from ``root``'s binding and
+    ``attr`` alone, so the components between them are dropped.  That is
+    only sound when they are exactly what the binding spelled.
+
+    Args:
+        func_ref: The called attribute node.
+        spellings: ``{bound_name: dotted_path}`` for the scope.
+
+    Returns:
+        True when the dropped components are not the binding's spelling.
+    """
+    middle: list[str] = []
+    node = func_ref.value
+    while isinstance(node, ast.Attribute):
+        middle.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return False
+    return ".".join(reversed(middle)) != spellings.get(node.id, "")
+
+
+def _chain_meta(func_ref: ast.Attribute, spellings: dict[str, str]) -> dict | None:
+    """Return the edge meta for an attribute-built link target.
+
+    Args:
+        func_ref: The called attribute node.
+        spellings: ``{bound_name: dotted_path}`` for the scope.
+
+    Returns:
+        ``{UNSPELLED_CHAIN_KEY: True}`` for an unspelled chain, else None.
+    """
+    return {UNSPELLED_CHAIN_KEY: True} if _unspelled_chain(func_ref, spellings) else None
+
+
+def _next_call_chain_meta(
+    stmt: ast.stmt,
+    name_map: dict[str, tuple[str, str | None]],
+    spellings: dict[str, str],
+) -> dict | None:
+    """Return the edge meta for the delegate target of the statement after an AutoStep.
+
+    Only a target built from an import binding can be a guess; a bare call
+    or a ``self`` / ``cls`` call carries no marker.
+
+    Args:
+        stmt: The statement following the AutoStep.
+        name_map: The scope's import bindings.
+        spellings: ``{bound_name: dotted_path}`` for the scope.
+
+    Returns:
+        ``{UNSPELLED_CHAIN_KEY: True}`` for an unspelled chain, else None.
+    """
+    call = _next_call(stmt)
+    if call is None or not isinstance(call.func, ast.Attribute):
+        return None
+    root = call.func.value
+    while isinstance(root, ast.Attribute):
+        root = root.value
+    if not (isinstance(root, ast.Name) and root.id in name_map):
+        return None
+    return _chain_meta(call.func, spellings)
 
 
 # ---------------------------------------------------------------------------
@@ -534,8 +696,14 @@ def _collect_functions(
     project_root: Path | None = None,
     package_parts: list[str] | None = None,
     class_name: str | None = None,
+    binding_spellings: dict[str, str] | None = None,
 ) -> None:
     """Walk direct children of tree for FunctionDef / AsyncFunctionDef.
+
+    ``binding_spellings`` travels with ``name_map`` and is overlaid the same
+    way, so a local import that rebinds a name also replaces what that name
+    spells.  It decides whether an attribute-built link target is marked as
+    an unspelled chain.
 
     Imports declared inside a function body bind in that function's scope
     only, so each function is walked with its own binding overlay layered
@@ -558,6 +726,7 @@ def _collect_functions(
         # Per-function binding overlay.  Delegation is not scope-free: an
         # import inside one function must not resolve a call in another.
         scope_name_map = name_map
+        scope_spellings = binding_spellings or {}
         if project_root is not None:
             local_scan = _scan_imports(
                 _iter_scope_imports(child),
@@ -568,6 +737,8 @@ def _collect_functions(
             )
             if local_scan.bindings:
                 scope_name_map = {**name_map, **local_scan.bindings}
+                scope_spellings = {k: v for k, v in scope_spellings.items() if k not in local_scan.bindings}
+                scope_spellings.update(local_scan.spellings)
 
         qualified_name = f"{name_prefix}{child.name}" if name_prefix else child.name
         func_id = f"{project_id}::{dotpath}::{qualified_name}"
@@ -652,6 +823,7 @@ def _collect_functions(
                 is_rule_enabled=is_rule_enabled,
                 module_id=module_id,
                 class_name=class_name,
+                binding_spellings=scope_spellings,
             )
             nodes.extend(step_nodes)
             edges.extend(step_edges)
@@ -698,7 +870,9 @@ def _collect_functions(
                         root = root.value
                     if isinstance(root, ast.Name) and root.id in scope_name_map:
                         target = _attribute_target_id(scope_name_map[root.id], attr_name)
-                        edges.append(make_edge("validates", func_id, target))
+                        edges.append(
+                            make_edge("validates", func_id, target, meta=_chain_meta(func_ref, scope_spellings))
+                        )
 
         # Recurse into nested functions (classes too, for methods).  The
         # scope map goes down, not the module one: a closure sees the
@@ -719,6 +893,7 @@ def _collect_functions(
             local_func_ids=local_func_ids,
             project_root=project_root,
             package_parts=package_parts,
+            binding_spellings=scope_spellings,
             # A closure defined in a method is still inside the class, so the
             # class qualifier passes through the function boundary unchanged.
             class_name=class_name,
@@ -743,6 +918,7 @@ def _collect_functions(
                 local_func_ids=local_func_ids,
                 project_root=project_root,
                 package_parts=package_parts,
+                binding_spellings=binding_spellings,
                 # Matches name_prefix above, so a self/cls target is byte-
                 # identical to the id this same walk mints for the method.
                 class_name=child.name,
@@ -871,6 +1047,7 @@ def _extract_step_nodes(
     is_rule_enabled=None,
     module_id: str | None = None,
     class_name: str | None = None,
+    binding_spellings: dict[str, str] | None = None,
 ) -> tuple[list[AxiomNode], list[AxiomEdge]]:
     """Extract step/autostep nodes and their structural edges.
 
@@ -1023,7 +1200,8 @@ def _extract_step_nodes(
                         class_name=class_name,
                     )
                     if target_id:
-                        step_edges.append(make_edge("delegates_to", step_id, target_id))
+                        chain_meta = _next_call_chain_meta(nxt, name_map or {}, binding_spellings or {})
+                        step_edges.append(make_edge("delegates_to", step_id, target_id, meta=chain_meta))
 
             # Record AutoStep for B4 deferred resolution.
             if is_auto and autosteps_out is not None:
@@ -1204,15 +1382,7 @@ def _resolve_next_call_target(
     walk position rather than from a lookup table, so two classes in one
     module sharing a method name each resolve to their own.
     """
-    call: ast.Call | None = None
-    if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call):
-        call = stmt.value
-    elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
-        call = stmt.value
-    elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.value, ast.Call):
-        call = stmt.value
-    elif isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Call):
-        call = stmt.value
+    call = _next_call(stmt)
     if call is None:
         return None
 

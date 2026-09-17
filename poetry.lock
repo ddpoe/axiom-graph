@@ -3521,9 +3521,9 @@ dev = ["black (>=19.3b0)", "pytest (>=4.6.2)"]
 js = ["tree-sitter", "tree-sitter-javascript", "tree-sitter-typescript"]
 semantic = ["fastembed", "onnxruntime", "sqlite-vec"]
 semantic-torch = ["sentence-transformers", "sqlite-vec"]
-viz = ["fastapi", "uvicorn"]
+viz = ["fastapi", "pygments", "uvicorn"]
 
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.10,<4.0"
-content-hash = "6dcb8cb0b8ebcb39baed637673e7eed889b38bb840b5568e803dae8af061d370"
+content-hash = "dfc0a39fd58b44c522bf96143dec9001073a650f7c7ef768e8e3c85f6337e4a0"

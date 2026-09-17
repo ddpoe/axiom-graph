@@ -1,4 +1,4 @@
-<!-- generated from axiom_graph::docs.consumer.get-started.connect-your-agent @ 07ca95e4c1c9; do not edit -->
+<!-- generated from axiom_graph::docs.consumer.get-started.connect-your-agent @ e5667b6f3b71; do not edit -->
 
 # Connect Your Agent
 
@@ -202,6 +202,7 @@ This loop is also why these docs stay honest. Published consumer pages are DocJS
 | Symptom | Cause and fix |
 |---|---|
 | No tools appear | `command` is not the venv Python where axiom-graph is installed. Verify with `python -c "import axiom_graph"`. |
+| The client shows the server as `failed` or `Connection closed` | The server died on start, and the client hides why. Run the exact `command` and `args` from your config by hand, e.g. `/path/to/your/venv/bin/python -m axiom_graph.mcp_server`, and read the error it prints. `ModuleNotFoundError: No module named 'mcp.server.fastmcp'` means the environment has mcp 2.x: upgrade to axiom-graph 2.4.0 or later, or run `pip install 'mcp<2'`. |
 | Tool calls fail immediately | No `.axiom_graph/graph.db`. Run `axiom-graph build .` first. |
 | "database is locked" | Two *writers* contend (e.g. two builds). The DB runs in WAL mode, so unlimited readers are fine — just serialize writes (one build at a time). |
 | Slow first response | First build/scan, or a large project. Subsequent builds are incremental. |
