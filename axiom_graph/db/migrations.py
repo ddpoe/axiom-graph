@@ -28,12 +28,22 @@ The runner is invoked at the top of ``build`` (right after ``init_db``),
 so the entire user-facing upgrade is ``pip install -U axiom-graph`` +
 their normal ``build``.
 
+Registered steps:
+
+- **v1** — fold the legacy ``doc_sections`` table into ``nodes`` and retire
+  the two-table model (ADR-021).
+- **v2** — re-sync every DocJSON envelope's ``tags`` rows from the
+  ``docs.tags`` JSON the DB already holds, repairing indexes whose envelope
+  tags drifted while tag resync was gated on the node's stored text.
+
 Preservation contract (ADR-021 migration amendment): migration steps never
 modify ``node_history``, ``node_verification``, or ``node_renames``.
 Preservation is structural — node IDs are stable, so those tables keep
 pointing at the right rows.  The v1 step performs one **read-only** query
 against ``node_history`` (preserved DELETED tombstone check) to avoid
-resurrecting purged sections; it writes nothing there.
+resurrecting purged sections; it writes nothing there.  The v2 step reads
+``docs`` and ``nodes`` and writes only ``tags``, so it disturbs neither
+staleness nor verification state.
 """
 
 from __future__ import annotations
@@ -51,7 +61,7 @@ logger = logging.getLogger(__name__)
 
 #: Schema version written by the current package.  Bump when registering a
 #: new migration step.
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 
 class SchemaVersionError(RuntimeError):
@@ -264,9 +274,81 @@ def _migrate_v1_legacy_to_envelope(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE IF EXISTS doc_sections")
 
 
+# ---------------------------------------------------------------------------
+# Migration step v2 — re-sync DocJSON envelope tag rows from ``docs.tags``
+# ---------------------------------------------------------------------------
+
+
+def _migrate_v2_resync_doc_envelope_tags(conn: sqlite3.Connection) -> None:
+    """Bring every DocJSON envelope's ``tags`` rows into agreement with ``docs.tags``.
+
+    A document's tags are stored twice: the ``docs.tags`` JSON column, which
+    the writer rewrites from the file on every save, and ``tags`` rows on the
+    document's envelope node, which is what every reader (tag search, tag
+    filters, ``query_nodes(tag=...)``, the visualiser) actually queries.  The
+    two could drift apart, because the node upsert used to gate its tag
+    rewrite on the node's stored text having changed — and an envelope's
+    stored text is only the first 4000 characters of its file, so a tag edit
+    below that mark never reached the rows.  A document nobody edits again is
+    never rescanned, so fixing the gate alone would leave the already-drifted
+    rows unreachable.
+
+    This step repairs them from data the database already holds: no file is
+    read, nothing is rescanned, and no staleness, history, or verification
+    state is touched.  It is idempotent — a second run finds every set already
+    in agreement and writes nothing.
+
+    Scoped by **node**: only ``docs`` rows that still have a ``docjson_doc``
+    node are rewritten, so a stale ``docs`` row cannot leave orphan tag rows
+    behind.  A NULL or unparseable ``docs.tags`` is tolerated — NULL means
+    "no tags" and is honoured as such; unparseable JSON leaves the document's
+    rows untouched rather than aborting the transaction.
+
+    Never writes ``node_history`` / ``node_verification`` / ``node_renames``.
+
+    Args:
+        conn: Open connection inside the runner's migration transaction.
+    """
+    if not _table_exists(conn, "docs"):
+        return
+
+    rows = conn.execute(
+        """
+        SELECT d.id AS id, d.tags AS tags
+        FROM docs d
+        JOIN nodes n ON n.id = d.id
+        WHERE n.subtype = 'docjson_doc'
+        """
+    ).fetchall()
+
+    for row in rows:
+        doc_id = row["id"]
+        raw = row["tags"]
+        desired: list[str] = []
+        if raw:
+            try:
+                parsed = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("migration v2: unparseable docs.tags for %s — leaving its tag rows alone", doc_id)
+                continue
+            if not isinstance(parsed, list):
+                logger.warning("migration v2: docs.tags for %s is not a list — leaving its tag rows alone", doc_id)
+                continue
+            desired = [str(tag) for tag in parsed]
+
+        stored = {r["tag"] for r in conn.execute("SELECT tag FROM tags WHERE node_id = ?", (doc_id,)).fetchall()}
+        if stored == set(desired):
+            continue
+        conn.execute("DELETE FROM tags WHERE node_id = ?", (doc_id,))
+        for tag in desired:
+            conn.execute("INSERT OR IGNORE INTO tags (node_id, tag) VALUES (?, ?)", (doc_id, tag))
+        logger.info("migration v2: re-synced tag rows for %s", doc_id)
+
+
 #: Ordered registry of migration steps, keyed by **target** version.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_v1_legacy_to_envelope,
+    2: _migrate_v2_resync_doc_envelope_tags,
 }
 
 

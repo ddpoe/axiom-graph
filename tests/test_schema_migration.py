@@ -269,7 +269,7 @@ def test_legacy_db_upgrade_e2e(tmp_path: Path) -> None:
         ids = {r[0] for r in conn.execute("SELECT id FROM nodes").fetchall()}
     assert "doc_sections" not in _table_names(db_path)
     assert {"doc_position", "doc_level"} <= _node_columns(db_path)
-    assert db_path.with_name("graph.db.pre-v1.bak").exists()
+    assert db_path.with_name(f"graph.db.pre-v{migrations.CURRENT_SCHEMA_VERSION}.bak").exists()
     doc_id = "proj::docs.guide"
     assert f"{doc_id}::intro" in ids
     assert f"{doc_id}::intro.details" in ids
@@ -294,7 +294,7 @@ def test_migration_preserves_history_verification_renames(tmp_path: Path) -> Non
         pre_verification = _snapshot(conn, "node_verification")
         pre_renames = _snapshot(conn, "node_renames")
 
-    assert migrations.run_migrations(db_path) == [1]
+    assert migrations.run_migrations(db_path) == sorted(migrations.MIGRATIONS)
 
     with db._connect(db_path) as conn:
         post_history = _snapshot(conn, "node_history")
@@ -377,10 +377,125 @@ def test_fresh_init_stamps_version_and_noop(tmp_path: Path) -> None:
     with db._connect(db_path) as conn:
         assert migrations.get_user_version(conn) == migrations.CURRENT_SCHEMA_VERSION
     assert migrations.run_migrations(db_path) == []
-    assert not db_path.with_name("graph.db.pre-v1.bak").exists(), "no backup for a no-op run"
+    assert not list(db_path.parent.glob("graph.db.pre-v*.bak")), "no backup for a no-op run"
 
     builder.build(tmp_path)
     assert "doc_sections" not in _table_names(db_path)
     with db._connect(db_path) as conn:
         sub = conn.execute("SELECT subtype FROM nodes WHERE id = 'proj::docs.note::s1'").fetchone()
     assert sub is not None and sub[0] == "docjson_section"
+
+
+# ---------------------------------------------------------------------------
+# Migration step v2 — DocJSON envelope tag re-sync
+# ---------------------------------------------------------------------------
+
+
+def _tag_rows(db_path: Path, node_id: str) -> set[str]:
+    """Return the tag rows the index holds for *node_id*."""
+    with db._connect(db_path) as conn:
+        return {r[0] for r in conn.execute("SELECT tag FROM tags WHERE node_id = ?", (node_id,)).fetchall()}
+
+
+def _make_tagged_docs_project(root: Path) -> Path:
+    """Build a project with two tagged DocJSON documents and return its db path."""
+    (root / "axiom-graph.toml").write_text(PROJ_TOML, encoding="utf-8")
+    docs_dir = root / "docs"
+    docs_dir.mkdir()
+    for slug, title, tags in (("drifted", "Drifted", ["architecture", "v2"]), ("intact", "Intact", ["reference"])):
+        (docs_dir / f"{slug}.json").write_text(
+            json.dumps(
+                {
+                    "title": title,
+                    "sections": [{"id": "body", "heading": "Body", "content": f"{title} body."}],
+                    "tags": tags,
+                }
+            ),
+            encoding="utf-8",
+        )
+    builder.build(root)
+    return root / ".axiom_graph" / "graph.db"
+
+
+@workflow(
+    purpose="Upgrading an index repairs drifted DocJSON envelope tag rows from stored doc tags, leaves undrifted ones alone, "
+    "is idempotent, and disturbs no history, verification or staleness state",
+)
+def test_v2_resyncs_drifted_envelope_tags(tmp_path: Path) -> None:
+    db_path = _make_tagged_docs_project(tmp_path)
+    drifted_id = "proj::docs.drifted"
+    intact_id = "proj::docs.intact"
+
+    # A verification baseline so the preservation claim has something to bite on.
+    db.upsert_verification(db_path, drifted_id, verified_by="human", code_hash_at="base", desc_hash_at="base")
+
+    # Drift the envelope's tag rows away from its stored docs.tags, and put the
+    # DB back on the previous schema version so the step is pending.
+    with db._connect(db_path) as conn:
+        conn.execute("DELETE FROM tags WHERE node_id = ?", (drifted_id,))
+        conn.execute("INSERT INTO tags (node_id, tag) VALUES (?, ?)", (drifted_id, "obsolete"))
+        conn.execute(f"PRAGMA user_version = {migrations.CURRENT_SCHEMA_VERSION - 1}")
+    assert _tag_rows(db_path, drifted_id) == {"obsolete"}
+
+    with db._connect(db_path) as conn:
+        pre_nodes = _snapshot(conn, "nodes")
+        pre_history = _snapshot(conn, "node_history")
+        pre_verification = _snapshot(conn, "node_verification")
+        pre_renames = _snapshot(conn, "node_renames")
+        pre_docs = _snapshot(conn, "docs")
+
+    assert migrations.run_migrations(db_path) == [migrations.CURRENT_SCHEMA_VERSION]
+
+    # The drifted document's rows now agree with its stored tags — in both
+    # directions: the tags it lacked were added, the one it should not have
+    # was removed.
+    assert _tag_rows(db_path, drifted_id) == {"architecture", "v2"}
+    # The already-correct document was left exactly as it was.
+    assert _tag_rows(db_path, intact_id) == {"reference"}
+
+    # Nothing else moved: no row of nodes/docs changed, so no staleness column,
+    # baseline hash or updated_at timestamp advanced, and the three preserved
+    # tables are byte-identical.
+    with db._connect(db_path) as conn:
+        assert _snapshot(conn, "nodes") == pre_nodes
+        assert _snapshot(conn, "docs") == pre_docs
+        assert _snapshot(conn, "node_history") == pre_history
+        assert _snapshot(conn, "node_verification") == pre_verification
+        assert _snapshot(conn, "node_renames") == pre_renames
+
+    # Running the upgrade again is harmless: the runner no-ops on version, and
+    # the step itself writes nothing when the sets already agree.
+    assert migrations.run_migrations(db_path) == []
+    with db._connect(db_path) as conn:
+        migrations._migrate_v2_resync_doc_envelope_tags(conn)
+    assert _tag_rows(db_path, drifted_id) == {"architecture", "v2"}
+    assert _tag_rows(db_path, intact_id) == {"reference"}
+    with db._connect(db_path) as conn:
+        assert _snapshot(conn, "nodes") == pre_nodes
+        assert _snapshot(conn, "node_verification") == pre_verification
+
+
+def test_v2_tolerates_missing_and_malformed_doc_tags(tmp_path: Path) -> None:
+    """Unparseable docs.tags is skipped, NULL clears the rows, orphans stay orphaned."""
+    db_path = _make_tagged_docs_project(tmp_path)
+    drifted_id = "proj::docs.drifted"
+    intact_id = "proj::docs.intact"
+
+    with db._connect(db_path) as conn:
+        conn.execute("UPDATE docs SET tags = ? WHERE id = ?", ("{not-json", drifted_id))
+        conn.execute("UPDATE docs SET tags = NULL WHERE id = ?", (intact_id,))
+        # A docs row with no surviving node must not grow tag rows.
+        _insert_row(
+            conn,
+            "docs",
+            id="proj::docs.ghost",
+            title="Ghost",
+            tags='["ghost"]',
+            file_path="docs/ghost.json",
+            updated_at="2026-01-01T00:00:00Z",
+        )
+        migrations._migrate_v2_resync_doc_envelope_tags(conn)
+
+    assert _tag_rows(db_path, drifted_id) == {"architecture", "v2"}, "unparseable tags must leave the rows alone"
+    assert _tag_rows(db_path, intact_id) == set(), "NULL tags means the document has none"
+    assert _tag_rows(db_path, "proj::docs.ghost") == set(), "a docs row with no node must not create tag rows"

@@ -288,7 +288,7 @@ class TestUpdateDocMeta:
         assert node.title == "New Title"
 
     def test_update_tags(self, mini_project: Path) -> None:
-        """Updating doc-level tags patches the JSON."""
+        """Updating doc-level tags patches the JSON and the index agrees."""
         from axiom_graph.mcp_server import axiom_graph_update_doc_meta
 
         pid = mini_project.name
@@ -307,6 +307,14 @@ class TestUpdateDocMeta:
 
         data = json.loads((mini_project / "docs" / "guide.json").read_text())
         assert data["tags"] == ["architecture", "v2"]
+
+        # The file is only half the contract — tag search, tag filters and the
+        # visualiser all read the index's tag rows.
+        db_path = mini_project / ".axiom_graph" / "graph.db"
+        node = db.get_node(db_path, doc_id)
+        assert node is not None
+        assert set(node.tags or []) == {"architecture", "v2"}
+        assert doc_id in {n.id for n in db.query_nodes(db_path, tag="architecture")}
 
     def test_empty_title_errors(self, mini_project: Path) -> None:
         """Setting title to empty string is an error."""

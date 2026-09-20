@@ -42,6 +42,7 @@ def _echo_build_summary(summary) -> None:
         warnings = list(summary.warnings)
         files_scanned = summary.files_scanned
         files_skipped = summary.files_skipped_mtime
+        docs_skipped = summary.docs_skipped_mtime
         nodes_written = summary.nodes_written
         nodes_skipped = summary.nodes_skipped
         nodes_renamed = summary.nodes_renamed
@@ -52,6 +53,7 @@ def _echo_build_summary(summary) -> None:
         warnings = summary["warnings"]
         files_scanned = summary.get("files_scanned", "?")
         files_skipped = summary.get("files_skipped_mtime", 0)
+        docs_skipped = summary.get("docs_skipped_mtime", 0)
         nodes_written = summary["nodes_written"]
         nodes_skipped = summary["nodes_skipped"]
         nodes_renamed = summary.get("nodes_renamed", 0)
@@ -60,8 +62,9 @@ def _echo_build_summary(summary) -> None:
         annotation_findings = summary.get("annotation_findings") or []
 
     click.echo(
-        f"  files scanned : {files_scanned}\n"
-        f"  files skipped : {files_skipped} (mtime unchanged)\n"
+        f"  files scanned : {files_scanned} (Python)\n"
+        f"  files skipped : {files_skipped} (Python, mtime unchanged)\n"
+        f"  docs skipped  : {docs_skipped} (markdown + DocJSON, mtime unchanged)\n"
         f"  nodes written : {nodes_written}\n"
         f"  nodes skipped : {nodes_skipped}\n"
         f"  nodes renamed : {nodes_renamed}\n"

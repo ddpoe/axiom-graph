@@ -8,6 +8,20 @@ All notable changes to axiom-graph are recorded here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [2.4.1] - 2026-09-19
+
+Tag fix release. A document's tags could silently stop reaching the index, and the build summary hid it.
+
+### Fixed
+
+- **Tag edits on a document now always reach the index.** A document's tags could silently fail to update in the index when its `tags` key sat past the first few thousand characters of the file — which is exactly what happens to any long document that was tagged after it was written. Tag search, tag filters and the visualiser kept showing whatever tags the document had when it was first indexed. Tags are now compared as a set on every indexed item, so adding, changing and removing them all take effect.
+- **Existing indexes repair themselves on upgrade.** Your next `axiom-graph build` brings already-drifted tag rows back into agreement with each document's stored tags. It runs once, inside a transaction, from data the database already holds — no rescan, no change to staleness or verification state, nothing to run by hand.
+
+### Changed
+
+- **The build summary now reports skipped documentation files** and states that its `files scanned` / `files skipped` counts cover Python files only. An unlabelled `0` there previously read as "no documentation was scanned", which is what sent the original investigation of the tag bug to the wrong subsystem. Both `axiom-graph build` and the `axiom_graph_build` MCP tool gained the line.
+- **The index schema version advances to 2.** That is how the automatic repair above knows to run once and only once. As with any schema advance, an index written by 2.4.1 will not open under 2.4.0: the older package refuses it with a "written by a newer axiom-graph" error rather than touching it. Upgrading is the fix; the pre-upgrade database is snapshotted next to it as `graph.db.pre-v2.bak` either way.
+
 ## [2.4.0] - 2026-09-17
 
 Fresh-install fix release. A new `pip install axiom-graph` resolved mcp 2.x and the MCP server crashed on start; `mcp` is now capped below 2. The release also carries the offline workflow export, AutoSteps that report the intent of the function they call, links through package re-exports, and a search that no longer returns a confident empty result when its filters drop every ranked hit.

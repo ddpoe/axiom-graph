@@ -69,8 +69,9 @@ def axiom_graph_build(project_root: str, verbose: bool = False, _embedder_thread
     num_warnings = len(summary.warnings)
     lines.append(
         f"axiom-graph build complete (discovery-only)\n"
-        f"  files scanned   : {summary.files_scanned}\n"
-        f"  files skipped   : {summary.files_skipped_mtime} (mtime unchanged)\n"
+        f"  files scanned   : {summary.files_scanned} (Python)\n"
+        f"  files skipped   : {summary.files_skipped_mtime} (Python, mtime unchanged)\n"
+        f"  docs skipped    : {summary.docs_skipped_mtime} (markdown + DocJSON, mtime unchanged)\n"
         f"  nodes added     : {summary.nodes_written}\n"
         f"  nodes unchanged : {summary.nodes_skipped}\n"
         f"  nodes renamed   : {summary.nodes_renamed}\n"

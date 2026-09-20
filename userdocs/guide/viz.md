@@ -1,4 +1,4 @@
-<!-- generated from axiom_graph::docs.consumer.viz @ 9d8b19d61aeb; do not edit -->
+<!-- generated from axiom_graph::docs.consumer.viz @ f73300a2980b; do not edit -->
 
 # The Viz Dashboard
 
@@ -67,10 +67,10 @@ The Staleness Cause block is worth dwelling on: it is the same drift signal the 
 
 ## Editing docs in the browser
 
-The Docs tab is a full manager for the DocJSON files in every configured docs root (`[axiom_graph.scan] docs_dirs`, which defaults to just `docs/`). A folder tree on the left organizes documents, with each configured root as its own top-level folder; a filter panel narrows by tag, search term, or path. Because each [DocJSON](concepts/docjson.md) section is its own node, the editor works at section granularity:
+The Docs tab is a full manager for the DocJSON files in every configured docs root (`[axiom_graph.scan] docs_dirs`, which defaults to just `docs/`). A folder tree on the left organizes documents, with each configured root as its own top-level folder; a filter panel narrows the tree by tag. Opening a doc from the List view's preview jumps straight to it here, with its folder expanded. Because each [DocJSON](concepts/docjson.md) section is its own node, the editor works at section granularity:
 
 - **Edit a section** in a rich-text editor (headings, bold, lists, tables, code blocks); changes save back to the file on disk.
-- **Manage sections** - add, reorder by dragging, rename headings and slugs inline, delete. A table-of-contents sidebar tracks scroll position.
+- **Manage sections** - add sections and sub-sections, reorder with the move up/down buttons, rename headings and slugs inline, delete. A table-of-contents sidebar tracks scroll position.
 - **Attach links** - a link picker searches for nodes and attaches them as provenance links, the typed edges that bind a section to the code it documents.
 - **Render Mermaid** diagrams from section content, with a dedicated Monaco diagram editor and live preview.
 - **Raw mode** toggles between the rich editor and the underlying JSON.

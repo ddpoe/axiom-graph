@@ -199,16 +199,23 @@ def upsert_node_conn(
     When ``discovery_only=True``, existing nodes preserve their ``code_hash``,
     ``desc_hash``, and ``updated_at`` (staleness baseline stays intact) but
     structural metadata (location, line numbers, dflow_meta, source, title,
-    node_type, subtype) is still refreshed.  Tags and FTS are only re-synced
-    when the node's ``level_1`` or ``level_2`` text has actually changed,
-    avoiding unnecessary DELETE+INSERT churn on no-op builds.
+    node_type, subtype) is still refreshed.  FTS is re-synced only when the
+    node's ``level_1`` or ``level_2`` text has actually changed, avoiding
+    unnecessary DELETE+INSERT churn on no-op builds.  Tags are re-synced on a
+    stored-vs-incoming **set comparison** instead, because stored text is not
+    a reliable proxy for tag change: a DocJSON envelope's ``level_2`` holds
+    only the first 4000 characters of its file, and a tag-only section edit
+    changes no section text at all.
     """
     口 = Step(
         step_num=1,
         name="Compare hashes against stored values",
-        purpose="Fetch existing code_hash/desc_hash to determine if node is new, changed, or unchanged",
+        purpose="Fetch existing code_hash/desc_hash to determine if node is new, changed, or unchanged; for an existing node in "
+        "discovery_only mode, refresh structural metadata, resync tags on a set comparison, and resync FTS on text change",
         critical="In discovery_only mode, existing code_hash/desc_hash are preserved — this is the core staleness invariant. "
-        "Breaking this (e.g. overwriting hashes) silently resets the staleness baseline for all existing nodes.",
+        "Breaking this (e.g. overwriting hashes) silently resets the staleness baseline for all existing nodes. "
+        "Tag resync is decided independently, by set comparison: stored text is not a proxy for tag change, and gating "
+        "tags on it silently strands the tag rows of any document whose tags sit past the stored 4000-character prefix.",
     )
     old_code, old_desc = _get_node_hashes_conn(conn, node.id)
     if discovery_only and old_code is not None:
@@ -254,22 +261,23 @@ def upsert_node_conn(
         # desc_hash (the content-mirror hash) and updated_at (last-edit
         # timestamp) must advance with them.  Only code_hash stays behind
         # as the staleness baseline — the comparator's CONTENT_UPDATED
-        # signal comes from code_hash vs current content hash.
-        # Tag-only edits do not change level_1/level_2, so sections also
-        # resync tags when the stored set drifted.
-        sync_tags = text_changed
-        if node.subtype == "docjson_section":
-            if text_changed:
-                conn.execute(
-                    "UPDATE nodes SET desc_hash = ?, updated_at = ? WHERE id = ?",
-                    (node.desc_hash, _now_utc(), node.id),
-                )
-            if not sync_tags:
-                stored_tags = {
-                    r["tag"] for r in conn.execute("SELECT tag FROM tags WHERE node_id = ?", (node.id,)).fetchall()
-                }
-                sync_tags = stored_tags != set(node.tags or [])
-        if sync_tags:
+        # signal comes from code_hash vs current content hash.  This is a
+        # content-mirror rule about section text; it says nothing about tags.
+        if node.subtype == "docjson_section" and text_changed:
+            conn.execute(
+                "UPDATE nodes SET desc_hash = ?, updated_at = ? WHERE id = ?",
+                (node.desc_hash, _now_utc(), node.id),
+            )
+
+        # Tags resync on a stored-vs-incoming set comparison, for EVERY node.
+        # Text change is not a usable proxy: a DocJSON envelope's level_2 is
+        # only the first 4000 characters of its file, so a tag edit further
+        # down the file leaves the stored text byte-identical while the tags
+        # differ — and a tag-only section edit never changes section text at
+        # all.  The comparison runs in both directions, so a removed tag
+        # loses its row as surely as an added one gains one.
+        stored_tags = {r["tag"] for r in conn.execute("SELECT tag FROM tags WHERE node_id = ?", (node.id,)).fetchall()}
+        if stored_tags != set(node.tags or []):
             conn.execute("DELETE FROM tags WHERE node_id = ?", (node.id,))
             for tag in node.tags or []:
                 conn.execute(
