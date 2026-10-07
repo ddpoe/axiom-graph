@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator
+
 import json
 import sqlite3
 from pathlib import Path
@@ -44,6 +46,39 @@ def upsert_edge_conn(conn: sqlite3.Connection, edge: AxiomEdge) -> bool:
         row,
     )
     return existing is None  # True = new write, False = replaced existing
+
+
+def upsert_edges_conn(conn: sqlite3.Connection, edges: Iterable[AxiomEdge]) -> int:
+    """Insert or replace *edges* in order, reading which ids exist once per chunk of ids.
+
+    The rows written are those of :func:`upsert_edge_conn` called on each
+    edge in turn; only the existence reads are batched.
+
+    Args:
+        conn: Open connection.
+        edges: The edges to write.
+
+    Returns:
+        How many distinct edge ids the index did not hold before the call.
+    """
+    rows = [_edge_to_row(edge) for edge in edges]
+    if not rows:
+        return 0
+    ids = list(dict.fromkeys(row["id"] for row in rows))
+    existing: set[str] = set()
+    for start in range(0, len(ids), 500):
+        chunk = ids[start : start + 500]
+        existing.update(
+            r[0] for r in conn.execute(f"SELECT id FROM edges WHERE id IN ({','.join('?' * len(chunk))})", chunk)
+        )
+    conn.executemany(
+        """
+        INSERT OR REPLACE INTO edges (id, edge_type, from_id, to_id, weight, meta)
+        VALUES (:id, :edge_type, :from_id, :to_id, :weight, :meta)
+        """,
+        rows,
+    )
+    return len(ids) - len(existing)
 
 
 def query_edges(
@@ -140,9 +175,69 @@ def get_outbound_edge_targets_conn(
     return {r["to_id"] for r in rows}
 
 
+def get_edges_from_conn(
+    conn: sqlite3.Connection,
+    edge_type: str,
+    from_ids: Iterable[str],
+) -> list[tuple[str, str, str | None]]:
+    """Return the ``(from_id, to_id, meta)`` rows of one edge type leaving the given nodes.
+
+    Batched lookups through the ``from_id`` index, so the cost follows the
+    nodes asked about, not the number of edges of the type.
+
+    Args:
+        conn: Open SQLite connection.
+        edge_type: The single edge type to read.
+        from_ids: Source node ids.
+
+    Returns:
+        The rows, *meta* as its stored JSON text (``None`` when absent).
+    """
+    ids = sorted(set(from_ids))
+    out: list[tuple[str, str, str | None]] = []
+    for start in range(0, len(ids), 500):
+        chunk = ids[start : start + 500]
+        out.extend(
+            (r["from_id"], r["to_id"], r["meta"])
+            for r in conn.execute(
+                "SELECT from_id, to_id, meta FROM edges WHERE edge_type = ? "
+                f"AND from_id IN ({','.join('?' * len(chunk))})",  # noqa: S608 - placeholders only
+                (edge_type, *chunk),
+            )
+        )
+    return out
+
+
+def iter_edges_of_type_conn(conn: sqlite3.Connection, edge_type: str) -> Iterator[tuple[str, str, str | None]]:
+    """Yield the ``(from_id, to_id, meta)`` rows of one edge type, in ``(from_id, to_id)`` order.
+
+    The rows come off the ``(edge_type, from_id, to_id)`` index with no
+    sort, one step of the cursor per row, so a caller that stops early has
+    read only the rows it consumed, not every edge of the type.  Close the
+    generator, or let it go, to release the read.
+
+    Args:
+        conn: Open SQLite connection.
+        edge_type: The single edge type to read.
+
+    Yields:
+        One row per edge, *meta* as its stored JSON text (``None`` when absent).
+    """
+    cursor = conn.execute(
+        "SELECT from_id, to_id, meta FROM edges WHERE edge_type = ? ORDER BY from_id, to_id",
+        (edge_type,),
+    )
+    try:
+        for row in cursor:
+            yield row[0], row[1], row[2]
+    finally:
+        cursor.close()
+
+
 def get_edge_source_ids_conn(
     conn: sqlite3.Connection,
     edge_type: str,
+    among: Iterable[str] | None = None,
 ) -> set[str]:
     """Return every node ID that has at least one outbound edge of ``edge_type``.
 
@@ -153,15 +248,31 @@ def get_edge_source_ids_conn(
     Args:
         conn: Open SQLite connection (caller manages transaction).
         edge_type: The single edge type to read.
+        among: Only these sources, looked up in batches through the
+            ``from_id`` index; ``None`` for every source.
 
     Returns:
         Set of source node IDs.  Empty set when no such edges exist.
     """
-    rows = conn.execute(
-        "SELECT DISTINCT from_id FROM edges WHERE edge_type = ?",
-        (edge_type,),
-    ).fetchall()
-    return {r["from_id"] for r in rows}
+    if among is None:
+        rows = conn.execute(
+            "SELECT DISTINCT from_id FROM edges WHERE edge_type = ?",
+            (edge_type,),
+        ).fetchall()
+        return {r["from_id"] for r in rows}
+    ids = sorted(set(among))
+    out: set[str] = set()
+    for start in range(0, len(ids), 500):
+        chunk = ids[start : start + 500]
+        out.update(
+            r[0]
+            for r in conn.execute(
+                f"SELECT DISTINCT from_id FROM edges WHERE from_id IN ({','.join('?' * len(chunk))}) "  # noqa: S608
+                "AND edge_type = ?",
+                (*chunk, edge_type),
+            )
+        )
+    return out
 
 
 def delete_edge_conn(
@@ -303,9 +414,44 @@ def _migrate_edges(conn: sqlite3.Connection, old_id: str, new_id: str) -> None:
         )
 
 
+def edge_sources_into_conn(
+    conn: sqlite3.Connection,
+    target_ids: Iterable[str],
+    edge_types: Iterable[str],
+) -> set[str]:
+    """Return the sources of the edges of *edge_types* into *target_ids* (indexed by ``to_id``).
+
+    Args:
+        conn: Open connection.
+        target_ids: Edge targets; ids with no node row are fine.
+        edge_types: The edge types to follow.
+
+    Returns:
+        Source node ids.
+    """
+    ids = sorted(set(target_ids))
+    types = list(edge_types)
+    out: set[str] = set()
+    for start in range(0, len(ids), 500):
+        chunk = ids[start : start + 500]
+        out.update(
+            r[0]
+            for r in conn.execute(
+                f"SELECT from_id FROM edges WHERE to_id IN ({','.join('?' * len(chunk))}) "
+                f"AND edge_type IN ({','.join('?' * len(types))})",
+                (*chunk, *types),
+            )
+        )
+    return out
+
+
 __all__ = [
+    "edge_sources_into_conn",
+    "get_edges_from_conn",
+    "iter_edges_of_type_conn",
     "upsert_edge",
     "upsert_edge_conn",
+    "upsert_edges_conn",
     "query_edges",
     "all_edges",
     "get_outbound_edge_targets_conn",

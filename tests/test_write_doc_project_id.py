@@ -57,7 +57,7 @@ def test_write_doc_falls_back_to_dir_name(tmp_path: Path) -> None:
 def test_write_doc_rejects_node_id_form(tmp_path: Path) -> None:
     """axiom_graph_write_doc should reject node-id-form 'id' with a helpful error.
 
-    Node-id form ('project::docs.path.X') breaks on Windows (NTFS reserves
+    Node-id form ('project::docs/path/X') breaks on Windows (NTFS reserves
     '::') and is silently malformed on POSIX. The fix is to point the
     caller at the path-slug shape ('pev/instances/X').
     """
@@ -66,7 +66,7 @@ def test_write_doc_rejects_node_id_form(tmp_path: Path) -> None:
 
     doc = {
         "title": "Bad Doc",
-        "id": "axiom_graph::docs.pev.instances.pev-instance-2026-04-28-foo",
+        "id": "axiom_graph::docs/pev/instances/pev-instance-2026-04-28-foo",
         "sections": [{"id": "intro", "heading": "Introduction", "content": "Hello"}],
     }
 
@@ -91,7 +91,7 @@ def test_write_doc_accepts_path_slug_with_subdirs(tmp_path: Path) -> None:
     result = axiom_graph_write_doc(str(tmp_path), json.dumps(doc))
 
     assert "Wrote" in result, f"Expected success, got: {result}"
-    written = tmp_path / "docs" / "pev" / "instances" / "my-instance.json"
+    written = tmp_path / "docs" / "pev" / "instances" / "my-instance.docjson"
     assert written.exists(), f"File not written at expected subdir path: {written}"
 
 
@@ -110,3 +110,54 @@ def test_write_doc_rejects_filesystem_illegal_chars(tmp_path: Path) -> None:
 
     assert result.startswith("ERROR:"), f"Expected ERROR, got: {result}"
     assert "invalid in filenames" in result, f"Error should name the problem; got: {result}"
+
+
+def test_write_doc_without_toml_uses_the_id_the_index_stores(tmp_path: Path) -> None:
+    """With no axiom-graph.toml, a doc written in a folder named differently from the project gets the index's id.
+
+    A later build keeps every node, the new doc included, under that id.
+    """
+    from axiom_graph.index import builder
+
+    root = tmp_path / "worktree-folder"
+    (root / "docs").mkdir(parents=True)
+    (root / "mod.py").write_text("def fn():\n    return 1\n", encoding="utf-8")
+    builder.build(root, project_id="fresh", discovery_only=False)
+
+    doc = {"title": "Cycle", "id": "pev/cycles/c-1", "sections": [{"id": "intro", "heading": "Intro"}]}
+    result = axiom_graph_write_doc(str(root), json.dumps(doc))
+
+    assert "fresh::docs/pev/cycles/c-1" in result, result
+    builder.build(root, discovery_only=True)
+    ids = {n.id for n in db.all_nodes(root / ".axiom_graph" / "graph.db")}
+    assert "fresh::docs/pev/cycles/c-1" in ids
+    assert "fresh::mod::fn" in ids
+    assert not [i for i in ids if not i.startswith("fresh::")], ids
+
+
+def test_export_and_viz_without_toml_use_the_id_the_index_stores(tmp_path: Path) -> None:
+    """With no axiom-graph.toml, export and the viz server take the index's id, not the folder name."""
+    from click.testing import CliRunner
+
+    from axiom_graph.cli import main
+    from axiom_graph.index import builder
+    from axiom_graph.viz import server
+
+    root = tmp_path / "worktree-folder"
+    root.mkdir()
+    (root / "mod.py").write_text("def fn():\n    return 1\n", encoding="utf-8")
+    builder.build(root, project_id="fresh", discovery_only=False)
+
+    result = CliRunner().invoke(main, ["export", str(root)])
+    assert result.exit_code == 0, result.output
+    exported = json.loads((root / ".axiom_graph" / "index.json").read_text(encoding="utf-8"))
+    assert exported["project_id"] == "fresh"
+
+    with server._switch_lock:
+        previous = server._PROJECT_ROOT
+        server._apply_project(root)
+        try:
+            assert server._PROJECT_ID == "fresh"
+        finally:
+            if previous is not None:
+                server._apply_project(previous)

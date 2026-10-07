@@ -242,54 +242,6 @@ html, body {
   overflow: visible;
 }
 #search-wrap:focus-within { border-color: var(--accent-blue); }
-#search-mode-toggle {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 6px 8px;
-  background: var(--bg-tertiary);
-  border: none;
-  border-right: 1px solid var(--border);
-  border-radius: 6px 0 0 6px;
-  color: var(--text-secondary);
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-#search-mode-toggle:hover { color: var(--text-primary); background: var(--bg-hover); }
-.search-mode-caret { font-size: 9px; opacity: 0.6; }
-#search-mode-dropdown {
-  position: absolute;
-  top: 100%;
-  left: 0;
-  margin-top: 4px;
-  min-width: 200px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0,0,0,.4);
-  z-index: 200;
-  overflow: hidden;
-}
-.search-mode-option {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
-  color: var(--text-primary);
-  font-size: 13px;
-  cursor: pointer;
-}
-.search-mode-option:hover:not(.disabled) { background: var(--bg-hover); }
-.search-mode-option.disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-.search-mode-desc {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-left: 12px;
-}
 #search-input {
   flex: 1;
   padding: 6px 10px;
@@ -4433,12 +4385,8 @@ th.hidden, td.hidden { display: none; }
 .since-modal-commit-row.in-range {
   background: var(--bg-selected);
 }
-.since-modal-commit-row.not-indexed {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-.since-modal-commit-row.not-indexed:hover { background: transparent; }
-.since-modal-commit-row.not-indexed .cm-checkbox { cursor: not-allowed; }
+/* Un-indexed commits stay selectable (resolved by git commit time); only faded. */
+.since-modal-commit-row.not-indexed { opacity: 0.4; }
 .since-modal-commit-row .cm-checkbox {
   margin-top: 2px;
   flex-shrink: 0;

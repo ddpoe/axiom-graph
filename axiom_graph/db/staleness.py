@@ -19,11 +19,15 @@ columns.  They share the ``parse_drift_filter`` vocab parser with
 
 from __future__ import annotations
 
+import re
+from collections.abc import Collection
 from pathlib import Path
 
 from axiom_annotations import task
 
 from axiom_graph.db._core import _connect
+from axiom_graph.db.history import effective_change_rows_conn
+from axiom_graph.index.dependency_set import LazyDependencyGraph, delegates_closure, warm_delegates_closures
 from axiom_graph.index.status import (
     BROKEN_LINK,
     CONTENT_UPDATED,
@@ -118,17 +122,189 @@ def get_all_staleness(db_path: Path) -> dict[str, tuple[str, str]]:
         return {r["id"]: (r["own_status"], r["link_status"]) for r in rows}
 
 
+def count_status_pairs_conn(conn) -> dict[tuple[str, str], int]:
+    """Count the stored ``(own_status, link_status)`` pairs over every node (one aggregate query).
+
+    Args:
+        conn: Open connection.
+
+    Returns:
+        ``{(own_status, link_status): node count}``.
+    """
+    rows = conn.execute("SELECT own_status, link_status, COUNT(*) FROM nodes GROUP BY own_status, link_status")
+    return {(r[0], r[1]): int(r[2]) for r in rows}
+
+
+def get_staleness_for_conn(conn, node_ids: Collection[str]) -> dict[str, tuple[str, str]]:
+    """Read the stored ``(own_status, link_status)`` of *node_ids* (ids with no row are left out).
+
+    Args:
+        conn: Open connection.
+        node_ids: The nodes to read.
+
+    Returns:
+        ``{node_id: (own_status, link_status)}``.
+    """
+    out: dict[str, tuple[str, str]] = {}
+    for chunk in _id_chunks(node_ids):
+        rows = conn.execute(
+            f"SELECT id, own_status, link_status FROM nodes WHERE id IN ({','.join('?' * len(chunk))})",
+            chunk,
+        )
+        out.update({r[0]: (r[1], r[2]) for r in rows})
+    return out
+
+
+def get_ordered_staleness_conn(conn, *, problems_only: bool) -> list[tuple[str, str, str]]:
+    """Read stored statuses in node-table order: every node, or only those not VERIFIED in a dimension.
+
+    The order is the order ``SELECT * FROM nodes`` lists the nodes in, which
+    is what ``check`` prints its rows in.
+
+    Args:
+        conn: Open connection.
+        problems_only: Keep only nodes whose own or link status is not VERIFIED.
+
+    Returns:
+        ``[(node_id, own_status, link_status), ...]``.
+    """
+    where = " WHERE own_status != ? OR link_status != ?" if problems_only else ""
+    params = (VERIFIED, VERIFIED) if problems_only else ()
+    return [
+        (r[0], r[1], r[2])
+        for r in conn.execute(f"SELECT id, own_status, link_status FROM nodes{where} ORDER BY rowid", params)
+    ]
+
+
+BROKEN_LINK_EDGE_TYPES: tuple[str, ...] = ("documents", "validates", "delegates_to")
+"""Link types whose dangling target makes the link's charged source BROKEN_LINK (see :func:`charged_source_sql`)."""
+
+DANGLING_LINK_EDGE_TYPES: tuple[str, ...] = (*BROKEN_LINK_EDGE_TYPES, "annotates")
+"""Link types whose dangling target can move the charged source's link status: the broken-link types and ``annotates``."""
+
+
+def charged_source_sql(edge: str = "e", source: str = "src") -> str:
+    """Return the SQL expression naming the node a dangling link out of *edge* is charged to.
+
+    A link leaving a ``step`` / ``autostep`` is charged to the ``workflow`` /
+    ``task`` envelope that composes the step (the smallest id when several
+    do): staleness gives step nodes a blanket VERIFIED, and the envelope is
+    the node a maintainer acts on.  A step no envelope composes keeps the
+    link, and so does any other source.
+
+    Args:
+        edge: Alias of the ``edges`` row of the link.
+        source: Alias of the ``nodes`` row of the link's source (may be a
+            LEFT JOIN that matched nothing).
+
+    Returns:
+        A SQL expression over *edge* and *source*.
+    """
+    return f"""CASE
+                    WHEN {source}.subtype IN ('step', 'autostep') THEN COALESCE(
+                        (SELECT c.from_id
+                           FROM edges c
+                           JOIN nodes env ON env.id = c.from_id
+                          WHERE c.edge_type = 'composes'
+                            AND c.to_id = {edge}.from_id
+                            AND env.subtype IN ('workflow', 'task')
+                          ORDER BY c.from_id
+                          LIMIT 1),
+                        {edge}.from_id
+                    )
+                    ELSE {edge}.from_id
+                END"""
+
+
+def unflagged_dangling_sources_conn(
+    conn, deleted_after: int | None = None, deleted_through: int | None = None
+) -> set[str]:
+    """Return the charged sources of dependency links whose target has no node row, not yet stored BROKEN_LINK.
+
+    A writer that deletes a node row (a retired doc section) leaves no
+    journal row; these are the nodes whose link status that deletion can
+    move, so an incremental refresh evaluates them.  The links looked at are
+    :data:`DANGLING_LINK_EDGE_TYPES`, and each is charged to a node the way
+    the broken-link rule charges it (:func:`charged_source_sql`), so a
+    step's dangling delegate link names its envelope.
+
+    With *deleted_after* only the links into the ids the deletion log holds
+    past that mark are looked at (the deletions since the last refresh that
+    consumed the log), through the ``edges.to_id`` index: a link that
+    dangled before the mark had its source evaluated by that refresh.
+    ``None`` (no mark stored yet) looks at every link.
+
+    Args:
+        conn: Open connection.
+        deleted_after: The last ``node_deletion_log.id`` already consumed, or
+            ``None`` for every link.
+        deleted_through: The newest log id to read (the one the caller
+            stores as the new mark); ``None`` for no bound.
+
+    Returns:
+        Charged source node ids.
+    """
+    types = ", ".join("?" * len(DANGLING_LINK_EDGE_TYPES))
+    dangling = (
+        f"e.edge_type IN ({types}) AND s.link_status != ? AND NOT EXISTS (SELECT 1 FROM nodes t WHERE t.id = e.to_id)"
+    )
+    charged = f"JOIN nodes src ON src.id = e.from_id CROSS JOIN nodes s ON s.id = ({charged_source_sql()})"
+    if deleted_after is None:
+        rows = conn.execute(
+            f"SELECT DISTINCT s.id FROM edges e {charged} WHERE {dangling}",  # noqa: S608 - fixed text
+            (*DANGLING_LINK_EDGE_TYPES, BROKEN_LINK),
+        )
+        return {r[0] for r in rows}
+    bound = "" if deleted_through is None else " AND id <= ?"
+    rows = conn.execute(
+        "SELECT DISTINCT s.id FROM "
+        f"(SELECT DISTINCT node_id FROM node_deletion_log WHERE id > ?{bound}) d "  # noqa: S608 - fixed text
+        # CROSS JOIN fixes the order: the few logged ids drive the edges index.
+        f"CROSS JOIN edges e ON e.to_id = d.node_id CROSS {charged} WHERE {dangling}",
+        (
+            deleted_after,
+            *(() if deleted_through is None else (deleted_through,)),
+            *DANGLING_LINK_EDGE_TYPES,
+            BROKEN_LINK,
+        ),
+    )
+    return {r[0] for r in rows}
+
+
+def count_nodes_conn(conn) -> int:
+    """Return how many nodes the index holds.
+
+    Args:
+        conn: Open connection.
+
+    Returns:
+        The node count.
+    """
+    return int(conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0])
+
+
 # ---------------------------------------------------------------------------
 # Computed staleness queries
 # ---------------------------------------------------------------------------
 
 
+def _id_chunks(ids, size: int = 500):
+    """Yield *ids* (deduplicated, sorted) in chunks small enough for one ``IN (...)`` list."""
+    ordered = sorted(set(ids))
+    for start in range(0, len(ordered), size):
+        yield ordered[start : start + size]
+
+
 @task(
-    purpose="Find doc sections whose linked code node has ever drifted — produces a sticky LINKED_STALE signal cleared only by mark_clean",
-    inputs="db_path",
-    outputs="List of dicts with section_id, doc_id, heading, code_node_id, code_changed_at, section_updated_at",
+    purpose="Find doc sections whose linked code node has a change that still counts — Pass 1 candidates for LINKED_STALE, for every section or only the given ones; Pass 2 settles a via by its verified-against pair when the section's verification recorded one, else by the verification clock",
+    inputs="db_path, optional section ids (the scope)",
+    outputs="List of dicts with section_id, doc_id, heading, code_node_id, code_changed_at, section_updated_at, sorted by section and code node",
 )
-def get_stale_doc_sections(db_path: Path) -> list[dict]:
+def get_stale_doc_sections(
+    db_path: Path,
+    realigned_now: frozenset[str] | set[str] = frozenset(),
+    section_ids: Collection[str] | None = None,
+) -> list[dict]:
     """Return doc sections linked to code that has drifted since the last verification.
 
     LINKED_STALE is sticky. Pass 1 of ``_get_linked_stale_ids`` calls this
@@ -140,90 +316,141 @@ def get_stale_doc_sections(db_path: Path) -> list[dict]:
     must not auto-clear LINKED_STALE.
 
     The only mechanism that clears LINKED_STALE is Pass 2 of
-    ``_get_linked_stale_ids``, which removes nodes whose
-    ``node_verification.verified_at`` (written by ``mark_clean``) is newer
-    than every via node's latest code change. See ADR-017.
+    ``_get_linked_stale_ids``, which settles each via against the section's
+    verification and drops the section once no via remains.  A via the
+    verification recorded a pair for (the hash of the target it was
+    checked against) is settled by hash equality: dropped while the
+    recorded hash equals the target's live hash, kept while they differ,
+    whatever the change times say.  Only a via with no recorded pair falls
+    back to the clock: dropped when its change (``code_changed_at`` below)
+    is not newer than the section's ``node_verification.verified_at``.
+    A recorded pair that no longer matches flags the section through
+    Pass P even when this query reports no change.  See ADR-018.
+
+    The linked node's change time is its latest code change that still
+    counts (:func:`axiom_graph.db.history.effective_change_rows_conn`): a
+    change that ended back at its baseline is not a change.
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+        realigned_now: Nodes the caller has just observed back at their
+            baseline, ahead of the history row that records it.
+        section_ids: Only these sections (the scoped refresh's evaluation
+            set); ``None`` means every section.  The rule is the same.
 
     Each dict has: section_id, doc_id, heading, code_node_id,
-    code_changed_at, section_updated_at.
+    code_changed_at, section_updated_at.  Rows are sorted by section, then
+    code node, so a scoped call lists a section's rows in the same order
+    as the full one.
     """
     from axiom_graph.db.docs import _section_filter_sql, split_section_id  # noqa: PLC0415
 
-    with _connect(db_path) as conn:
-        rows = conn.execute(
-            f"""
+    sql = f"""
             SELECT
                 s.id          AS section_id,
                 s.level_1     AS heading,
                 e.to_id       AS code_node_id,
-                nh.scanned_at AS code_changed_at,
                 s.updated_at  AS section_updated_at
             FROM nodes s
             JOIN edges e          ON e.from_id = s.id AND e.edge_type = 'documents'
             JOIN nodes code_n     ON code_n.id = e.to_id AND NOT (code_n.node_type = 'atomic_process' AND COALESCE(code_n.subtype, '') IN ('docjson', 'docjson_section'))
-            JOIN node_history nh  ON nh.node_id = e.to_id
-                                 AND nh.change_type IN ('CONTENT_ONLY', 'CONTENT_AND_DESC', 'BECAME_CONTENT_UPDATED')
-                                 AND nh.id = (
-                                       SELECT MAX(h2.id) FROM node_history h2
-                                       WHERE h2.node_id = e.to_id
-                                         AND h2.change_type IN ('CONTENT_ONLY', 'CONTENT_AND_DESC', 'BECAME_CONTENT_UPDATED')
-                                     )
             WHERE {_section_filter_sql("s.")}
             """
-        ).fetchall()
-        out: list[dict] = []
-        for r in rows:
-            d = dict(r)
-            d["doc_id"] = split_section_id(d["section_id"])[0]
-            out.append(d)
-        return out
+    with _connect(db_path) as conn:
+        if section_ids is None:
+            rows = conn.execute(sql).fetchall()
+        else:
+            rows = []
+            for chunk in _id_chunks(section_ids):
+                rows.extend(conn.execute(f"{sql} AND s.id IN ({','.join('?' * len(chunk))})", chunk).fetchall())
+        changes = effective_change_rows_conn(conn, [r["code_node_id"] for r in rows], realigned_now=realigned_now)
+    out: list[dict] = []
+    for r in rows:
+        change = changes.get(r["code_node_id"])
+        if change is None:
+            continue
+        d = dict(r)
+        d["code_changed_at"] = change[1]
+        d["doc_id"] = split_section_id(d["section_id"])[0]
+        out.append(d)
+    out.sort(key=lambda d: (d["section_id"], d["code_node_id"]))
+    return out
 
 
 @task(
-    purpose="Find annotation-envelope nodes whose annotated target drifted (code OR docstring) after the envelope was last updated — produces LINKED_STALE via Pass A",
-    inputs="db_path",
-    outputs="List of dicts with envelope_id, target_id, change_at, envelope_updated_at",
+    purpose="Find annotation-envelope nodes whose annotated target drifted (code OR docstring) after the envelope was last updated — Pass A candidates for LINKED_STALE, for every envelope or only the given ones; Pass 2 settles a via by its verified-against pair when one is recorded, else by the verification clock",
+    inputs="db_path, optional envelope ids (the scope)",
+    outputs="List of dicts with envelope_id, target_id, change_at, envelope_updated_at, sorted by envelope and target",
 )
-def get_stale_annotated_nodes(db_path: Path) -> list[dict]:
+def get_stale_annotated_nodes(
+    db_path: Path,
+    realigned_now: frozenset[str] | set[str] = frozenset(),
+    envelope_ids: Collection[str] | None = None,
+) -> list[dict]:
     """Return envelope nodes whose annotated target changed after the envelope was last updated.
 
     Joins ``nodes`` (envelope) -> ``edges`` (``edge_type = 'annotates'``) ->
     ``node_history`` of the target, widened to include ``DESC_ONLY`` so
     pure-docstring drift on the target still flips the envelope.
 
-    This is the Pass A query behind ``annotates`` staleness.  Each dict has
-    keys: ``envelope_id``, ``target_id``, ``change_at``, ``envelope_updated_at``.
+    The target's change time is its latest change that still counts
+    (:func:`axiom_graph.db.history.effective_change_rows_conn`, widened).
+
+    This is the Pass A query behind ``annotates`` staleness.  It only
+    proposes candidates: Pass 2 of ``_get_linked_stale_ids`` settles a via
+    the envelope's verification recorded a pair for by hash equality (code
+    and docstring hash), and falls back to the verification clock only for
+    a via with no recorded pair.  Each dict has keys: ``envelope_id``,
+    ``target_id``, ``change_at``, ``envelope_updated_at``.
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+        realigned_now: Nodes the caller has just observed back at their
+            baseline, ahead of the history row that records it.
+        envelope_ids: Only these sources (the scoped refresh's evaluation
+            set); ``None`` means every one.  The rule is the same.
     """
-    with _connect(db_path) as conn:
-        rows = conn.execute(
-            """
+    sql = """
             SELECT
                 e.from_id     AS envelope_id,
                 e.to_id       AS target_id,
-                nh.scanned_at AS change_at,
                 n.updated_at  AS envelope_updated_at
             FROM edges e
             JOIN nodes n          ON n.id = e.from_id
-            JOIN node_history nh  ON nh.node_id = e.to_id
-                                 AND nh.change_type IN ('CONTENT_ONLY', 'DESC_ONLY', 'CONTENT_AND_DESC', 'BECAME_CONTENT_UPDATED')
-                                 AND nh.id = (
-                                       SELECT MAX(h2.id) FROM node_history h2
-                                       WHERE h2.node_id = e.to_id
-                                         AND h2.change_type IN ('CONTENT_ONLY', 'DESC_ONLY', 'CONTENT_AND_DESC', 'BECAME_CONTENT_UPDATED')
-                                     )
             WHERE e.edge_type = 'annotates'
-              AND nh.scanned_at > n.updated_at
             """
-        ).fetchall()
-        return [dict(r) for r in rows]
+    with _connect(db_path) as conn:
+        if envelope_ids is None:
+            rows = conn.execute(sql).fetchall()
+        else:
+            rows = []
+            for chunk in _id_chunks(envelope_ids):
+                rows.extend(conn.execute(f"{sql} AND e.from_id IN ({','.join('?' * len(chunk))})", chunk).fetchall())
+        changes = effective_change_rows_conn(
+            conn, [r["target_id"] for r in rows], include_desc=True, realigned_now=realigned_now
+        )
+    out: list[dict] = []
+    for r in rows:
+        change = changes.get(r["target_id"])
+        if change is None or not change[1] > (r["envelope_updated_at"] or ""):
+            continue
+        d = dict(r)
+        d["change_at"] = change[1]
+        out.append(d)
+    out.sort(key=lambda d: (d["envelope_id"], d["target_id"]))
+    return out
 
 
 @task(
-    purpose="Find workflow/task envelopes whose delegates_to chain transitively reaches a CONTENT-changed task — produces LINKED_STALE via Pass B with cycle guard",
-    inputs="db_path",
-    outputs="List of dicts with envelope_id, via_task_id, envelope_updated_at, change_at",
+    purpose="Find workflow/task envelopes whose delegates_to chain transitively reaches a CONTENT-changed task — Pass B candidates for LINKED_STALE, for every envelope or only the given ones, cycle-guarded, folding history only for the tasks the closures reach; Pass 2 settles a via by its verified-against pair when one is recorded, else by the verification clock",
+    inputs="db_path, optional envelope ids (the scope)",
+    outputs="List of dicts with envelope_id, via_task_id, envelope_updated_at, change_at, sorted by envelope and task",
 )
-def get_stale_workflow_envelopes_via_delegates(db_path: Path) -> list[dict]:
+def get_stale_workflow_envelopes_via_delegates(
+    db_path: Path,
+    realigned_now: frozenset[str] | set[str] = frozenset(),
+    envelope_ids: Collection[str] | None = None,
+) -> list[dict]:
     """Return envelopes whose delegates_to closure includes a CONTENT-changed task.
 
     Walks the transitive closure of ``composes`` → ``autostep`` →
@@ -232,82 +459,74 @@ def get_stale_workflow_envelopes_via_delegates(db_path: Path) -> list[dict]:
     propagate: ``DESC_ONLY`` is excluded (Pass A catches it on the task's
     own envelope).
 
+    The closures are walked first and the change history is folded only
+    for the tasks they reach, so the cost follows the closures, never the
+    size of the history.  A task's change time is its latest code change
+    that still counts (:func:`axiom_graph.db.history.effective_change_rows_conn`).
+
+    The rows are candidates only: Pass 2 of ``_get_linked_stale_ids``
+    settles a via the envelope's verification recorded a pair for by hash
+    equality, and falls back to the verification clock only for a via with
+    no recorded pair.  The closure is the shared
+    :func:`~axiom_graph.index.dependency_set.delegates_closure` walk, so the
+    tasks reported here are the ones a verification records pairs for.
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+        realigned_now: Nodes the caller has just observed back at their
+            baseline, ahead of the history row that records it.
+        envelope_ids: Only these envelopes (the scoped refresh's evaluation
+            set; ids that are not workflow / task envelopes are ignored);
+            ``None`` means every one.  The rule is the same.
+
     Each dict has: ``envelope_id``, ``via_task_id``, ``envelope_updated_at``,
     ``change_at``.
     """
+    closures: dict[str, list[str]] = {}
+    updated: dict[str, str] = {}
     with _connect(db_path) as conn:
-        # Load edges once.
-        composes_rows = conn.execute("SELECT from_id, to_id FROM edges WHERE edge_type = 'composes'").fetchall()
-        delegates_rows = conn.execute("SELECT from_id, to_id FROM edges WHERE edge_type = 'delegates_to'").fetchall()
-        annotates_rows = conn.execute("SELECT from_id, to_id FROM edges WHERE edge_type = 'annotates'").fetchall()
-        envelope_rows = conn.execute(
-            "SELECT id, updated_at FROM nodes WHERE node_type = 'composite_process' AND subtype IN ('workflow', 'task')"
-        ).fetchall()
-        subtype_rows = conn.execute("SELECT id, subtype FROM nodes").fetchall()
-        # Latest CODE-change history per node (for the stale filter).
-        latest_rows = conn.execute(
-            """
-            SELECT nh.node_id AS node_id, nh.scanned_at AS scanned_at
-            FROM node_history nh
-            WHERE nh.change_type IN ('CONTENT_ONLY', 'CONTENT_AND_DESC', 'BECAME_CONTENT_UPDATED')
-              AND nh.id = (
-                  SELECT MAX(h2.id) FROM node_history h2
-                  WHERE h2.node_id = nh.node_id
-                    AND h2.change_type IN ('CONTENT_ONLY', 'CONTENT_AND_DESC', 'BECAME_CONTENT_UPDATED')
-              )
-            """
-        ).fetchall()
+        if envelope_ids is None:
+            composes_out: dict[str, list[str]] = {}
+            for r in conn.execute("SELECT from_id, to_id FROM edges WHERE edge_type = 'composes'"):
+                composes_out.setdefault(r["from_id"], []).append(r["to_id"])
+            delegates_out: dict[str, str] = {}
+            for r in conn.execute("SELECT from_id, to_id FROM edges WHERE edge_type = 'delegates_to'"):
+                # AutoStep has at most one delegates_to edge by construction.
+                delegates_out[r["from_id"]] = r["to_id"]
+            annotates_rev: dict[str, list[str]] = {}
+            for r in conn.execute("SELECT from_id, to_id FROM edges WHERE edge_type = 'annotates'"):
+                annotates_rev.setdefault(r["to_id"], []).append(r["from_id"])
+            node_subtype = {r["id"]: r["subtype"] for r in conn.execute("SELECT id, subtype FROM nodes")}
+            for r in conn.execute(
+                "SELECT id, updated_at FROM nodes WHERE node_type = 'composite_process' AND subtype IN ('workflow', 'task')"
+            ):
+                updated[r["id"]] = r["updated_at"]
+                closures[r["id"]] = delegates_closure(
+                    r["id"], composes_out, delegates_out, annotates_rev, node_subtype.get
+                )
+        else:
+            graph = LazyDependencyGraph(conn)
+            for chunk in _id_chunks(envelope_ids):
+                for r in conn.execute(
+                    "SELECT id, updated_at FROM nodes WHERE node_type = 'composite_process' "
+                    f"AND subtype IN ('workflow', 'task') AND id IN ({','.join('?' * len(chunk))})",
+                    chunk,
+                ):
+                    updated[r["id"]] = r["updated_at"]
+            warm_delegates_closures(graph, sorted(updated))
+            for env_id in sorted(updated):
+                closures[env_id] = delegates_closure(
+                    env_id, graph.composes_out, graph.delegates_out, graph.annotates_rev, graph.subtype_of
+                )
+        tasks = {t for ts in closures.values() for t in ts}
+        # Latest CODE change that still counts, for the closure tasks only.
+        effective = effective_change_rows_conn(conn, sorted(tasks), realigned_now=realigned_now) if tasks else {}
 
-    latest_code_change: dict[str, str] = {r["node_id"]: r["scanned_at"] for r in latest_rows}
-    node_subtype: dict[str, str | None] = {r["id"]: r["subtype"] for r in subtype_rows}
-
-    # Forward adjacency.
-    composes_out: dict[str, list[str]] = {}
-    for r in composes_rows:
-        composes_out.setdefault(r["from_id"], []).append(r["to_id"])
-    delegates_out: dict[str, str] = {}
-    for r in delegates_rows:
-        # AutoStep has at most one delegates_to edge by construction.
-        delegates_out[r["from_id"]] = r["to_id"]
-    # Reverse: function → envelope(s) that annotate it.
-    annotates_rev: dict[str, list[str]] = {}
-    for r in annotates_rows:
-        annotates_rev.setdefault(r["to_id"], []).append(r["from_id"])
-
-    def _reachable_tasks(envelope_id: str) -> list[str]:
-        """BFS over (composes → autostep → delegates_to → annotates_rev)."""
-        visited_tasks: set[str] = set()
-        # Each frontier item is an envelope we expand.
-        env_frontier: list[str] = [envelope_id]
-        visited_envs: set[str] = {envelope_id}
-        depth = 0
-        while env_frontier and depth < 32:
-            next_envs: list[str] = []
-            for env in env_frontier:
-                for step_id in composes_out.get(env, []):
-                    if node_subtype.get(step_id) != "autostep":
-                        continue
-                    target_task = delegates_out.get(step_id)
-                    if not target_task:
-                        continue
-                    if target_task in visited_tasks:
-                        continue
-                    visited_tasks.add(target_task)
-                    # Follow up through target's envelope, if any.
-                    for tgt_env in annotates_rev.get(target_task, []):
-                        if tgt_env in visited_envs:
-                            continue
-                        visited_envs.add(tgt_env)
-                        next_envs.append(tgt_env)
-            env_frontier = next_envs
-            depth += 1
-        return list(visited_tasks)
-
+    latest_code_change: dict[str, str] = {nid: at for nid, (_hid, at) in effective.items()}
     results: list[dict] = []
-    for env_row in envelope_rows:
-        env_id = env_row["id"]
-        env_updated = env_row["updated_at"]
-        for task_id in _reachable_tasks(env_id):
+    for env_id in sorted(closures):
+        env_updated = updated[env_id]
+        for task_id in closures[env_id]:
             change_at = latest_code_change.get(task_id)
             if change_at and change_at > env_updated:
                 results.append(
@@ -318,15 +537,20 @@ def get_stale_workflow_envelopes_via_delegates(db_path: Path) -> list[dict]:
                         "change_at": change_at,
                     }
                 )
+    results.sort(key=lambda d: (d["envelope_id"], d["via_task_id"]))
     return results
 
 
 @task(
-    purpose="Find test nodes linked via 'validates' to code that has ever drifted — produces a sticky LINKED_STALE signal cleared only by mark_clean",
-    inputs="db_path",
-    outputs="List of dicts with test_node_id, code_node_id, code_changed_at, test_updated_at",
+    purpose="Find test nodes linked via 'validates' to code with a change that still counts — Pass 1 candidates for LINKED_STALE, for every test or only the given ones; Pass 2 settles a via by its verified-against pair when the test's verification recorded one, else by the verification clock",
+    inputs="db_path, optional test ids (the scope)",
+    outputs="List of dicts with test_node_id, code_node_id, code_changed_at, test_updated_at, sorted by test and code node",
 )
-def get_stale_tests(db_path: Path) -> list[dict]:
+def get_stale_tests(
+    db_path: Path,
+    realigned_now: frozenset[str] | set[str] = frozenset(),
+    test_ids: Collection[str] | None = None,
+) -> list[dict]:
     """Return test nodes linked to code that has drifted since the last verification.
 
     LINKED_STALE is sticky. Pass 1 of ``_get_linked_stale_ids`` calls this
@@ -338,35 +562,59 @@ def get_stale_tests(db_path: Path) -> list[dict]:
     auto-clear LINKED_STALE.
 
     The only mechanism that clears LINKED_STALE is Pass 2 of
-    ``_get_linked_stale_ids``, which removes nodes whose
-    ``node_verification.verified_at`` (written by ``mark_clean``) is newer
-    than every via node's latest code change. See ADR-017.
+    ``_get_linked_stale_ids``, which settles each via against the test's
+    verification and drops the test once no via remains.  A via the
+    verification recorded a pair for (the hash of the target it was
+    checked against) is settled by hash equality: dropped while the
+    recorded hash equals the target's live hash, kept while they differ,
+    whatever the change times say.  Only a via with no recorded pair falls
+    back to the clock: dropped when its change (``code_changed_at`` below)
+    is not newer than the test's ``node_verification.verified_at``.  A
+    recorded pair that no longer matches flags the test through Pass P even
+    when this query reports no change.  See ADR-018.
+
+    The validated node's change time is its latest code change that still
+    counts (:func:`axiom_graph.db.history.effective_change_rows_conn`): a
+    change that ended back at its baseline is not a change.
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+        realigned_now: Nodes the caller has just observed back at their
+            baseline, ahead of the history row that records it.
+        test_ids: Only these tests (the scoped refresh's evaluation set);
+            ``None`` means every test.  The rule is the same.
 
     Each dict has: test_node_id, code_node_id, code_changed_at, test_updated_at.
     """
-    with _connect(db_path) as conn:
-        rows = conn.execute(
-            """
+    sql = """
             SELECT
                 t.id          AS test_node_id,
                 e.to_id       AS code_node_id,
-                nh.scanned_at AS code_changed_at,
                 t.updated_at  AS test_updated_at
             FROM nodes t
             JOIN edges e         ON e.from_id = t.id AND e.edge_type = 'validates'
             JOIN nodes code_n    ON code_n.id = e.to_id AND NOT (code_n.node_type = 'atomic_process' AND COALESCE(code_n.subtype, '') IN ('docjson', 'docjson_section'))
-            JOIN node_history nh ON nh.node_id = e.to_id
-                                AND nh.change_type IN ('CONTENT_ONLY', 'CONTENT_AND_DESC', 'BECAME_CONTENT_UPDATED')
-                                AND nh.id = (
-                                      SELECT MAX(h2.id) FROM node_history h2
-                                      WHERE h2.node_id = e.to_id
-                                        AND h2.change_type IN ('CONTENT_ONLY', 'CONTENT_AND_DESC', 'BECAME_CONTENT_UPDATED')
-                                    )
             WHERE t.node_type = 'atomic_process'
               AND t.subtype   = 'test'
             """
-        ).fetchall()
-        return [dict(r) for r in rows]
+    with _connect(db_path) as conn:
+        if test_ids is None:
+            rows = conn.execute(sql).fetchall()
+        else:
+            rows = []
+            for chunk in _id_chunks(test_ids):
+                rows.extend(conn.execute(f"{sql} AND t.id IN ({','.join('?' * len(chunk))})", chunk).fetchall())
+        changes = effective_change_rows_conn(conn, [r["code_node_id"] for r in rows], realigned_now=realigned_now)
+    out: list[dict] = []
+    for r in rows:
+        change = changes.get(r["code_node_id"])
+        if change is None:
+            continue
+        d = dict(r)
+        d["code_changed_at"] = change[1]
+        out.append(d)
+    out.sort(key=lambda d: (d["test_node_id"], d["code_node_id"]))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -421,8 +669,13 @@ def parse_drift_filter(filter_str: str | None) -> tuple[set[str], set[str], bool
     # Individual status name.
     if filter_str in (LINKED_STALE, BROKEN_LINK):
         return (set(), {filter_str}, False)
-    if filter_str in (CONTENT_UPDATED, DESC_UPDATED, RENAMED, NOT_FOUND, VERIFIED):
+    if filter_str in (CONTENT_UPDATED, DESC_UPDATED, RENAMED, NOT_FOUND):
         return ({filter_str}, set(), False)
+    if filter_str == VERIFIED:
+        raise ValueError(
+            "filter='VERIFIED' is not a drift filter: VERIFIED is the absence of drift. "
+            "Use axiom_graph_check for the VERIFIED count."
+        )
     raise ValueError(
         f"Unknown filter value: {filter_str!r}. Valid: None, 'staleness', 'links', "
         f"'doc_quality', 'all', or an individual status name "
@@ -430,38 +683,119 @@ def parse_drift_filter(filter_str: str | None) -> tuple[set[str], set[str], bool
     )
 
 
-def _glob_to_like(glob: str) -> str:
-    """Translate an fnmatch-style glob into a SQL LIKE pattern.
+def _glob_to_regex(glob: str) -> re.Pattern[str]:
+    """Translate a path glob into a compiled, fully-anchored regex.
 
-    Supports ``*`` (matches any sequence) and ``?`` (matches any single
-    character).  Escapes existing SQL wildcards (``%``, ``_``) so they
-    are treated literally in the source path.
+    Path-segment aware, unlike SQL ``LIKE``:
 
-    Note: ``**`` is collapsed to ``%`` (recursive directory match).
+    - ``*`` matches any run of characters within one path segment.
+    - ``**`` matches across directories; ``**/`` also matches zero
+      directories (``a/**/b.py`` matches ``a/b.py``).
+    - ``?`` matches one character within a segment.
+    - ``[abc]`` / ``[!abc]`` match one character in / not in the set.
+    - ``{a,b}`` matches any one alternative (alternatives may contain
+      the other wildcards; braces do not nest).
+
+    Args:
+        glob: The glob pattern.
+
+    Returns:
+        Compiled regex to ``fullmatch`` against a ``/``-separated path.
+
+    Raises:
+        ValueError: On an unclosed ``[`` or ``{``, or nested braces --
+            a malformed glob errors rather than silently matching nothing.
     """
-    out = []
+    out: list[str] = []
     i = 0
-    while i < len(glob):
+    n = len(glob)
+    in_brace = False
+    while i < n:
         c = glob[i]
         if c == "*":
-            # Coalesce ** to %
-            if i + 1 < len(glob) and glob[i + 1] == "*":
-                out.append("%")
-                i += 2
+            if i + 1 < n and glob[i + 1] == "*":
+                if i + 2 < n and glob[i + 2] == "/":
+                    out.append("(?:.*/)?")
+                    i += 3
+                else:
+                    out.append(".*")
+                    i += 2
                 continue
-            out.append("%")
+            out.append("[^/]*")
         elif c == "?":
-            out.append("_")
-        elif c == "%":
-            out.append(r"\%")
-        elif c == "_":
-            out.append(r"\_")
-        elif c == "\\":
-            out.append(r"\\")
+            out.append("[^/]")
+        elif c == "[":
+            end = glob.find("]", i + 2 if i + 1 < n and glob[i + 1] in "!^" else i + 1)
+            if end == -1:
+                raise ValueError(f"Invalid location_glob {glob!r}: unclosed '['")
+            body = glob[i + 1 : end]
+            negate = body[:1] in ("!", "^")
+            if negate:
+                body = body[1:]
+            body = body.replace("\\", "\\\\")
+            out.append(f"[^/{body}]" if negate else f"[{body}]")
+            i = end + 1
+            continue
+        elif c == "{":
+            if in_brace:
+                raise ValueError(f"Invalid location_glob {glob!r}: nested '{{' is not supported")
+            in_brace = True
+            out.append("(?:")
+        elif c == "}" and in_brace:
+            in_brace = False
+            out.append(")")
+        elif c == "," and in_brace:
+            out.append("|")
         else:
-            out.append(c)
+            out.append(re.escape(c))
         i += 1
-    return "".join(out)
+    if in_brace:
+        raise ValueError(f"Invalid location_glob {glob!r}: unclosed '{{'")
+    return re.compile("".join(out))
+
+
+def _location_matcher(glob: str):
+    """Build the SQL-callable predicate for ``location_glob``.
+
+    A location matches when either the whole stored location or its path
+    part (before any ``#Lx-Ly`` line fragment) fully matches the glob, so
+    ``tests/*.py`` selects function and test nodes as well as modules.
+    Backslashes are normalised to ``/``.
+
+    Raises:
+        ValueError: Propagated from :func:`_glob_to_regex`.
+    """
+    pattern = _glob_to_regex(glob)
+
+    def _match(location: str | None) -> int:
+        if not location:
+            return 0
+        loc = location.replace("\\", "/")
+        if pattern.fullmatch(loc):
+            return 1
+        path = loc.split("#", 1)[0]
+        return 1 if path != loc and pattern.fullmatch(path) else 0
+
+    return _match
+
+
+def _long_section_select(show_doc_quality: bool) -> tuple[str, list]:
+    """SELECT expression (+ params) flagging DOC_SECTION_LONG advisory rows.
+
+    Constant ``0`` when the filter does not request doc-quality rows, so
+    status-only filters never label a row as an advisory.
+    """
+    if not show_doc_quality:
+        return "0", []
+    from axiom_graph.db.docs import DOC_SECTION_LONG_THRESHOLD  # noqa: PLC0415
+
+    return "(subtype = 'docjson_section' AND LENGTH(level_2) > ?)", [DOC_SECTION_LONG_THRESHOLD]
+
+
+def _apply_location_glob(conn, location_glob: str, clauses: list[str]) -> None:
+    """Register the glob predicate on *conn* and append its WHERE clause."""
+    conn.create_function("drift_location_match", 1, _location_matcher(location_glob), deterministic=True)
+    clauses.append("drift_location_match(COALESCE(level_3_location, location)) = 1")
 
 
 def _row_in_filter(
@@ -475,7 +809,7 @@ def _row_in_filter(
 
 
 def _via_for_node(db_path: Path, node_id: str) -> list[str]:
-    """Return the (up to 3) source node ids that contributed LINKED_STALE
+    """Return the source node ids that likely contributed LINKED_STALE
     for this node, by inspecting inbound annotations / documents / validates
     edges to nodes with own_status != VERIFIED.
 
@@ -497,8 +831,8 @@ def _via_for_nodes_batch(
 ) -> dict[str, list[str]]:
     """Batched version of ``_via_for_node`` for an entire page.
 
-    Given a list of node IDs, returns ``{node_id -> [via_id, ...]}`` (up
-    to 3 vias per node) in a single SQL round-trip.  Nodes with no qualifying
+    Given a list of node IDs, returns ``{node_id -> [via_id, ...]}`` in a
+    single SQL round-trip.  Nodes with no qualifying
     inbound edge are absent from the dict (callers default to ``[]``).
 
     The per-row "via" string content matches the unbatched version
@@ -512,7 +846,7 @@ def _via_for_nodes_batch(
             an empty dict without opening a connection.
 
     Returns:
-        Mapping from node_id to up to three via_id strings.  Order within
+        Mapping from node_id to its via_id strings.  Order within
         each list reflects insertion order from the SQL scan.
     """
     if not node_ids:
@@ -538,7 +872,7 @@ def _via_for_nodes_batch(
         rows = conn.execute(sql, unique_ids).fetchall()
     for r in rows:
         bucket = out.setdefault(r["src_id"], [])
-        if len(bucket) < 3:
+        if r["via_id"] not in bucket:
             bucket.append(r["via_id"])
     return out
 
@@ -622,17 +956,18 @@ def query_drift_rows(
             return []
 
         if location_glob is not None:
-            like = _glob_to_like(location_glob)
-            clauses.append("(COALESCE(level_3_location, location) LIKE ? ESCAPE '\\')")
-            params.append(like)
+            _apply_location_glob(conn, location_glob, clauses)
 
         where = " AND ".join(clauses)
+        long_select, long_params = _long_section_select(show_doc_quality)
         sql = (
             "SELECT id, own_status, link_status, "
-            "       COALESCE(level_3_location, location) AS location "
+            "       COALESCE(level_3_location, location) AS location, "
+            f"       {long_select} AS long_section "
             f"FROM nodes WHERE {where} "
             "ORDER BY id"
         )
+        params = [*long_params, *params]
         if paginate:
             offset = max(0, page) * max(1, limit)
             sql += " LIMIT ? OFFSET ?"
@@ -656,6 +991,7 @@ def query_drift_rows(
                 "link_status": link_status,
                 "location": r["location"],
                 "via": via,
+                "long_section": bool(r["long_section"]),
             }
         )
     return out
@@ -664,12 +1000,14 @@ def query_drift_rows(
 def _location_prefix(location: str | None, depth: int = 2) -> str:
     """Return the first ``depth`` path components of ``location``.
 
-    Treats both ``/`` and ``\\`` as separators.  Returns ``"(no-location)"``
-    when ``location`` is empty/None.
+    Treats both ``/`` and ``\\`` as separators.  A ``#...`` line-range
+    suffix (``tests/test_x.py#L10-L20``) is dropped first, so every node in
+    one file shares the file's group.  Returns ``"(no-location)"`` when
+    ``location`` is empty/None.
     """
     if not location:
         return "(no-location)"
-    parts = location.replace("\\", "/").split("/")
+    parts = location.split("#", 1)[0].replace("\\", "/").split("/")
     parts = [p for p in parts if p]
     if not parts:
         return "(no-location)"
@@ -684,7 +1022,8 @@ def _filtered_rows_for_grouping(
     """Return the unpaginated set of nodes matching filter + glob.
 
     Used by the grouped helpers (counts / IDs).  Returns dicts with
-    ``id``, ``own_status``, ``link_status``, ``location``.
+    ``id``, ``own_status``, ``link_status``, ``location``, ``subtype``,
+    ``long_section``.
     """
     show_own, show_link, show_doc_quality = parse_drift_filter(filter)
     with _connect(db_path) as conn:
@@ -730,17 +1069,17 @@ def _filtered_rows_for_grouping(
             return []
 
         if location_glob is not None:
-            like = _glob_to_like(location_glob)
-            clauses.append("(COALESCE(level_3_location, location) LIKE ? ESCAPE '\\')")
-            params.append(like)
+            _apply_location_glob(conn, location_glob, clauses)
 
+        long_select, long_params = _long_section_select(show_doc_quality)
         sql = (
-            "SELECT id, own_status, link_status, "
-            "       COALESCE(level_3_location, location) AS location "
+            "SELECT id, own_status, link_status, subtype, "
+            "       COALESCE(level_3_location, location) AS location, "
+            f"       {long_select} AS long_section "
             "FROM nodes WHERE " + " AND ".join(clauses) + " ORDER BY id"
         )
-        rows = conn.execute(sql, params).fetchall()
-    return [dict(r) for r in rows]
+        rows = conn.execute(sql, [*long_params, *params]).fetchall()
+    return [{**dict(r), "long_section": bool(r["long_section"])} for r in rows]
 
 
 def query_drift_counts_by_status(
@@ -807,13 +1146,13 @@ def _build_feature_index(db_path: Path) -> dict[str, str]:
     """Return ``{node_id -> feature_label}`` for every node with an inbound
     ``documents`` edge.
 
-    Walks the doc-tree to find the nearest ``docs.features.{X}`` ancestor.
+    Walks the doc-tree to find the nearest ``docs/features/{X}`` ancestor.
     The "feature label" is the X token (e.g. ``viz``, ``mcp-server``).
 
     Tie-breaker rules (when a node has multiple inbound ``documents``
     edges from different feature subtrees):
         1. Pick the section whose feature ancestor is **closest** in the
-           doc-tree (smallest hop count from section to ``docs.features.{X}``).
+           doc-tree (smallest hop count from section to ``docs/features/{X}``).
         2. Ties break alphabetically on the feature label.
         3. The final label is recorded; the node lives in exactly one
            bucket.
@@ -832,7 +1171,7 @@ def _build_feature_index(db_path: Path) -> dict[str, str]:
         from axiom_graph.db.docs import _SECTION_FILTER_SQL, split_section_id  # noqa: PLC0415
 
         sec_rows = conn.execute(f"SELECT id AS section_id FROM nodes WHERE {_SECTION_FILTER_SQL}").fetchall()
-        # All docs (for the id-suffix walk to docs.features.X).
+        # All docs (for the id-suffix walk to docs/features/X).
         doc_rows = conn.execute("SELECT id FROM docs").fetchall()
 
     # Map section_id -> doc_id (derived from the section ID's dot-path).
@@ -841,15 +1180,17 @@ def _build_feature_index(db_path: Path) -> dict[str, str]:
     # For each doc, walk its node-id (which is project_id::dotted.path)
     # backwards looking for the 'features' segment, and pick the X
     # immediately after.  Doc id format example:
-    #   axiom_graph::docs.features.indexer.sub_features.scanning.design
+    #   axiom_graph::docs/features/indexer/sub_features/scanning/design
     # We want X='indexer' (the topmost feature token after 'features').
+    from axiom_graph.index.doc_ids import DOC_ID_PATH_SEP  # noqa: PLC0415
+
     def _doc_to_feature(doc_id: str) -> str | None:
         # Strip project_id prefix.
         if "::" in doc_id:
             tail = doc_id.split("::", 1)[1]
         else:
             tail = doc_id
-        parts = tail.split(".")
+        parts = tail.split(DOC_ID_PATH_SEP)
         # Find first 'features' segment.
         try:
             idx = parts.index("features")
@@ -864,7 +1205,7 @@ def _build_feature_index(db_path: Path) -> dict[str, str]:
         doc_to_feature[r["id"]] = _doc_to_feature(r["id"])
 
     # Hop-count proxy: depth of the section's parent path within the doc.
-    # We don't have an explicit hop count from section to docs.features.X,
+    # We don't have an explicit hop count from section to docs/features/X,
     # but the section ID's dot-path encodes its nesting depth.  For
     # tie-breaking we use this depth as a coarse proxy: deeper section
     # implies the feature ancestor is closer to the section in the doc
@@ -951,6 +1292,7 @@ def query_drift_full_by_status(
                 "link_status": r["link_status"],
                 "location": r["location"],
                 "via": via,
+                "long_section": bool(r["long_section"]),
             }
         )
     return [{"group": k, "rows": sorted(v, key=lambda x: x["id"])} for k, v in sorted(buckets.items())]
@@ -976,6 +1318,7 @@ def query_drift_full_by_location_prefix(
                 "link_status": r["link_status"],
                 "location": r["location"],
                 "via": via,
+                "long_section": bool(r["long_section"]),
             }
         )
     return [{"group": k, "rows": sorted(v, key=lambda x: x["id"])} for k, v in sorted(buckets.items())]
@@ -1002,6 +1345,120 @@ def query_drift_full_by_feature(
                 "link_status": r["link_status"],
                 "location": r["location"],
                 "via": via,
+                "long_section": bool(r["long_section"]),
+            }
+        )
+    return [{"group": k, "rows": sorted(v, key=lambda x: x["id"])} for k, v in sorted(buckets.items())]
+
+
+_DOC_SUBTYPES = frozenset({"docjson", "docjson_doc", "docjson_section"})
+
+
+def _node_kind(row: dict, test_paths: Collection[str]) -> str:
+    """Classify a drift row as ``"doc"``, ``"test"`` or ``"code"``.
+
+    A docjson subtype is ``doc``.  A row whose location (``#...`` suffix
+    dropped, ``\\`` read as ``/``) starts with one of ``test_paths``, or whose
+    subtype is ``test``, is ``test``.  Everything else is ``code``.
+
+    Args:
+        row: A row from :func:`_filtered_rows_for_grouping`.
+        test_paths: The configured ``scan.test_paths`` prefixes.
+
+    Returns:
+        The kind label.
+    """
+    if row.get("subtype") in _DOC_SUBTYPES:
+        return "doc"
+    if row.get("subtype") == "test":
+        return "test"
+    location = (row.get("location") or "").split("#", 1)[0].replace("\\", "/")
+    if location and any(location.startswith(tp.replace("\\", "/")) for tp in test_paths if tp):
+        return "test"
+    return "code"
+
+
+def query_drift_counts_by_node_kind(
+    db_path: Path,
+    filter: str | None = None,
+    location_glob: str | None = None,
+    test_paths: Collection[str] = (),
+) -> list[dict]:
+    """Return ``[{group: 'code'|'doc'|'test', count: N}, ...]``.
+
+    Args:
+        db_path: Path to the index database.
+        filter: Drift filter vocabulary (see :func:`parse_drift_filter`).
+        location_glob: Optional location glob.
+        test_paths: The configured ``scan.test_paths`` prefixes; see
+            :func:`_node_kind`.
+
+    Returns:
+        One entry per non-empty kind, sorted by kind.
+    """
+    rows = _filtered_rows_for_grouping(db_path, filter, location_glob)
+    counts: dict[str, int] = {}
+    for r in rows:
+        key = _node_kind(r, test_paths)
+        counts[key] = counts.get(key, 0) + 1
+    return [{"group": k, "count": v} for k, v in sorted(counts.items())]
+
+
+def query_drift_ids_by_node_kind(
+    db_path: Path,
+    filter: str | None = None,
+    location_glob: str | None = None,
+    test_paths: Collection[str] = (),
+) -> list[dict]:
+    """Return ``[{group: 'code'|'doc'|'test', ids: [...]}, ...]``.
+
+    Args:
+        db_path: Path to the index database.
+        filter: Drift filter vocabulary (see :func:`parse_drift_filter`).
+        location_glob: Optional location glob.
+        test_paths: The configured ``scan.test_paths`` prefixes.
+
+    Returns:
+        One entry per non-empty kind, sorted by kind, ids sorted.
+    """
+    rows = _filtered_rows_for_grouping(db_path, filter, location_glob)
+    buckets: dict[str, list[str]] = {}
+    for r in rows:
+        buckets.setdefault(_node_kind(r, test_paths), []).append(r["id"])
+    return [{"group": k, "ids": sorted(v)} for k, v in sorted(buckets.items())]
+
+
+def query_drift_full_by_node_kind(
+    db_path: Path,
+    filter: str | None = None,
+    location_glob: str | None = None,
+    test_paths: Collection[str] = (),
+) -> list[dict]:
+    """Return ``[{group: 'code'|'doc'|'test', rows: [...]}, ...]`` (full rows).
+
+    Args:
+        db_path: Path to the index database.
+        filter: Drift filter vocabulary (see :func:`parse_drift_filter`).
+        location_glob: Optional location glob.
+        test_paths: The configured ``scan.test_paths`` prefixes.
+
+    Returns:
+        One entry per non-empty kind, sorted by kind, rows sorted by id.
+    """
+    rows = _filtered_rows_for_grouping(db_path, filter, location_glob)
+    linked_stale_ids = [r["id"] for r in rows if r["link_status"] == LINKED_STALE]
+    via_map = _via_for_nodes_batch(db_path, linked_stale_ids)
+    buckets: dict[str, list[dict]] = {}
+    for r in rows:
+        via = via_map.get(r["id"], []) if r["link_status"] == LINKED_STALE else []
+        buckets.setdefault(_node_kind(r, test_paths), []).append(
+            {
+                "id": r["id"],
+                "own_status": r["own_status"],
+                "link_status": r["link_status"],
+                "location": r["location"],
+                "via": via,
+                "long_section": bool(r["long_section"]),
             }
         )
     return [{"group": k, "rows": sorted(v, key=lambda x: x["id"])} for k, v in sorted(buckets.items())]
@@ -1014,6 +1471,14 @@ __all__ = [
     # Staleness persistence
     "persist_staleness",
     "get_all_staleness",
+    "count_status_pairs_conn",
+    "get_staleness_for_conn",
+    "get_ordered_staleness_conn",
+    "count_nodes_conn",
+    "BROKEN_LINK_EDGE_TYPES",
+    "DANGLING_LINK_EDGE_TYPES",
+    "charged_source_sql",
+    "unflagged_dangling_sources_conn",
     # Computed staleness
     "get_stale_doc_sections",
     "get_stale_annotated_nodes",
@@ -1031,4 +1496,7 @@ __all__ = [
     "query_drift_full_by_status",
     "query_drift_full_by_location_prefix",
     "query_drift_full_by_feature",
+    "query_drift_counts_by_node_kind",
+    "query_drift_ids_by_node_kind",
+    "query_drift_full_by_node_kind",
 ]

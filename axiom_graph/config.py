@@ -10,6 +10,7 @@ Example ``axiom-graph.toml``::
 
     [axiom_graph.scan]
     exclude_dirs = [".venv", "data", "notebooks/scratch"]
+    docs_extensions = [".docjson", ".json"]
 
     [axiom_graph.thresholds]
     max_function_lines = 80
@@ -40,9 +41,27 @@ class ConfigError(ValueError):
     """Raised when ``axiom-graph.toml`` contains an invalid / unknown key."""
 
 
+class ProjectIdMismatchError(RuntimeError):
+    """A project id disagrees with the one already recorded for the project.
+
+    Raised when ``init --id`` names an id other than the ``project_id`` in
+    ``axiom-graph.toml``, and when a build resolves an id other than the one
+    the index stores.  The message names both ids and how to fix it; the CLI
+    prints it as a clean ``Error:`` line.
+    """
+
+
+import contextlib
+import contextvars
+import json
+import re
 import sys
-from dataclasses import dataclass, field
+from collections.abc import Iterator
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
+from axiom_graph.index.doc_ids import DOCJSON_EXTENSIONS as _DOCJSON_EXTENSIONS
+from axiom_graph.index.doc_ids import validate_docjson_extensions as _validate_docjson_extensions
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -80,6 +99,13 @@ class ScanConfig:
     #: scanned.  Requires the ``[js]`` optional extra.
     js_paths: list[str] = field(default_factory=list)
 
+    #: Python import roots, relative to the project root (e.g. ``["lib"]``).
+    #: An absolute import such as ``from pkg.mod import f`` is looked up
+    #: under each root in turn.  When set, these are tried before every
+    #: detected root (pytest ``pythonpath``, packaging config, the project
+    #: root, an auto-detected ``src/``).  Empty means detection only.
+    source_roots: list[str] = field(default_factory=list)
+
     #: Directories containing documentation to scan (both Markdown and
     #: DocJSON).  Paths are relative to the project root.  Defaults to
     #: ``["docs"]`` for backward compatibility.  Non-existent entries
@@ -91,6 +117,17 @@ class ScanConfig:
     #: skills, hooks, etc.).  Paths are relative to the project root.
     #: Defaults to ``[".claude"]`` for backward compatibility.
     config_dirs: list[str] = field(default_factory=lambda: [".claude"])
+
+    #: File extensions read as DocJSON documents under ``docs_dirs``.  Only
+    #: ``.docjson`` and ``.json`` are accepted; the first entry is the
+    #: extension a new document is written with.  The order does not decide
+    #: a collision: when ``x.json`` and ``x.docjson`` are both documents,
+    #: ``.docjson`` is indexed.
+    docs_extensions: list[str] = field(default_factory=lambda: list(_DOCJSON_EXTENSIONS))
+
+    #: Configured ``docs_extensions`` entries that were not valid and were
+    #: dropped.  The build reports them as a warning.
+    docs_extensions_dropped: list[str] = field(default_factory=list)
 
     #: True when ``docs_dirs`` was explicitly set in ``axiom-graph.toml``.
     #: Used by ``build()`` to distinguish user-configured-missing (emit a
@@ -125,8 +162,10 @@ class StalenessConfig:
     carries any tag listed in ``frozen_tags`` are treated as write-once
     historical records (ADRs, plans, PEV cycle manifests, etc.).  Their
     sections are skipped at staleness-signal entry (Pass 1 doc-to-code)
-    and never participate in transitive propagation (Pass 3).  BROKEN_LINK
-    is independent of LINKED_STALE and still surfaces on frozen docs.
+    and never participate in transitive propagation (Pass 3).  A
+    LINKED_STALE a section already had is kept only while a linked node has
+    changed since its last verification.  BROKEN_LINK is independent of
+    LINKED_STALE and still surfaces on frozen docs.
     """
 
     #: Doc-level tags that opt in to transitive LINKED_STALE propagation.
@@ -137,6 +176,17 @@ class StalenessConfig:
     #: under a doc carrying any of these tags never receive LINKED_STALE
     #: signal (Pass 1 + Pass 3 skip).  Empty (the default) is a no-op.
     frozen_tags: list[str] = field(default_factory=list)
+
+    #: What a read tool does to the stored statuses before it answers:
+    #: ``"changed-files"`` (the default) refreshes what the read shows (a
+    #: listing of the whole repo: every file whose bytes changed);
+    #: ``"off"`` answers from the stored statuses and says how many files
+    #: the index is behind; ``"check"`` runs ``check`` first.
+    refresh_before_read: str = "changed-files"
+
+
+#: The values ``[axiom_graph.staleness] refresh_before_read`` accepts.
+REFRESH_BEFORE_READ_MODES: tuple[str, ...] = ("off", "changed-files", "check")
 
 
 _VALID_RULE_IDS: frozenset[str] = frozenset({"A1", "A2", "A3", "B1", "B2", "B3", "B4", "C1"})
@@ -235,6 +285,25 @@ class RenameConfig:
     pool_cap: int = 50
 
 
+@dataclass
+class DocjsonConfig:
+    """``[axiom_graph.docjson]`` settings.
+
+    ``raw_docjson_edits`` controls what indexing does with a DocJSON section
+    edited outside the doc tools (a raw DocJSON edit):
+
+    - ``"warn"`` (default) -- record one ``RAW_DOCJSON_EDIT`` history event
+      per edit and report it once.
+    - ``"off"`` -- record and report nothing; such sections simply stay
+      unverified under the normal staleness rules.
+
+    Either way, tool-written sections that arrive by merge or pull are still
+    verified when their stamp matches, and the doc tools still stamp.
+    """
+
+    raw_docjson_edits: str = "warn"
+
+
 # ---------------------------------------------------------------------------
 # Top-level config
 # ---------------------------------------------------------------------------
@@ -253,6 +322,7 @@ class AxiomGraphConfig:
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     site: SiteConfig = field(default_factory=SiteConfig)
     rename: RenameConfig = field(default_factory=RenameConfig)
+    docjson: DocjsonConfig = field(default_factory=DocjsonConfig)
     #: Path to the axiom-graph index SQLite database.  Relative paths are
     #: resolved against the project root; absolute paths are honored as-is.
     #: Defaults to ``".axiom_graph/graph.db"``.
@@ -269,8 +339,31 @@ class AxiomGraphConfig:
         Returns a default ``AxiomGraphConfig`` if the file is absent or if
         the TOML library is not available (Python 3.10 without ``tomli``
         installed).  No ``axiom-graph.toml`` fallback.
+
+        Inside :func:`config_scope` the first load of a project root is kept
+        and every later load of it in the scope returns that config; outside
+        one, every call reads the file.  A failed load is not kept.
         """
-        toml_path = project_root / "axiom-graph.toml"
+        held = _SCOPED_CONFIGS.get()
+        if held is None:
+            return cls._read(project_root)
+        key = (cls, Path(project_root).resolve())
+        if key not in held:
+            held[key] = cls._read(project_root)
+        return held[key]
+
+    @classmethod
+    def _read(cls, project_root: Path) -> "AxiomGraphConfig":
+        """Parse ``axiom-graph.toml`` from *project_root* (:meth:`load` without the scope).
+
+        Args:
+            project_root: Project root directory.
+
+        Returns:
+            The parsed config, or the defaults when the file is absent or no
+            TOML library is available.
+        """
+        toml_path = Path(project_root) / "axiom-graph.toml"
         if not toml_path.exists() or tomllib is None:
             return cls()
 
@@ -302,11 +395,18 @@ class AxiomGraphConfig:
         else:
             config_dirs = [".claude"]
             config_dirs_explicit = False
+        # docs_extensions: validated against the DocJSON extensions; invalid
+        # entries are dropped (and reported by the build), and a missing,
+        # empty or wholly invalid value means the default.
+        docs_extensions, docs_extensions_dropped = _validate_docjson_extensions(scan_raw.get("docs_extensions"))
         scan = ScanConfig(
             exclude_dirs=list(scan_raw.get("exclude_dirs", [])),
             test_paths=list(scan_raw.get("test_paths", [])),
             js_paths=list(scan_raw.get("js_paths", [])),
+            source_roots=_str_list(scan_raw.get("source_roots", [])),
             docs_dirs=docs_dirs,
+            docs_extensions=docs_extensions,
+            docs_extensions_dropped=docs_extensions_dropped,
             config_dirs=config_dirs,
             docs_dirs_explicit=docs_dirs_explicit,
             config_dirs_explicit=config_dirs_explicit,
@@ -320,9 +420,16 @@ class AxiomGraphConfig:
         )
 
         staleness_raw: dict = ag_section.get("staleness", {})
+        refresh_before_read = str(staleness_raw.get("refresh_before_read", "changed-files"))
+        if refresh_before_read not in REFRESH_BEFORE_READ_MODES:
+            raise ConfigError(
+                f"[axiom_graph.staleness] refresh_before_read must be one of {list(REFRESH_BEFORE_READ_MODES)}, "
+                f"got {refresh_before_read!r}"
+            )
         staleness = StalenessConfig(
             transitive_tags=list(staleness_raw.get("transitive_tags", [])),
             frozen_tags=list(staleness_raw.get("frozen_tags", [])),
+            refresh_before_read=refresh_before_read,
         )
 
         validation_raw: dict = ag_section.get("validation", {})
@@ -354,6 +461,12 @@ class AxiomGraphConfig:
             pool_cap=int(rename_raw.get("pool_cap", 50)),
         )
 
+        docjson_raw: dict = ag_section.get("docjson", {})
+        raw_edits = str(docjson_raw.get("raw_docjson_edits", "warn"))
+        if raw_edits not in ("warn", "off"):
+            raise ConfigError(f'[axiom_graph.docjson] raw_docjson_edits must be "warn" or "off", got {raw_edits!r}')
+        docjson = DocjsonConfig(raw_docjson_edits=raw_edits)
+
         db_path_raw = ag_section.get("db_path", ".axiom_graph/graph.db")
         db_path = str(db_path_raw) if db_path_raw else ".axiom_graph/graph.db"
 
@@ -365,6 +478,7 @@ class AxiomGraphConfig:
             validation=validation,
             site=site,
             rename=rename,
+            docjson=docjson,
             db_path=db_path,
         )
 
@@ -372,6 +486,20 @@ class AxiomGraphConfig:
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+
+def _str_list(raw: object) -> list[str]:
+    """Return a TOML list of strings as a list; a bare string is a one-item list.
+
+    Args:
+        raw: The raw TOML value.
+
+    Returns:
+        The entries as strings.
+    """
+    if isinstance(raw, str):
+        return [raw]
+    return [str(x) for x in raw]
 
 
 def _parse_site_targets(raw: object) -> list[SiteTarget]:
@@ -442,6 +570,50 @@ def _parse_site_targets(raw: object) -> list[SiteTarget]:
     return targets
 
 
+#: The configs loaded inside the active :func:`config_scope`, keyed by class
+#: and resolved project root; ``None`` outside a scope.
+_SCOPED_CONFIGS: contextvars.ContextVar[dict[tuple[type, Path], AxiomGraphConfig] | None] = contextvars.ContextVar(
+    "_SCOPED_CONFIGS", default=None
+)
+
+
+@contextlib.contextmanager
+def config_scope() -> Iterator[None]:
+    """Read each project's ``axiom-graph.toml`` at most once for one operation.
+
+    While the scope is open, :meth:`AxiomGraphConfig.load` keeps the first
+    config it loads for a project root and returns it to every later load in
+    the scope.  The scope is reset when the outermost one exits, normally or
+    by an exception, so nothing is kept across operations: a config edited
+    between two operations is read again by the second.  A nested scope
+    shares the outer one's configs.
+
+    Yields:
+        Nothing; the scope lasts for the ``with`` block.
+    """
+    if _SCOPED_CONFIGS.get() is not None:
+        yield
+        return
+    token = _SCOPED_CONFIGS.set({})
+    try:
+        yield
+    finally:
+        _SCOPED_CONFIGS.reset(token)
+
+
+def _forget_scoped_config(project_root: Path) -> None:
+    """Drop the configs the open scope holds for *project_root* (after the file is rewritten).
+
+    Args:
+        project_root: Project root whose ``axiom-graph.toml`` changed.
+    """
+    held = _SCOPED_CONFIGS.get()
+    if held:
+        root = Path(project_root).resolve()
+        for key in [k for k in held if k[1] == root]:
+            del held[key]
+
+
 def db_path_for(project_root: Path) -> Path:
     """Return the absolute path to the axiom-graph index DB for a project.
 
@@ -459,3 +631,177 @@ def db_path_for(project_root: Path) -> Path:
     cfg = AxiomGraphConfig.load(root)
     raw = Path(cfg.db_path)
     return raw if raw.is_absolute() else root / raw
+
+
+# ---------------------------------------------------------------------------
+# Recording the project id in axiom-graph.toml
+# ---------------------------------------------------------------------------
+
+_AXIOM_GRAPH_HEADER_RE = re.compile(r"^\s*\[\s*axiom_graph\s*\]\s*(#.*)?$")
+_ANY_TABLE_HEADER_RE = re.compile(r"^\s*\[")
+_EMPTY_PROJECT_ID_RE = re.compile(r"""^\s*project_id\s*=\s*(""|'')\s*(#.*)?$""")
+
+
+def check_toml_project_id(project_root: Path, project_id: str) -> None:
+    """Refuse *project_id* when ``axiom-graph.toml`` already holds a different one.
+
+    Args:
+        project_root: The project directory holding ``axiom-graph.toml``.
+        project_id: The id the caller wants to record.
+
+    Raises:
+        ProjectIdMismatchError: When the toml's ``project_id`` is set and
+            differs from *project_id*.
+    """
+    toml_id = AxiomGraphConfig.load(Path(project_root)).project_id or None
+    if toml_id is not None and toml_id != project_id:
+        raise ProjectIdMismatchError(
+            f"axiom-graph.toml already sets project id '{toml_id}'; --id '{project_id}' will not "
+            "overwrite it. Nothing was changed. Run `axiom-graph init` without --id to keep "
+            f"'{toml_id}', or edit project_id in axiom-graph.toml to change the project id."
+        )
+
+
+def write_toml_project_id(project_root: Path, project_id: str) -> bool:
+    """Record *project_id* as ``[axiom_graph] project_id`` in ``axiom-graph.toml``.
+
+    Creates the file when it is absent.  Otherwise an empty
+    ``project_id = ""`` line is replaced, or the key is inserted under the
+    existing ``[axiom_graph]`` table, or a new ``[axiom_graph]`` table is
+    inserted before the file's first table; every other line, comment and
+    line ending is kept as it was.
+
+    Args:
+        project_root: The project directory holding ``axiom-graph.toml``.
+        project_id: The id to record.
+
+    Returns:
+        ``True`` when the file was written, ``False`` when it already held
+        *project_id*.
+
+    Raises:
+        ProjectIdMismatchError: When the toml already holds a different id.
+        ConfigError: When the edited file would not parse back to
+            *project_id* (the file is left unchanged).
+    """
+    check_toml_project_id(project_root, project_id)
+    toml_path = Path(project_root) / "axiom-graph.toml"
+    if not toml_path.exists():
+        with toml_path.open("w", encoding="utf-8", newline="") as fh:
+            fh.write(f"[axiom_graph]\nproject_id = {json.dumps(project_id)}\n")
+        _forget_scoped_config(project_root)
+        return True
+    current_id = AxiomGraphConfig.load(Path(project_root)).project_id
+    if current_id == project_id:
+        return False
+
+    with toml_path.open(encoding="utf-8", newline="") as fh:
+        text = fh.read()
+    nl = "\r\n" if "\r\n" in text else "\n"
+    key_line = f"project_id = {json.dumps(project_id)}{nl}"
+    lines = text.splitlines(keepends=True)
+    if lines and not lines[-1].endswith(("\n", "\r")):
+        lines[-1] += nl
+
+    header_at = next((i for i, ln in enumerate(lines) if _AXIOM_GRAPH_HEADER_RE.match(ln.rstrip("\r\n"))), None)
+    empty_at = (
+        next((i for i, ln in enumerate(lines) if _EMPTY_PROJECT_ID_RE.match(ln.rstrip("\r\n"))), None)
+        if current_id == ""
+        else None
+    )
+    if empty_at is not None:
+        lines[empty_at] = key_line
+    elif header_at is not None:
+        lines.insert(header_at + 1, key_line)
+    else:
+        first_table = next((i for i, ln in enumerate(lines) if _ANY_TABLE_HEADER_RE.match(ln)), len(lines))
+        block = f"[axiom_graph]{nl}{key_line}"
+        if first_table < len(lines):
+            block += nl
+        elif lines and lines[-1].strip():
+            block = nl + block
+        lines.insert(first_table, block)
+    new_text = "".join(lines)
+
+    if tomllib is not None:
+        try:
+            parsed = tomllib.loads(new_text)
+        except Exception as exc:  # tomllib.TOMLDecodeError
+            raise ConfigError(f"could not add project_id to axiom-graph.toml: {exc}") from exc
+        if parsed.get("axiom_graph", {}).get("project_id") != project_id:
+            raise ConfigError("could not add project_id to axiom-graph.toml; add it under [axiom_graph] by hand")
+    with toml_path.open("w", encoding="utf-8", newline="") as fh:
+        fh.write(new_text)
+    _forget_scoped_config(project_root)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Comparing axiom-graph.toml with the defaults
+# ---------------------------------------------------------------------------
+
+#: Stands in for the default of a toml key that is not an axiom-graph setting.
+NO_DEFAULT = object()
+
+
+def _flatten_toml(table: dict, prefix: str) -> Iterator[tuple[str, object]]:
+    """Yield ``(dotted key, value)`` for every leaf of a parsed TOML table; arrays are leaves."""
+    for key, value in table.items():
+        dotted = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(value, dict):
+            yield from _flatten_toml(value, dotted)
+        else:
+            yield dotted, value
+
+
+def toml_settings_off_default(project_root: Path) -> list[tuple[str, object, object]]:
+    """List the settings in ``axiom-graph.toml`` that resetting it to the defaults would change.
+
+    Every key other than ``[axiom_graph] project_id`` whose value differs from
+    the built-in default, in file order.  A key with no default (not an
+    axiom-graph setting, or outside ``[axiom_graph]``) is listed with
+    :data:`NO_DEFAULT`.
+
+    Args:
+        project_root: The project directory holding ``axiom-graph.toml``.
+
+    Returns:
+        ``(dotted key, value, default)`` triples; empty when the file is
+        absent, holds only defaults, or no TOML library is available.
+    """
+    toml_path = Path(project_root) / "axiom-graph.toml"
+    if tomllib is None or not toml_path.exists():
+        return []
+    with toml_path.open("rb") as fh:
+        raw: dict = tomllib.load(fh)
+    defaults = asdict(AxiomGraphConfig())
+    changes: list[tuple[str, object, object]] = []
+    for key, value in _flatten_toml(raw, ""):
+        if key == "axiom_graph.project_id":
+            continue
+        default: object = NO_DEFAULT
+        if key.startswith("axiom_graph."):
+            default = defaults
+            for part in key.split(".")[1:]:
+                if not isinstance(default, dict) or part not in default:
+                    default = NO_DEFAULT
+                    break
+                default = default[part]
+        if value != default:
+            changes.append((key, value, default))
+    return changes
+
+
+def reset_toml_to_defaults(project_root: Path, project_id: str) -> None:
+    """Rewrite ``axiom-graph.toml`` to hold only ``[axiom_graph] project_id``.
+
+    Every other setting goes back to its built-in default.
+
+    Args:
+        project_root: The project directory holding ``axiom-graph.toml``.
+        project_id: The id to keep.
+    """
+    toml_path = Path(project_root) / "axiom-graph.toml"
+    with toml_path.open("w", encoding="utf-8", newline="") as fh:
+        fh.write(f"[axiom_graph]\nproject_id = {json.dumps(project_id)}\n")
+    _forget_scoped_config(project_root)

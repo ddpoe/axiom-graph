@@ -76,7 +76,7 @@ CYCLE_2_3_PRESENTATION_FILES = frozenset()
 
 
 # Test files predating ADR-019 that test non-docjson subsystems (staleness,
-# mark-clean, semantic search, viz, etc.).  Their use of
+# mark-clean, viz, etc.).  Their use of
 # ``db.upsert_*(... discovery_only=False)`` is the exact fixture short-circuit
 # Rule 3 will eventually outlaw, but re-pointing them at api layers is gated
 # on those domain api layers existing — scheduled for cycles 2/3.  Listed by
@@ -95,7 +95,6 @@ RULE3_LEGACY_TEST_FILES = frozenset(
         "tests/test_rename_detection.py",
         "tests/test_rename_edge_migration.py",
         "tests/test_report.py",
-        "tests/test_semantic_search.py",
         "tests/test_since_filter.py",
         "tests/test_staleness_helpers.py",
         "tests/test_staleness_viz.py",
@@ -308,6 +307,60 @@ def _check_rule3(rel: str, tree: ast.Module, source: str) -> list[str]:
     return out
 
 
+#: ``sqlite3`` names that open a connection: the ``connect`` factory and the
+#: ``Connection`` class itself.
+_RULE4_OPENERS = frozenset({"connect", "Connection"})
+
+
+def _check_rule4(rel: str, tree: ast.Module) -> list[str]:
+    """Return Rule 4 violations: a SQLite connection opened outside ``axiom_graph/db/``.
+
+    Connections are opened in one module, so connection handling (busy
+    timeout, journal mode, commit and close) lives in one place.  A
+    violation, in a package file outside ``axiom_graph/db/``, is a call of
+    ``connect`` or ``Connection`` on the ``sqlite3`` module under any name it
+    is imported as (``import sqlite3 as sq; sq.connect(...)``), ``connect``
+    imported from ``sqlite3``, or a call of ``Connection`` imported from
+    ``sqlite3`` under any name.  Naming ``sqlite3.Connection`` in an
+    annotation opens nothing and is allowed.
+    """
+    posix = rel.replace("\\", "/")
+    if not posix.startswith("axiom_graph/") or posix.startswith("axiom_graph/db/"):
+        return []
+    module_aliases = {"sqlite3"}
+    class_aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            module_aliases.update(alias.asname or alias.name for alias in node.names if alias.name == "sqlite3")
+        elif isinstance(node, ast.ImportFrom) and node.module == "sqlite3":
+            class_aliases.update(alias.asname or alias.name for alias in node.names if alias.name == "Connection")
+    out: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "sqlite3":
+            if any(alias.name == "connect" for alias in node.names):
+                out.append(f"{rel}:{node.lineno}: Rule4: imports `connect` from sqlite3 outside axiom_graph/db/")
+            continue
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr in _RULE4_OPENERS
+            and isinstance(func.value, ast.Name)
+            and func.value.id in module_aliases
+        ):
+            out.append(
+                f"{rel}:{node.lineno}: Rule4: `{func.value.id}.{func.attr}` outside axiom_graph/db/ "
+                "(open connections through the db module)"
+            )
+        elif isinstance(func, ast.Name) and func.id in class_aliases:
+            out.append(
+                f"{rel}:{node.lineno}: Rule4: `{func.id}(...)` (sqlite3.Connection) outside axiom_graph/db/ "
+                "(open connections through the db module)"
+            )
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
@@ -327,7 +380,7 @@ def _walk_python_files(roots: list[Path]) -> list[Path]:
 
 
 def check_paths(paths: list[Path], repo_root: Path) -> list[str]:
-    """Run all three rules over the supplied paths.
+    """Run all four rules over the supplied paths.
 
     Args:
         paths: Files or directories to scan recursively.
@@ -350,6 +403,7 @@ def check_paths(paths: list[Path], repo_root: Path) -> list[str]:
         violations.extend(_check_rule1(rel, tree))
         violations.extend(_check_rule2(rel, tree))
         violations.extend(_check_rule3(rel, tree, source))
+        violations.extend(_check_rule4(rel, tree))
     return violations
 
 

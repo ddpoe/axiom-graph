@@ -12,6 +12,16 @@
         ]
       },
       {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/pev-doc-scope-md.sh\"",
+            "timeout": 5
+          }
+        ]
+      },
+      {
         "matcher": "Bash",
         "hooks": [
           {
@@ -22,7 +32,27 @@
         ]
       },
       {
-        "matcher": "mcp__axiom-graph__axiom_graph_update_section|mcp__axiom-graph__axiom_graph_patch_section|mcp__axiom-graph__axiom_graph_write_doc|mcp__axiom-graph__axiom_graph_add_section",
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/pev-worktree-rm.sh\"",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash|Read|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/pev-docjson-guard.sh\"",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__axiom-graph__axiom_graph_update_section|mcp__axiom-graph__axiom_graph_patch_section|mcp__axiom-graph__axiom_graph_write_doc|mcp__axiom-graph__axiom_graph_add_section|mcp__axiom-graph__axiom_graph_clone_doc|mcp__axiom-graph__axiom_graph_delete_section",
         "hooks": [
           {
             "type": "command",

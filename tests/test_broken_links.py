@@ -89,9 +89,9 @@ def _insert_edge(db_path: Path, edge_type: str, from_id: str, to_id: str) -> Non
 
 def test_find_broken_links_returns_empty_when_all_targets_exist(mini_project, db_path):
     """No broken links when all edge targets exist as nodes."""
-    _upsert_node(db_path, "proj::docs.test::s1")
+    _upsert_node(db_path, "proj::docs/test::s1")
     _upsert_code_node(db_path, "proj::mod::func_a")
-    _insert_edge(db_path, "documents", "proj::docs.test::s1", "proj::mod::func_a")
+    _insert_edge(db_path, "documents", "proj::docs/test::s1", "proj::mod::func_a")
 
     broken = find_broken_links(db_path)
     assert broken == {}
@@ -99,13 +99,13 @@ def test_find_broken_links_returns_empty_when_all_targets_exist(mini_project, db
 
 def test_find_broken_links_detects_dangling_documents_edge(mini_project, db_path):
     """A documents edge whose to_id has no node should be detected."""
-    _upsert_node(db_path, "proj::docs.test::s1")
+    _upsert_node(db_path, "proj::docs/test::s1")
     # No target node -- edge points to void
-    _insert_edge(db_path, "documents", "proj::docs.test::s1", "proj::mod::gone_func")
+    _insert_edge(db_path, "documents", "proj::docs/test::s1", "proj::mod::gone_func")
 
     broken = find_broken_links(db_path)
-    assert "proj::docs.test::s1" in broken
-    assert broken["proj::docs.test::s1"] == "proj::mod::gone_func"
+    assert "proj::docs/test::s1" in broken
+    assert broken["proj::docs/test::s1"] == "proj::mod::gone_func"
 
 
 def test_find_broken_links_detects_dangling_validates_edge(mini_project, db_path):
@@ -120,9 +120,9 @@ def test_find_broken_links_detects_dangling_validates_edge(mini_project, db_path
 
 def test_find_broken_links_ignores_composes_edges(mini_project, db_path):
     """composes edges should NOT be checked for broken links (per constraints)."""
-    _upsert_node(db_path, "proj::docs.test")
+    _upsert_node(db_path, "proj::docs/test")
     # Dangling composes edge -- should be ignored
-    _insert_edge(db_path, "composes", "proj::docs.test", "proj::docs.test::nonexistent")
+    _insert_edge(db_path, "composes", "proj::docs/test", "proj::docs/test::nonexistent")
 
     broken = find_broken_links(db_path)
     assert broken == {}
@@ -145,9 +145,9 @@ def test_broken_link_severity_ordering(mini_project, db_path):
 def test_record_staleness_overlays_broken_links(git_project, git_db_path):
     """A doc section with a dangling documents edge should get BROKEN_LINK status."""
     # Create the doc section node
-    _upsert_node(git_db_path, "proj::docs.test::s1")
+    _upsert_node(git_db_path, "proj::docs/test::s1")
     # Create a dangling edge (target does not exist)
-    _insert_edge(git_db_path, "documents", "proj::docs.test::s1", "proj::mod::gone")
+    _insert_edge(git_db_path, "documents", "proj::docs/test::s1", "proj::mod::gone")
 
     # Create a minimal file so NOT_FOUND doesn't override
     docs_dir = git_project / "docs"
@@ -161,7 +161,7 @@ def test_record_staleness_overlays_broken_links(git_project, git_db_path):
     nodes = db.all_nodes(git_db_path)
     statuses = record_staleness(git_db_path, git_project, nodes)
 
-    assert statuses.get("proj::docs.test::s1")[1] == "BROKEN_LINK"
+    assert statuses.get("proj::docs/test::s1")[1] == "BROKEN_LINK"
 
 
 @workflow(
@@ -170,14 +170,14 @@ def test_record_staleness_overlays_broken_links(git_project, git_db_path):
 def test_broken_link_does_not_override_structural_drift(git_project, git_db_path):
     """NOT_FOUND is higher severity than BROKEN_LINK and should take precedence."""
     # Create doc section pointing to non-existent file
-    _upsert_node(git_db_path, "proj::docs.test::s1", location="docs/nonexistent.json")
-    _insert_edge(git_db_path, "documents", "proj::docs.test::s1", "proj::mod::also_gone")
+    _upsert_node(git_db_path, "proj::docs/test::s1", location="docs/nonexistent.json")
+    _insert_edge(git_db_path, "documents", "proj::docs/test::s1", "proj::mod::also_gone")
 
     nodes = db.all_nodes(git_db_path)
     statuses = record_staleness(git_db_path, git_project, nodes)
 
     # NOT_FOUND should win over BROKEN_LINK
-    assert statuses.get("proj::docs.test::s1")[0] == "NOT_FOUND"
+    assert statuses.get("proj::docs/test::s1")[0] == "NOT_FOUND"
 
 
 # ---------------------------------------------------------------------------
@@ -201,16 +201,16 @@ def _link_removed_targets(db_path: Path) -> set[str]:
 
 def test_delete_node_by_id_keeps_inbound_documents_edge(mini_project, db_path):
     """Deleting a linked node keeps the inbound documents edge (no LINK_REMOVED)."""
-    _upsert_node(db_path, "proj::docs.test::s1")
+    _upsert_node(db_path, "proj::docs/test::s1")
     _upsert_code_node(db_path, "proj::mod::func_a")
-    _insert_edge(db_path, "documents", "proj::docs.test::s1", "proj::mod::func_a")
+    _insert_edge(db_path, "documents", "proj::docs/test::s1", "proj::mod::func_a")
 
     with db._connect(db_path) as conn:
         db.delete_node_by_id(conn, "proj::mod::func_a")
 
-    assert ("documents", "proj::docs.test::s1", "proj::mod::func_a") in _edge_tuples(db_path)
+    assert ("documents", "proj::docs/test::s1", "proj::mod::func_a") in _edge_tuples(db_path)
     # The existing detector now sees the dangling edge -- no new flagging code
-    assert find_broken_links(db_path).get("proj::docs.test::s1") == "proj::mod::func_a"
+    assert find_broken_links(db_path).get("proj::docs/test::s1") == "proj::mod::func_a"
     # The link was NOT removed, so no LINK_REMOVED history is recorded for it
     assert "proj::mod::func_a" not in _link_removed_targets(db_path)
 
@@ -233,12 +233,12 @@ def test_delete_node_by_id_still_removes_inbound_validates_edge(mini_project, db
 
 def test_delete_node_by_id_removes_outbound_documents_edges(mini_project, db_path):
     """Outbound edges of a deleted node are meaningless and are removed."""
-    _upsert_node(db_path, "proj::docs.test::s1")
+    _upsert_node(db_path, "proj::docs/test::s1")
     _upsert_code_node(db_path, "proj::mod::func_a")
-    _insert_edge(db_path, "documents", "proj::docs.test::s1", "proj::mod::func_a")
+    _insert_edge(db_path, "documents", "proj::docs/test::s1", "proj::mod::func_a")
 
     with db._connect(db_path) as conn:
-        db.delete_node_by_id(conn, "proj::docs.test::s1")
+        db.delete_node_by_id(conn, "proj::docs/test::s1")
 
     assert _edge_tuples(db_path) == set()
     assert find_broken_links(db_path) == {}
@@ -249,16 +249,16 @@ def test_delete_nodes_by_location_keeps_inbound_documents_edge(mini_project, db_
     while internal edges between deleted nodes are removed."""
     _upsert_code_node(db_path, "proj::mod::func_a")
     _upsert_code_node(db_path, "proj::mod::func_b")
-    _upsert_node(db_path, "proj::docs.test::s1")
-    _insert_edge(db_path, "documents", "proj::docs.test::s1", "proj::mod::func_a")
+    _upsert_node(db_path, "proj::docs/test::s1")
+    _insert_edge(db_path, "documents", "proj::docs/test::s1", "proj::mod::func_a")
     _insert_edge(db_path, "depends_on", "proj::mod::func_a", "proj::mod::func_b")
 
     with db._connect(db_path) as conn:
         deleted = db.delete_nodes_by_location(conn, "mod.py")
 
     assert deleted == 2
-    assert _edge_tuples(db_path) == {("documents", "proj::docs.test::s1", "proj::mod::func_a")}
-    assert find_broken_links(db_path).get("proj::docs.test::s1") == "proj::mod::func_a"
+    assert _edge_tuples(db_path) == {("documents", "proj::docs/test::s1", "proj::mod::func_a")}
+    assert find_broken_links(db_path).get("proj::docs/test::s1") == "proj::mod::func_a"
     assert "proj::mod::func_a" not in _link_removed_targets(db_path)
 
 
@@ -278,8 +278,8 @@ def test_delete_nodes_by_location_contract_preserved_with_git_sha(mini_project, 
 
     _upsert_code_node(db_path, "proj::mod::func_a")
     _upsert_code_node(db_path, "proj::mod::func_b")
-    _upsert_node(db_path, "proj::docs.test::s1")
-    _insert_edge(db_path, "documents", "proj::docs.test::s1", "proj::mod::func_a")
+    _upsert_node(db_path, "proj::docs/test::s1")
+    _insert_edge(db_path, "documents", "proj::docs/test::s1", "proj::mod::func_a")
     _insert_edge(db_path, "depends_on", "proj::mod::func_a", "proj::mod::func_b")
 
     with db._connect(db_path) as conn:
@@ -287,8 +287,8 @@ def test_delete_nodes_by_location_contract_preserved_with_git_sha(mini_project, 
 
     # --- Contract preserved (identical to the no-SHA test) ---
     assert deleted == 2
-    assert _edge_tuples(db_path) == {("documents", "proj::docs.test::s1", "proj::mod::func_a")}
-    assert find_broken_links(db_path).get("proj::docs.test::s1") == "proj::mod::func_a"
+    assert _edge_tuples(db_path) == {("documents", "proj::docs/test::s1", "proj::mod::func_a")}
+    assert find_broken_links(db_path).get("proj::docs/test::s1") == "proj::mod::func_a"
     assert "proj::mod::func_a" not in _link_removed_targets(db_path)
 
     # --- New behaviour: SHA + span preserved on the DELETED rows ---
@@ -306,9 +306,9 @@ def test_delete_nodes_by_location_contract_preserved_with_git_sha(mini_project, 
 
 def test_delete_nodes_by_location_removes_documents_edge_when_both_ends_deleted(mini_project, db_path):
     """No signal is needed when the source dies in the same purge as the target."""
-    _upsert_node(db_path, "proj::docs.test::s1")
-    _upsert_node(db_path, "proj::docs.test::s2")
-    _insert_edge(db_path, "documents", "proj::docs.test::s1", "proj::docs.test::s2")
+    _upsert_node(db_path, "proj::docs/test::s1")
+    _upsert_node(db_path, "proj::docs/test::s2")
+    _insert_edge(db_path, "documents", "proj::docs/test::s1", "proj::docs/test::s2")
 
     with db._connect(db_path) as conn:
         db.delete_nodes_by_location(conn, "docs/test.json")
@@ -319,20 +319,20 @@ def test_delete_nodes_by_location_removes_documents_edge_when_both_ends_deleted(
 
 def test_delete_doc_by_id_keeps_inbound_documents_edge(mini_project, db_path):
     """Doc deletion keeps inbound documents edges from other docs' sections."""
-    _upsert_node(db_path, "proj::docs.dead::s1", location="docs/dead.json")
-    _upsert_node(db_path, "proj::docs.alive::s1", location="docs/alive.json")
+    _upsert_node(db_path, "proj::docs/dead::s1", location="docs/dead.json")
+    _upsert_node(db_path, "proj::docs/alive::s1", location="docs/alive.json")
     _upsert_code_node(db_path, "proj::mod::func_a")
     # Inbound: a surviving doc section links to the doomed doc's section
-    _insert_edge(db_path, "documents", "proj::docs.alive::s1", "proj::docs.dead::s1")
+    _insert_edge(db_path, "documents", "proj::docs/alive::s1", "proj::docs/dead::s1")
     # Outbound: the doomed section links to code -- must be removed
-    _insert_edge(db_path, "documents", "proj::docs.dead::s1", "proj::mod::func_a")
+    _insert_edge(db_path, "documents", "proj::docs/dead::s1", "proj::mod::func_a")
 
     with db._connect(db_path) as conn:
-        db.delete_doc_by_id(conn, "proj::docs.dead")
+        db.delete_doc_by_id(conn, "proj::docs/dead")
 
-    assert _edge_tuples(db_path) == {("documents", "proj::docs.alive::s1", "proj::docs.dead::s1")}
-    assert find_broken_links(db_path).get("proj::docs.alive::s1") == "proj::docs.dead::s1"
-    assert "proj::docs.dead::s1" not in _link_removed_targets(db_path)
+    assert _edge_tuples(db_path) == {("documents", "proj::docs/alive::s1", "proj::docs/dead::s1")}
+    assert find_broken_links(db_path).get("proj::docs/alive::s1") == "proj::docs/dead::s1"
+    assert "proj::docs/dead::s1" not in _link_removed_targets(db_path)
 
 
 # ---------------------------------------------------------------------------
@@ -348,8 +348,8 @@ def test_rename_then_delete_old_node_leaves_no_broken_link(mini_project, db_path
     """Rename carve-out: a genuine rename must not trip flag-don't-drop."""
     _upsert_code_node(db_path, "proj::mod::func_old", code_hash="hash_abc")
     _upsert_code_node(db_path, "proj::mod::func_new", code_hash="hash_abc")
-    _upsert_node(db_path, "proj::docs.test::s1")
-    _insert_edge(db_path, "documents", "proj::docs.test::s1", "proj::mod::func_old")
+    _upsert_node(db_path, "proj::docs/test::s1")
+    _insert_edge(db_path, "documents", "proj::docs/test::s1", "proj::mod::func_old")
 
     # Rename remaps the edge to func_new BEFORE any purge runs
     db.record_code_rename(db_path, "proj::mod::func_old", "proj::mod::func_new", "mod.py")
@@ -357,7 +357,7 @@ def test_rename_then_delete_old_node_leaves_no_broken_link(mini_project, db_path
         db.delete_node_by_id(conn, "proj::mod::func_old")
 
     assert find_broken_links(db_path) == {}
-    assert ("documents", "proj::docs.test::s1", "proj::mod::func_new") in _edge_tuples(db_path)
+    assert ("documents", "proj::docs/test::s1", "proj::mod::func_new") in _edge_tuples(db_path)
 
 
 # ---------------------------------------------------------------------------
@@ -432,4 +432,4 @@ def test_fresh_vs_incremental_build_broken_link_parity(mini_project, db_path, tm
         purpose="Incremental and fresh builds report identical broken links, and the breakage is visible",
     )
     assert broken_incremental == broken_fresh
-    assert broken_incremental.get("proj::docs.guide::s1") == "proj::src.mod::target"
+    assert broken_incremental.get("proj::docs/guide::s1") == "proj::src.mod::target"

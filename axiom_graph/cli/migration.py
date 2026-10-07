@@ -1,4 +1,4 @@
-"""Doc-ID migration commands: ``axiom-graph doc-ids preview|execute``.
+"""Doc-ID migration commands: ``axiom-graph doc-ids preview|execute|sweep|rename-extension``.
 
 Presentation only.  Every behavioural decision -- projection, collision
 gate, backup, batch, abort -- lives in
@@ -15,7 +15,13 @@ from pathlib import Path
 import click
 
 from axiom_graph.config import db_path_for
-from axiom_graph.lifecycle.api import execute_doc_id_migration, plan_doc_id_migration
+from axiom_graph.lifecycle.api import (
+    execute_doc_id_migration,
+    execute_docjson_extension_rename,
+    plan_doc_id_migration,
+    plan_docjson_extension_rename,
+    sweep_doc_id_prose,
+)
 
 
 _NO_REVERT_NOTICE = (
@@ -87,6 +93,16 @@ def _format_plan(plan, *, limit: int) -> list[str]:
             out.append(f"  ... {len(bucket) - len(shown)} more (use --limit 0 for the full list)")
         out.append("")
 
+    if plan.markdown_shadowed:
+        out.append("-- Markdown files with no distinct identity today (advisory) " + "-" * 16)
+        out.append(
+            "These .md files already share their current doc id with another document, "
+            "so there is no separate node to migrate. Each gets its own id at the next build."
+        )
+        for name in plan.markdown_shadowed:
+            out.append(f"  {name}")
+        out.append("")
+
     if plan.dotted_filenames:
         out.append("-- Dotted filenames (advisory) " + "-" * 47)
         for name in plan.dotted_filenames:
@@ -127,6 +143,9 @@ def _format_result(result) -> list[str]:
         out.append(
             f"DocJSON files with rewritten links: {result.files_patched} (read {result.doc_files_read} file(s))."
         )
+        if result.files_not_patched:
+            out.append(f"DocJSON files whose links could NOT be rewritten: {len(result.files_not_patched)}")
+            out += [f"  {f}" for f in result.files_not_patched]
         out.append(_NO_REVERT_NOTICE)
         if result.plan is not None:
             not_patched = len(result.plan.prose_in_docjson_content) + len(result.plan.prose_elsewhere)
@@ -151,12 +170,13 @@ def _format_result(result) -> list[str]:
 def doc_ids_group() -> None:
     """Preview or execute a doc-ID namespace migration.
 
-    Doc node ids today flatten every configured docs root into one ``docs.``
-    namespace and rewrite ``/`` to ``.``.  Neither transform is injective, so
-    two files can silently resolve to one identity.  This command projects
-    what every document *and* section id would become under per-root
-    namespacing, refuses to run if any two would collide, and reports the
-    prose references it will not rewrite.
+    Before 3.0.0, doc node ids flattened every configured docs root into one
+    ``docs.`` namespace and rewrote ``/`` to ``.``.  Neither transform is
+    injective, so two files could silently resolve to one identity.  This
+    command moves an index built that way to per-root path-form ids.  It
+    projects what every document *and* section id becomes, refuses to run if
+    any two would collide, and reports the prose references it will not
+    rewrite.
 
     Two modes:
 
@@ -225,8 +245,112 @@ def cmd_doc_ids_execute(project_root: str, yes: bool) -> None:
         raise SystemExit(1)
 
 
+@doc_ids_group.command("sweep")
+@click.argument("project_root", type=click.Path(exists=True, file_okay=False))
+@click.option("--apply", "apply_", is_flag=True, help="Write the rewrites. Without this the sweep is a dry run.")
+@click.option(
+    "--report",
+    type=click.Path(dir_okay=False),
+    help="Write the DocJSON-content review report here instead of to stdout.",
+)
+def cmd_doc_ids_sweep(project_root: str, apply_: bool, report: str | None) -> None:
+    """Rewrite stale textual doc-ID references left behind by the migration.
+
+    The migration rewrites ``links[].node_id`` entries; every other written
+    mention of a doc id is inert text this sweeps.  Only files git tracks
+    are read or written, and files carrying uncommitted changes are skipped
+    and named, so the whole run stays one ``git checkout`` from undo.  References naming no document on disk are
+    left exactly as written.
+
+    \b
+    Example:
+        axiom-graph doc-ids sweep .
+        axiom-graph doc-ids sweep . --apply --report sweep-review.md
+    """
+    root = Path(project_root).resolve()
+    plan = plan_doc_id_migration(db_path_for(root), root)
+    result = sweep_doc_id_prose(root, plan.as_mapping(), dry_run=not apply_)
+
+    click.echo(f"References rewritten : {result.references_rewritten}")
+    click.echo(f"Files written        : {len(result.files_rewritten)}")
+    click.echo(f"Files skipped (dirty): {len(result.skipped_uncommitted)}")
+    click.echo(f"Left as written      : {len(result.unresolved)}")
+    if result.dry_run:
+        click.echo("DRY RUN — nothing was written. Re-run with --apply.")
+
+    if report:
+        Path(report).write_text(result.report, encoding="utf-8")
+        click.echo(f"Review report        : {report}")
+    else:
+        click.echo("")
+        click.echo(result.report)
+
+
+def _format_extension_plan(plan) -> list[str]:
+    """Format an extension-rename plan as preview lines."""
+    lines = [f"Documents to rename : {len(plan.renames)}"]
+    lines.extend(f"  {r.old_path} -> {r.new_path}" for r in plan.renames)
+    for label, paths in (
+        ("Untracked (skipped) ", plan.untracked),
+        ("Data JSON (skipped) ", plan.data_files),
+        ("Target exists       ", plan.collisions),
+        ("Uncommitted changes ", plan.dirty),
+    ):
+        if paths:
+            lines.append(f"{label}: {len(paths)}")
+            lines.extend(f"  {p}" for p in paths)
+    for refusal in plan.refusals:
+        lines.append(f"REFUSED: {refusal}")
+    return lines
+
+
+@doc_ids_group.command("rename-extension")
+@click.argument("project_root", type=click.Path(exists=True, file_okay=False))
+@click.option("--execute", "execute_", is_flag=True, help="Rename with git mv. Without this it is a preview.")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+def cmd_doc_ids_rename_extension(project_root: str, execute_: bool, yes: bool) -> None:
+    """Convert DocJSON documents in PROJECT_ROOT from .json to .docjson.
+
+    Previews by default and writes nothing.  With ``--execute`` it renames
+    every git-tracked DocJSON document under the docs roots with ``git mv``
+    and re-indexes, keeping every doc id, history row and verification.
+    Ordinary JSON data files and untracked documents are listed, never
+    renamed.  Refuses, renaming nothing, on uncommitted changes in a file it
+    would rename, an existing target, a non-git project, or an index that
+    still needs ``doc-ids execute`` -- run that first, in the same upgrade.
+
+    \b
+    Example:
+        axiom-graph doc-ids rename-extension .
+        axiom-graph doc-ids rename-extension . --execute
+    """
+    root = Path(project_root).resolve()
+    db_path = db_path_for(root)
+    plan = plan_docjson_extension_rename(db_path, root)
+    for line in _format_extension_plan(plan):
+        click.echo(line)
+    if not execute_:
+        click.echo("PREVIEW — nothing was renamed. Re-run with --execute.")
+        return
+    if plan.refusals:
+        raise SystemExit(1)
+    if not plan.renames:
+        click.echo("Nothing to rename.")
+        return
+    if not yes:
+        click.confirm(f"Rename {len(plan.renames)} document(s) with git mv?", abort=True)
+    result = execute_docjson_extension_rename(db_path, root)
+    if result.refused:
+        for refusal in result.refused:
+            click.echo(f"REFUSED: {refusal}")
+        raise SystemExit(1)
+    click.echo(f"Renamed {len(result.renamed)} document(s); the index now names the new paths.")
+
+
 __all__ = [
     "doc_ids_group",
+    "cmd_doc_ids_rename_extension",
     "cmd_doc_ids_preview",
     "cmd_doc_ids_execute",
+    "cmd_doc_ids_sweep",
 ]

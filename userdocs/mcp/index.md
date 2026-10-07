@@ -62,7 +62,7 @@ Track what changed and where.
 
 ## Build & workflows
 
-Build the index, snapshot it, render the site, and inspect axiom-annotation workflows.
+Build the index, snapshot it, render the site, and inspect and export axiom-annotation workflows.
 
 | Tool | Description |
 | --- | --- |
@@ -71,6 +71,7 @@ Build the index, snapshot it, render the site, and inspect axiom-annotation work
 | {py:func}`~axiom_graph.mcp.server.axiom_graph_render_site` | Render the consumer documentation site from DocJSON. |
 | {py:func}`~axiom_graph.mcp.server.axiom_graph_workflow_list` | List axiom-annotation workflow and task functions. |
 | {py:func}`~axiom_graph.mcp.server.axiom_graph_workflow_detail` | Show ordered steps for an axiom-annotation workflow or task. |
+| {py:func}`~axiom_graph.mcp.server.axiom_graph_workflow_export` | Write workflows and their source code to one shareable HTML page or JSON bundle. |
 
 ```{toctree}
 :hidden:

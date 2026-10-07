@@ -25,9 +25,6 @@ from axiom_graph.db import *  # noqa: F401,F403,E402
 # Private helpers (star import skips names starting with underscore).
 from axiom_graph.db import (  # noqa: F401
     _connect,
-    _vec_connect,
-    _load_sqlite_vec,
-    _vec_to_bytes,
     _now_utc,
     _node_to_row,
     _row_to_node,

@@ -15,8 +15,9 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from axiom_graph.docjson import parse as json_doc_scanner
 from axiom_graph.docjson.api import get_doc_diff
-from axiom_graph.index import db
+from axiom_graph.index import db, doc_ids
 
 logger = logging.getLogger(__name__)
 
@@ -224,8 +225,6 @@ def rescan_docs() -> dict:
     if not roots:
         return {"ok": True, "scanned": 0, "message": "No configured docs roots found"}
 
-    from axiom_graph.docjson import parse as json_doc_scanner  # noqa: PLC0415
-
     scanned = 0
     renames: dict[str, str] = {}
     try:
@@ -234,7 +233,9 @@ def rescan_docs() -> dict:
         doc_recs: list = []
         sec_recs: list = []
         for docs_dir in roots:
-            _n, _e, _d, _s, _ = json_doc_scanner.scan_json_docs(docs_dir, server._PROJECT_ROOT, server._PROJECT_ID)
+            _n, _e, _d, _s, _ = json_doc_scanner.scan_json_docs(
+                docs_dir, server._PROJECT_ROOT, server._PROJECT_ID, extensions=server._docs_extensions()
+            )
             nodes.extend(_n)
             edges.extend(_e)
             doc_recs.extend(_d)
@@ -313,15 +314,20 @@ def import_doc_json(body: _DocImportRequest) -> dict:
 
     filename = body.filename.strip() if body.filename else ""
     if not filename:
-        filename = f"{raw_id}.json"
-    if not filename.endswith(".json"):
-        filename += ".json"
+        filename = raw_id
+    # A filename already carrying a DocJSON extension keeps it; anything else
+    # gets the configured write extension.
+    if not doc_ids.has_docjson_extension(filename):
+        filename = doc_ids.docjson_filename(filename, server._docs_extensions())
 
     docs_dir = server._primary_docs_root()
     docs_dir.mkdir(parents=True, exist_ok=True)
     json_path = docs_dir / filename
+    # A document at this path under either extension is the same document.
+    _existing = doc_ids.existing_docjson_file(json_path.parent, doc_ids.strip_docjson_extension(json_path.name))
 
-    if json_path.exists():
+    if _existing is not None:
+        json_path = _existing
         try:
             _display = json_path.relative_to(server._PROJECT_ROOT).as_posix()
         except ValueError:
@@ -333,8 +339,6 @@ def import_doc_json(body: _DocImportRequest) -> dict:
             json.dumps(data, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-
-        from axiom_graph.docjson import parse as json_doc_scanner  # noqa: PLC0415
 
         nodes, edges, doc_recs, sec_recs = json_doc_scanner.scan_single_json_doc(
             json_path, server._PROJECT_ROOT, server._PROJECT_ID, docs_dir=docs_dir
@@ -348,13 +352,8 @@ def import_doc_json(body: _DocImportRequest) -> dict:
                 db.upsert_doc(conn, rec)
 
         rel = json_path.relative_to(server._PROJECT_ROOT).as_posix()
-        try:
-            raw_id = json_path.relative_to(docs_dir).as_posix().removesuffix(".json").replace("/", ".")
-        except ValueError:
-            raw_id = rel.removesuffix(".json").replace("/", ".")
-            if raw_id.startswith("docs."):
-                raw_id = raw_id[5:]
-        doc_id = f"{server._PROJECT_ID}::docs.{raw_id}"
+        _root_entry, _rel_to_root = json_doc_scanner.resolve_doc_root(json_path, server._PROJECT_ROOT, docs_dir)
+        doc_id = doc_ids.derive_doc_id(server._PROJECT_ID, _root_entry, _rel_to_root)
         return {"ok": True, "doc_id": doc_id, "file_path": rel}
     except Exception as exc:
         if json_path.exists():
@@ -400,9 +399,12 @@ def create_doc(body: _DocCreateRequest) -> dict:
                 subdir_tail = subdir_posix
     docs_dir = target_docs_root if not subdir_tail else (target_docs_root / subdir_tail)
     docs_dir.mkdir(parents=True, exist_ok=True)
-    json_path = docs_dir / f"{raw_id}.json"
+    json_path = docs_dir / doc_ids.docjson_filename(raw_id, server._docs_extensions())
+    # A document at this path under either extension is the same document.
+    _existing = doc_ids.existing_docjson_file(docs_dir, raw_id)
 
-    if json_path.exists():
+    if _existing is not None:
+        json_path = _existing
         try:
             rel_display = json_path.relative_to(server._PROJECT_ROOT).as_posix()
         except ValueError:
@@ -429,8 +431,6 @@ def create_doc(body: _DocCreateRequest) -> dict:
             encoding="utf-8",
         )
 
-        from axiom_graph.docjson import parse as json_doc_scanner  # noqa: PLC0415
-
         nodes, edges, doc_recs, sec_recs = json_doc_scanner.scan_single_json_doc(
             json_path, server._PROJECT_ROOT, server._PROJECT_ID, docs_dir=target_docs_root
         )
@@ -443,13 +443,8 @@ def create_doc(body: _DocCreateRequest) -> dict:
                 db.upsert_doc(conn, rec)
 
         rel = json_path.relative_to(server._PROJECT_ROOT).as_posix()
-        try:
-            raw_rel_id = json_path.relative_to(target_docs_root).as_posix().removesuffix(".json").replace("/", ".")
-        except ValueError:
-            raw_rel_id = rel.removesuffix(".json").replace("/", ".")
-            if raw_rel_id.startswith("docs."):
-                raw_rel_id = raw_rel_id[5:]
-        doc_id = f"{server._PROJECT_ID}::docs.{raw_rel_id}"
+        _root_entry, _rel_to_root = json_doc_scanner.resolve_doc_root(json_path, server._PROJECT_ROOT, target_docs_root)
+        doc_id = doc_ids.derive_doc_id(server._PROJECT_ID, _root_entry, _rel_to_root)
         return {"ok": True, "doc_id": doc_id, "file_path": rel}
     except Exception as exc:
         if json_path.exists():
@@ -582,7 +577,10 @@ def move_doc_endpoint(doc_id: str, body: _DocMoveRequest) -> dict:
         raise HTTPException(status_code=400, detail="Doc is not under the matched docs root") from exc
 
     current_folder = old_rel.parent.as_posix()
-    current_stem = old_rel.stem
+    current_stem = doc_ids.strip_docjson_extension(old_rel.name)
+    # A move keeps the document's extension; converting is the job of
+    # ``doc-ids rename-extension``, not of a move.
+    current_ext = old_rel.name[len(current_stem) :]
 
     dest_docs_root = source_docs_root
     if body.destination is not None:
@@ -614,18 +612,18 @@ def move_doc_endpoint(doc_id: str, body: _DocMoveRequest) -> dict:
     else:
         new_stem = current_stem
 
-    if new_folder:
-        new_json_path = dest_docs_root / new_folder / f"{new_stem}.json"
-    else:
-        new_json_path = dest_docs_root / f"{new_stem}.json"
+    new_dir = dest_docs_root / new_folder if new_folder else dest_docs_root
+    new_json_path = new_dir / f"{new_stem}{current_ext}"
 
     if old_path.resolve() == new_json_path.resolve():
         return {"ok": True, "old_id": doc_id, "new_id": doc_id, "new_path": doc_node.location, "noop": True}
 
-    if new_json_path.exists():
+    # The target is taken when a document of either extension sits there.
+    _taken = doc_ids.existing_docjson_file(new_dir, new_stem)
+    if _taken is not None and _taken.resolve() != old_path.resolve():
         raise HTTPException(
             status_code=409,
-            detail=f"Target already exists: {new_json_path.relative_to(server._PROJECT_ROOT).as_posix()}",
+            detail=f"Target already exists: {_taken.relative_to(server._PROJECT_ROOT).as_posix()}",
         )
 
     new_json_path.parent.mkdir(parents=True, exist_ok=True)
@@ -636,13 +634,8 @@ def move_doc_endpoint(doc_id: str, body: _DocMoveRequest) -> dict:
         raise HTTPException(status_code=500, detail=f"Failed to move file: {exc}") from exc
 
     new_rel = new_json_path.relative_to(server._PROJECT_ROOT).as_posix()
-    try:
-        raw_id = new_json_path.relative_to(dest_docs_root).as_posix().removesuffix(".json").replace("/", ".")
-    except ValueError:
-        raw_id = new_rel.removesuffix(".json").replace("/", ".")
-        if raw_id.startswith("docs."):
-            raw_id = raw_id[5:]
-    new_doc_id = f"{server._PROJECT_ID}::docs.{raw_id}"
+    _root_entry, _rel_to_root = json_doc_scanner.resolve_doc_root(new_json_path, server._PROJECT_ROOT, dest_docs_root)
+    new_doc_id = doc_ids.derive_doc_id(server._PROJECT_ID, _root_entry, _rel_to_root)
 
     try:
         db.move_doc(server._db(), doc_id, new_doc_id, new_rel)
@@ -650,8 +643,6 @@ def move_doc_endpoint(doc_id: str, body: _DocMoveRequest) -> dict:
         raise HTTPException(status_code=500, detail=f"DB migration failed: {exc}") from exc
 
     try:
-        from axiom_graph.docjson import parse as json_doc_scanner  # noqa: PLC0415
-
         nodes, edges, doc_recs, sec_recs = json_doc_scanner.scan_single_json_doc(
             new_json_path, server._PROJECT_ROOT, server._PROJECT_ID, docs_dir=dest_docs_root
         )
@@ -695,7 +686,6 @@ def save_doc(doc_id: str, body: _DocSaveRequest) -> dict:
             encoding="utf-8",
         )
 
-        from axiom_graph.docjson import parse as json_doc_scanner  # noqa: PLC0415
         from axiom_graph.index.builder import _matched_docs_dir as _mdd  # noqa: PLC0415
 
         matched_root = _mdd(json_path, server._PROJECT_ROOT)

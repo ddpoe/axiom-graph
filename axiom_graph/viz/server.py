@@ -15,7 +15,7 @@ import sqlite3
 import threading
 
 logger = logging.getLogger(__name__)
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +25,9 @@ from pydantic import BaseModel
 
 
 from axiom_graph.index import db
-from axiom_graph.index.staleness import record_staleness
+from axiom_graph.index.status import VERIFIED
+from axiom_graph.lifecycle.api import read_graph_view, refresh_before_read
+from axiom_graph.query.api import node_tags
 from axiom_graph.registry import (
     prune_registry as _prune_registry,
     project_display_name as _project_display_name,
@@ -63,7 +65,9 @@ def _apply_project(project_root: Path) -> None:
     from ..config import AxiomGraphConfig
 
     _cfg = AxiomGraphConfig.load(project_root)
-    _PROJECT_ID = _cfg.project_id or project_root.name
+    from ..index.builder import resolve_project_id
+
+    _PROJECT_ID = resolve_project_id(project_root, _DB_PATH, config=_cfg)
     _TEST_PATHS = _cfg.scan.test_paths
     _EXCLUDE_DIRS = _cfg.scan.exclude_dirs
     _TRANSITIVE_TAGS = _cfg.staleness.transitive_tags
@@ -120,6 +124,23 @@ def _docs_roots() -> list[Path]:
     return out
 
 
+def _docs_extensions() -> list[str]:
+    """Return the configured DocJSON extensions; the first is the write extension.
+
+    Falls back to the default extensions when no project is active or the
+    config cannot be loaded.
+    """
+    from axiom_graph.config import AxiomGraphConfig  # noqa: PLC0415
+
+    if _PROJECT_ROOT is None:
+        return AxiomGraphConfig().scan.docs_extensions
+    try:
+        return AxiomGraphConfig.load(_PROJECT_ROOT).scan.docs_extensions
+    except Exception as exc:
+        logger.warning("could not load docs_extensions from %s, using the default: %s", _PROJECT_ROOT, exc)
+        return AxiomGraphConfig().scan.docs_extensions
+
+
 def _primary_docs_root() -> Path:
     """Return the first configured docs root (fallback: project_root/docs)."""
     roots = _docs_roots()
@@ -148,10 +169,7 @@ def _docs_root_rels() -> list[str]:
 
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(_DB_PATH), timeout=5)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.row_factory = sqlite3.Row
-    return conn
+    return db.open_connection(_DB_PATH)
 
 
 def _node_to_dict(n: Any) -> dict:
@@ -162,47 +180,27 @@ def _edge_to_dict(e: Any) -> dict:
     return dataclasses.asdict(e)
 
 
-def _get_tags_bulk(node_ids: list[str]) -> dict[str, list[str]]:
-    """Batch-load tags for a list of node IDs.  Returns {node_id: [tag, ...]}."""
-    if not node_ids:
-        return {}
-    conn = _connect()
-    placeholders = ",".join("?" * len(node_ids))
-    rows = conn.execute(
-        f"SELECT node_id, tag FROM tags WHERE node_id IN ({placeholders})",
-        node_ids,
-    ).fetchall()
-    conn.close()
-    result: dict[str, list[str]] = defaultdict(list)
-    for r in rows:
-        result[r["node_id"]].append(r["tag"])
-    return dict(result)
-
-
 def _hydrate_tags(nodes: list) -> list:
-    tags_map = _get_tags_bulk([n.id for n in nodes])
+    tags_map = node_tags(_db(), [n.id for n in nodes])
     for n in nodes:
         n.tags = tags_map.get(n.id, [])
     return nodes
 
 
 def _compute_staleness_for_viz(nodes: list) -> dict[str, tuple[str, str]]:
-    """Thin wrapper — delegates to record_staleness (computes + records transitions + persists).
+    """Return ``{node_id: (own_status, link_status)}`` for *nodes* after the read helper refreshed them.
 
-    Strips the via list from the 3-tuple returned by record_staleness,
-    returning the 2-tuple (own_status, link_status) that the viz frontend
-    expects.
+    A node-naming view (the neighbourhood) gets the cone of its nodes
+    (:func:`~axiom_graph.lifecycle.api.refresh_before_read`): the files their
+    statuses read and the journal rows naming them, stored as ``check --full``
+    would store them.  Evaluating only the shown nodes and storing that
+    (the old ``record_staleness_settled`` over a subset) could store a status
+    the rest of the graph contradicts.
     """
     if _PROJECT_ROOT is None or _DB_PATH is None:
         return {}
-    full = record_staleness(
-        _DB_PATH,
-        _PROJECT_ROOT,
-        nodes,
-        transitive_tags=_TRANSITIVE_TAGS,
-        frozen_tags=_FROZEN_TAGS,
-    )
-    return {nid: (own, link) for nid, (own, link, _via) in full.items()}
+    rr = refresh_before_read(_DB_PATH, _PROJECT_ROOT, [n.id for n in nodes])
+    return {n.id: rr.statuses.get(n.id, (VERIFIED, VERIFIED)) for n in nodes}
 
 
 def _staleness_to_dicts(
@@ -234,29 +232,7 @@ def get_meta() -> dict:
     tag_rows = conn.execute("SELECT DISTINCT tag FROM tags ORDER BY tag").fetchall()
     conn.close()
 
-    # Check embeddings availability
     node_count = len(nodes)
-    emb_info = {"available": False, "count": 0, "node_count": node_count, "coverage": 0.0}
-    try:
-        emb_conn = _connect()
-        # Check if vec_embeddings table exists
-        has_table = (
-            emb_conn.execute(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='vec_embeddings'"
-            ).fetchone()[0]
-            > 0
-        )
-        if has_table:
-            emb_count = emb_conn.execute("SELECT COUNT(*) FROM embedding_hashes").fetchone()[0]
-            emb_info = {
-                "available": emb_count > 0,
-                "count": emb_count,
-                "node_count": node_count,
-                "coverage": round(emb_count / node_count, 4) if node_count > 0 else 0.0,
-            }
-        emb_conn.close()
-    except Exception:
-        pass  # embeddings unavailable — defaults are fine
 
     return {
         "project_id": _PROJECT_ID or (_PROJECT_ROOT.name if _PROJECT_ROOT else "unknown"),
@@ -268,7 +244,6 @@ def get_meta() -> dict:
         "tags": [r["tag"] for r in tag_rows],
         "statuses": sorted({n.status for n in nodes}),
         "test_paths": _TEST_PATHS,
-        "embeddings": emb_info,
     }
 
 
@@ -336,35 +311,10 @@ def switch_project(body: _ProjectBody) -> dict:
 
 
 @app.get("/api/search")
-def search(q: str = "", type: str | None = None, max_results: int = 50, mode: str = "keyword") -> dict:
-    """FTS5 or semantic search.  Returns nodes + mode label."""
+def search(q: str = "", type: str | None = None, max_results: int = 50) -> dict:
+    """FTS5 search.  Returns nodes + the stage label that produced them."""
     if not q.strip():
         return {"nodes": [], "mode": "empty", "total": 0}
-
-    if mode == "semantic":
-        try:
-            from axiom_graph.index.embeddings import get_embedder
-
-            embedder = get_embedder()
-            query_vec = embedder([q])[0]
-            nodes, total = db.semantic_search(
-                _db(),
-                query_vec,
-                max_results=max_results,
-                node_type=type,
-            )
-            if not nodes:
-                # Fall back to keyword if semantic returns nothing
-                nodes, kw_mode, total = db.fts_search(_db(), q, node_type=type, max_results=max_results)
-                _hydrate_tags(nodes)
-                return {"nodes": [_node_to_dict(n) for n in nodes], "mode": f"keyword ({kw_mode})", "total": total}
-            _hydrate_tags(nodes)
-            return {"nodes": [_node_to_dict(n) for n in nodes], "mode": "semantic", "total": total}
-        except Exception as exc:
-            logger.warning("Semantic search failed, falling back to keyword: %s", exc)
-            nodes, kw_mode, total = db.fts_search(_db(), q, node_type=type, max_results=max_results)
-            _hydrate_tags(nodes)
-            return {"nodes": [_node_to_dict(n) for n in nodes], "mode": f"keyword ({kw_mode})", "total": total}
 
     nodes, kw_mode, total = db.fts_search(_db(), q, node_type=type, max_results=max_results)
     _hydrate_tags(nodes)
@@ -377,31 +327,32 @@ def get_all() -> dict:
     Sets `large: true` when node count > 400 to signal the frontend to switch
     to filtered/neighborhood mode.
     """
-    nodes = db.all_nodes(_db())
-    edges = db.all_edges(_db())
-    _hydrate_tags(nodes)
-    staleness = db.get_all_staleness(_db())
-    verifications = db.get_all_verifications(_db())
+    view = read_graph_view(_db(), _PROJECT_ROOT)
+    nodes, edges, staleness, verifications = view.nodes, view.edges, view.staleness, view.verifications
 
-    return {
+    out = {
         "nodes": [_node_to_dict(n) for n in nodes],
         "edges": [_edge_to_dict(e) for e in edges],
         "staleness": _staleness_to_dicts(staleness),
         "verifications": verifications,
         "large": len(nodes) > 400,
     }
+    if view.behind:
+        out["behind"] = view.behind
+    return out
 
 
 @app.get("/api/check")
 def get_check() -> dict:
-    """Full hash-based staleness for every node.  Returns full map + summary counts.
+    """Hash-based staleness for every node after the incremental check.  Returns full map + summary counts.
 
-    Delegates to ``record_staleness()`` which computes staleness, records
-    transition events, and persists results in one transaction.
+    Runs the ``check`` command's refresh (``refresh_before_read`` in
+    ``"check"`` mode, equal to ``check --full`` by parity), then reads the
+    stored statuses, on one connection.
     """
-    nodes = db.all_nodes(_db())
-    statuses = _compute_staleness_for_viz(nodes)
-    verifications = db.get_all_verifications(_db())
+    view = read_graph_view(_db(), _PROJECT_ROOT, mode="check", edges=False, tags=False)
+    nodes, stored, verifications = view.nodes, view.staleness, view.verifications
+    statuses = {n.id: stored.get(n.id, (VERIFIED, VERIFIED)) for n in nodes}
     # Count by own_status for the summary (frontend expects string keys)
     own_statuses = [own for own, _link in statuses.values()]
     return {

@@ -7,15 +7,18 @@ temporary git repo.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
+from axiom_annotations import workflow
 
 from axiom_graph.index.git_utils import (
     NameStatusChanges,
     _parse_name_status_changes,
     get_name_status_changes,
+    resolve_commit,
 )
 
 
@@ -104,3 +107,60 @@ def test_get_name_status_changes_detects_rename(repo: Path):
 
 def test_get_name_status_changes_empty_for_blank_sha(repo: Path):
     assert get_name_status_changes(repo, "", "HEAD") == NameStatusChanges()
+
+
+# ---------------------------------------------------------------------------
+# resolve_commit — SHA prefix -> (full SHA, UTC committer time)
+# ---------------------------------------------------------------------------
+
+
+def _commit_with_date(repo: Path, message: str, date: str) -> str:
+    env = {**os.environ, "GIT_COMMITTER_DATE": date, "GIT_AUTHOR_DATE": date}
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", message], cwd=repo, env=env, capture_output=True, check=True
+    )
+    return _git(["rev-parse", "HEAD"], repo)
+
+
+@workflow(
+    purpose="A known commit prefix resolves to the full SHA and its committer time in UTC, shaped like "
+    "a history row timestamp so string comparison orders it correctly; unknown, ref-name and "
+    "out-of-repo inputs resolve to nothing"
+)
+def test_resolve_commit_returns_full_sha_and_utc_time(repo: Path, tmp_path: Path):
+    full = _commit_with_date(repo, "offset commit", "2026-03-04T10:30:00+05:30")
+
+    resolved = resolve_commit(repo, full[:7])
+
+    assert resolved is not None
+    sha, ts = resolved
+    assert sha == full
+    assert ts == "2026-03-04T05:00:00+00:00"
+    # A history row written later in the same second sorts after the commit time.
+    assert ts < "2026-03-04T05:00:00.123456+00:00"
+    assert "2026-03-04T04:59:59.999999+00:00" < ts
+
+    assert resolve_commit(repo, "0123456789abcdef0123456789abcdef01234567") is None
+    assert resolve_commit(repo, "HEAD") is None
+    assert resolve_commit(tmp_path / "missing", full[:7]) is None
+
+
+def test_resolve_commit_ambiguous_prefix_is_none(repo: Path):
+    lines = []
+    for i in range(1500):
+        msg = f"c{i}\n"
+        lines.append("commit refs/heads/many")
+        lines.append(f"committer t <t@t.com> {1700000000 + i} +0000")
+        lines.append(f"data {len(msg)}")
+        lines.append(msg)
+    stream = "\n".join(lines) + "\n"
+    subprocess.run(["git", "fast-import", "--quiet"], cwd=repo, input=stream.encode("utf-8"), check=True)
+    shas = _git(["rev-list", "refs/heads/many"], repo).split()
+    counts: dict[str, int] = {}
+    for s in shas:
+        counts[s[:4]] = counts.get(s[:4], 0) + 1
+    shared = [p for p, n in counts.items() if n > 1]
+    if not shared:
+        pytest.skip("no shared 4-char commit prefix in this sample")
+
+    assert resolve_commit(repo, shared[0]) is None

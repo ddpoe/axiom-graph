@@ -216,11 +216,12 @@ function _createCommitRow(commit: CommitEntry, rangeSet: Set<string>): HTMLEleme
   if (rangeSet.has(commit.sha)) {
     row.classList.add('in-range');
   }
-  // Un-indexed commits have no node_history rows, so they can't be a valid
-  // "since" reference — fade them out and make them non-selectable.
+  // Un-indexed commits have no node_history rows, so they aren't a precise
+  // reference point — fade them, but keep them selectable: the server
+  // resolves them by git commit time.
   if (!commit.indexed) {
     row.classList.add('not-indexed');
-    row.title = 'Not in the index — rebuild (axiom-graph build) to filter since this commit';
+    row.title = 'Not in the index — resolves by git commit time (rebuild with axiom-graph build for an exact reference)';
   }
 
   // Checkbox
@@ -228,10 +229,8 @@ function _createCommitRow(commit: CommitEntry, rangeSet: Set<string>): HTMLEleme
   checkbox.type = 'checkbox';
   checkbox.className = 'cm-checkbox';
   checkbox.checked = _checkedShas.includes(commit.sha);
-  checkbox.disabled = !commit.indexed;
   checkbox.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (!commit.indexed) return;
     _toggleCheck(commit.sha);
   });
   row.appendChild(checkbox);
@@ -304,7 +303,6 @@ function _createCommitRow(commit: CommitEntry, rangeSet: Set<string>): HTMLEleme
     // Don't trigger if clicking checkbox or expand
     const target = e.target as HTMLElement;
     if (target.tagName === 'INPUT' || target.classList.contains('since-modal-commit-expand')) return;
-    if (!commit.indexed) return;  // un-indexed: not a valid reference point
     _selectSingle(commit);
   });
 

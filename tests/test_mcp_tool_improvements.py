@@ -91,60 +91,30 @@ def _insert_edge(db_path: Path, edge_type: str, from_id: str, to_id: str) -> Non
 
 
 # ===========================================================================
-# 0a: axiom_graph_read_doc TOC mode
+# 0a: axiom_graph_read_doc whole-doc and section reads
 # ===========================================================================
 
 
-class TestReadDocTocMode:
-    """When full rendered doc exceeds threshold and no section param, return TOC."""
+class TestReadDocWholeAndSection:
+    """A whole-doc read renders content; a section read returns that section."""
 
     def test_small_doc_returns_full_content(self, mini_project: Path) -> None:
-        """Docs under the threshold should return full markdown as before."""
+        """A small doc renders in full, with no budget hint."""
         from axiom_graph.mcp_server import axiom_graph_read_doc
 
         db_path = mini_project / ".axiom_graph" / "graph.db"
         _write_doc(
             db_path,
-            "test::docs.small",
+            "test::docs/small",
             "Small Doc",
             [
-                {"id": "test::docs.small::intro", "heading": "Intro", "content": "Short content."},
+                {"id": "test::docs/small::intro", "heading": "Intro", "content": "Short content."},
             ],
         )
-        result = axiom_graph_read_doc(str(mini_project), "test::docs.small")
+        result = axiom_graph_read_doc(str(mini_project), "test::docs/small")
         assert "# Small Doc" in result
         assert "Short content." in result
-        # Should NOT contain the TOC hint
-        assert "Use section=" not in result
-
-    def test_large_doc_returns_toc(self, mini_project: Path) -> None:
-        """Docs over the threshold should return a TOC with section slugs and char counts."""
-        from axiom_graph.mcp_server import axiom_graph_read_doc
-
-        db_path = mini_project / ".axiom_graph" / "graph.db"
-        # Create a doc with enough content to exceed 3000 chars
-        sections = []
-        for i in range(10):
-            sections.append(
-                {
-                    "id": f"test::docs.big::section-{i}",
-                    "heading": f"Section {i}",
-                    "content": "x" * 400,  # 10 * 400 = 4000 chars of content alone
-                }
-            )
-        _write_doc(db_path, "test::docs.big", "Big Doc", sections)
-
-        result = axiom_graph_read_doc(str(mini_project), "test::docs.big")
-
-        # Should contain the TOC hint instructing how to drill in
-        assert "section=" in result
-        # Should list section slugs
-        assert "section-0" in result
-        assert "section-9" in result
-        # Should show char counts
-        assert "400" in result
-        # Should NOT contain the full content body
-        assert "x" * 400 not in result
+        assert "[read_doc:" not in result
 
     def test_large_doc_with_section_param_returns_full_section(self, mini_project: Path) -> None:
         """Even for large docs, specifying section= returns the full section content."""
@@ -155,26 +125,15 @@ class TestReadDocTocMode:
         for i in range(10):
             sections.append(
                 {
-                    "id": f"test::docs.big2::section-{i}",
+                    "id": f"test::docs/big2::section-{i}",
                     "heading": f"Section {i}",
                     "content": f"unique-content-{i} " + "x" * 400,
                 }
             )
-        _write_doc(db_path, "test::docs.big2", "Big Doc 2", sections)
+        _write_doc(db_path, "test::docs/big2", "Big Doc 2", sections)
 
-        result = axiom_graph_read_doc(str(mini_project), "test::docs.big2", section="section-3")
+        result = axiom_graph_read_doc(str(mini_project), "test::docs/big2", section="section-3")
         assert "unique-content-3" in result
-
-    def test_toc_shows_section_count_and_total_chars(self, mini_project: Path) -> None:
-        """TOC should mention number of sections and total char count."""
-        from axiom_graph.mcp_server import axiom_graph_read_doc
-
-        db_path = mini_project / ".axiom_graph" / "graph.db"
-        sections = [{"id": f"test::docs.big3::s-{i}", "heading": f"S{i}", "content": "a" * 500} for i in range(8)]
-        _write_doc(db_path, "test::docs.big3", "Big Doc 3", sections)
-
-        result = axiom_graph_read_doc(str(mini_project), "test::docs.big3")
-        assert "8 sections" in result
 
 
 # ===========================================================================
@@ -197,10 +156,10 @@ class TestCheckSlimmed:
         db_path = git_project / ".axiom_graph" / "graph.db"
         _write_doc(
             db_path,
-            "test::docs.long",
+            "test::docs/long",
             "Long Doc",
             [
-                {"id": "test::docs.long::big", "heading": "Big Section", "content": "y" * 2500},
+                {"id": "test::docs/long::big", "heading": "Big Section", "content": "y" * 2500},
             ],
         )
         _upsert_node(db_path, "test::mod::func_a")
@@ -210,7 +169,7 @@ class TestCheckSlimmed:
         # long sections exist (no filter param to gate it).
         assert "DOC_SECTION_LONG" in result
         # And per-section detail is NOT in check output.
-        assert "test::docs.long::big" not in result
+        assert "test::docs/long::big" not in result
 
     def test_check_no_long_sections_omits_advisory(self, git_project: Path) -> None:
         """When no long sections exist, summary omits DOC_SECTION_LONG token."""

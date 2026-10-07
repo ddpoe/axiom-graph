@@ -1,0 +1,77 @@
+{
+  "title": "Template: PEV Audit (consumer-docs)",
+  "tags": [],
+  "meta": {
+    "template_version": "1.0.0"
+  },
+  "sections": [
+    {
+      "id": "meta",
+      "heading": "Meta",
+      "content": "status: active\naudit-type: consumer-docs\nstarted-at: {ISO timestamp}\ndispatcher: pev-audit-consumer-docs\nrequest-link: {audit-request-doc-id or null}\naudit-commit-sha: {HEAD-sha}\nsince-commit: {resolved-sha or null}\nsince-commit-overridden: {true|false}\ngit-diff-summary: {summary block}\ncurrent-phase: intake-complete"
+    },
+    {
+      "id": "request",
+      "heading": "Request",
+      "content": "(pointer to, or copy of, the audit-request doc)"
+    },
+    {
+      "id": "orchestrator",
+      "heading": "Orchestrator",
+      "content": "**Filled by:** the `/pev-audit-consumer-docs` orchestrator.",
+      "sections": [
+        {
+          "id": "discovery",
+          "heading": "Discovery",
+          "content": "(placeholder — pre-dispatch summary)"
+        },
+        {
+          "id": "handoff",
+          "heading": "Handoff",
+          "content": "(placeholder)",
+          "sections": [
+            {
+              "id": "recommended-requests",
+              "heading": "Recommended Requests",
+              "content": "(empty list — one bullet per spawned request doc id)"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "discovery",
+      "heading": "Discovery",
+      "content": "**Filled by:** the `pev-audit-consumer-discovery` agent, one child per mode.",
+      "sections": [
+        {
+          "id": "findings",
+          "heading": "Findings",
+          "content": "(per-mode findings)",
+          "sections": [
+            {
+              "id": "cycles",
+              "heading": "Cycles",
+              "content": "(empty — cycles-mode discovery)"
+            },
+            {
+              "id": "features",
+              "heading": "Features",
+              "content": "(empty — features-mode discovery)"
+            },
+            {
+              "id": "adrs",
+              "heading": "ADRs",
+              "content": "(empty — adrs-mode discovery)"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "friction",
+      "heading": "Friction",
+      "content": "(empty — friction observations; empty is fine)"
+    }
+  ]
+}

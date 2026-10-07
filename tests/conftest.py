@@ -4,11 +4,40 @@ from __future__ import annotations
 
 import sqlite3
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
 from axiom_graph.index import db
+
+_GIT_BACKOFF_SECONDS = (0.2, 0.5)
+
+
+def _git(cwd: Path, *args: str) -> None:
+    """Run a git command for a fixture, retrying a failure twice, and report stderr if it keeps failing.
+
+    Under many parallel workers a git subprocess can fail transiently, for
+    example on a file another process holds open; a retry after a short
+    pause gets past it.  Every command the fixtures run is safe to repeat.
+
+    Args:
+        cwd: Directory to run git in.
+        *args: The git arguments.
+
+    Raises:
+        RuntimeError: Every attempt exited non-zero; the message holds each
+            attempt's exit code and stderr.
+    """
+    failures = []
+    for attempt in range(len(_GIT_BACKOFF_SECONDS) + 1):
+        result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+        if result.returncode == 0:
+            return
+        failures.append(f"attempt {attempt + 1}: exit {result.returncode}: {result.stderr.strip()}")
+        if attempt < len(_GIT_BACKOFF_SECONDS):
+            time.sleep(_GIT_BACKOFF_SECONDS[attempt])
+    raise RuntimeError(f"git {' '.join(args)} failed in {cwd}:\n" + "\n".join(failures))
 
 
 def seed_section_node(
@@ -105,37 +134,14 @@ def git_project(tmp_path: Path) -> Path:
     Has an initial commit so HEAD exists.  E2E tests write .py files,
     commit, and call builder/staleness functions against real git.
     """
-    subprocess.run(
-        ["git", "init"],
-        cwd=tmp_path,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.email", "test@test.com"],
-        cwd=tmp_path,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Test"],
-        cwd=tmp_path,
-        capture_output=True,
-        check=True,
-    )
+    # No template: no sample hooks are copied, so fewer file operations for
+    # a scanner to contend with; no test here relies on a template file.
+    _git(tmp_path, "init", "--template=")
+    _git(tmp_path, "config", "user.email", "test@test.com")
+    _git(tmp_path, "config", "user.name", "Test")
     (tmp_path / ".gitkeep").touch()
-    subprocess.run(
-        ["git", "add", "."],
-        cwd=tmp_path,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "commit", "-m", "init"],
-        cwd=tmp_path,
-        capture_output=True,
-        check=True,
-    )
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "init")
     ag_dir = tmp_path / ".axiom_graph"
     ag_dir.mkdir()
     db.init_db(ag_dir / "graph.db")

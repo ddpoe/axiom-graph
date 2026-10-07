@@ -112,7 +112,7 @@ def test_external_edit_removes_one_link_drops_one_edge(mini_project, db_path):
     口 = Step(step_num=2, name="Initial build seeds two documents edges", purpose="baseline state")
     builder.build(mini_project, project_id="proj", discovery_only=False)
 
-    section_id = "proj::docs.guide::intro"
+    section_id = "proj::docs/guide::intro"
     edges_before = _outbound_documents(db_path, section_id)
     assert edges_before == {"proj::mod_a::func_a", "proj::mod_b::func_b"}
 
@@ -171,7 +171,7 @@ def test_cortex_diff_repro_orphan_edge_to_deleted_target(mini_project, db_path):
         step_num=2, name="Initial build creates both edges; one is dangling", purpose="baseline broken-link state"
     )
     builder.build(mini_project, project_id="proj", discovery_only=False)
-    section_id = "proj::docs.diff::cortex-diff"
+    section_id = "proj::docs/diff::cortex-diff"
     assert _outbound_documents(db_path, section_id) == {
         "proj::real_mod::real_func",
         "proj::ghost_mod::removed_func",
@@ -225,7 +225,7 @@ def test_empty_links_array_drops_all_outbound_edges(mini_project, db_path):
 
     口 = Step(step_num=2, name="Initial build seeds one documents edge", purpose="baseline state")
     builder.build(mini_project, project_id="proj", discovery_only=False)
-    section_id = "proj::docs.ref::main"
+    section_id = "proj::docs/ref::main"
     assert _outbound_documents(db_path, section_id) == {"proj::mod_x::func_x"}
 
     口 = Step(
@@ -284,7 +284,7 @@ def test_tool_path_add_then_delete_link_unchanged(mini_project, db_path):
     )
 
     builder.build(mini_project, project_id="proj", discovery_only=False)
-    section_id = "proj::docs.tour::section-1"
+    section_id = "proj::docs/tour::section-1"
     assert _outbound_documents(db_path, section_id) == set()
 
     add_result = docjson_api.axiom_graph_add_link(
@@ -330,7 +330,7 @@ def test_tool_path_delete_link_absent_target_returns_message(mini_project, db_pa
         ],
     )
     builder.build(mini_project, project_id="proj", discovery_only=False)
-    section_id = "proj::docs.empty::sec"
+    section_id = "proj::docs/empty::sec"
 
     result = docjson_api.axiom_graph_delete_link(
         str(mini_project),
@@ -345,12 +345,12 @@ def test_tool_path_delete_link_absent_target_returns_message(mini_project, db_pa
 
 
 @workflow(
-    purpose="Reconciliation pass is scoped strictly to documents edges; validates/composes survive",
+    purpose="Reconciliation pass is scoped strictly to documents edges; depends_on/composes survive",
 )
 def test_non_documents_edges_preserved(mini_project, db_path):
-    """US-3: validates and composes edges from a scanned section are not touched.
+    """US-3: depends_on and composes edges from a scanned section are not touched.
 
-    Seed validates + composes edges with the same from_id as a scanned section;
+    Seed depends_on + composes edges with the same from_id as a scanned section;
     rebuild; both must still be in the DB.
     """
     _write_code_module(mini_project, "mod_z", "def func_z():\n    pass\n")
@@ -367,15 +367,15 @@ def test_non_documents_edges_preserved(mini_project, db_path):
         ],
     )
     builder.build(mini_project, project_id="proj", discovery_only=False)
-    section_id = "proj::docs.scope::sec"
+    section_id = "proj::docs/scope::sec"
 
-    # Inject a synthetic validates and composes edge with the same from_id as
-    # the scanned section.  These are off-ontology (sections don't usually
-    # emit validates) but the reconciler must not touch them by edge_type.
+    # Inject a synthetic depends_on and composes edge with the same from_id as
+    # the scanned section.  These are off-ontology (sections never
+    # emit depends_on) but the reconciler must not touch them by edge_type.
     with db._connect(db_path) as conn:
         for et, to in [
-            ("validates", "proj::mod_z::func_z"),
-            ("composes", "proj::docs.scope::child-faux"),
+            ("depends_on", "proj::mod_z::func_z"),
+            ("composes", "proj::docs/scope::child-faux"),
         ]:
             edge = AxiomEdge(
                 id=f"{section_id}::{et}::{to}",
@@ -390,16 +390,16 @@ def test_non_documents_edges_preserved(mini_project, db_path):
     # documents edge survives because JSON still has the link.
     assert _outbound_documents(db_path, section_id) == {"proj::mod_z::func_z"}
 
-    # validates + composes edges must survive — they live in different
+    # depends_on + composes edges must survive — they live in different
     # edge_type rows and are out of the reconciler's scope.
     with db._connect(db_path) as conn:
         survivors = conn.execute(
-            "SELECT edge_type, to_id FROM edges WHERE from_id = ? AND edge_type IN ('validates', 'composes')",
+            "SELECT edge_type, to_id FROM edges WHERE from_id = ? AND edge_type IN ('depends_on', 'composes')",
             (section_id,),
         ).fetchall()
     pairs = {(r["edge_type"], r["to_id"]) for r in survivors}
-    assert ("validates", "proj::mod_z::func_z") in pairs
-    assert ("composes", "proj::docs.scope::child-faux") in pairs
+    assert ("depends_on", "proj::mod_z::func_z") in pairs
+    assert ("composes", "proj::docs/scope::child-faux") in pairs
 
 
 @workflow(
@@ -428,7 +428,7 @@ def test_mtime_skipped_files_not_touched(mini_project, db_path):
 
     # First build (writes section + edges, records mtime).
     builder.build(mini_project, project_id="proj", discovery_only=True)
-    section_id = "proj::docs.stable::sec"
+    section_id = "proj::docs/stable::sec"
     assert _outbound_documents(db_path, section_id) == {"proj::mod_q::func_q"}
 
     # Inject an orphan documents edge that is NOT in the JSON links array.

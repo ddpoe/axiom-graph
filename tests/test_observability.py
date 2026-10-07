@@ -260,8 +260,10 @@ class TestHeaderFormat:
         # by checking there's a header variable assigned unconditionally
         tree = ast.parse(source)
         graph_func = None
+        # The header is built by ``_format_graph``, which axiom_graph_graph calls
+        # for every result, single or batch.
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "axiom_graph_graph":
+            if isinstance(node, ast.FunctionDef) and node.name == "_format_graph":
                 graph_func = node
                 break
         assert graph_func is not None

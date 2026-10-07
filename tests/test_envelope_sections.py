@@ -26,6 +26,7 @@ from axiom_graph.docjson.api import (
 from axiom_graph.index import builder, db
 from axiom_graph.index.staleness import apply_composite_inheritance
 from axiom_graph.lifecycle.api import compute_check_summary, purge_nodes
+from tests.fixtures.full_recompute import assert_matches_full_recompute
 
 PROJ_TOML = '[axiom_graph]\nproject_id = "proj"\n'
 
@@ -42,11 +43,6 @@ def _write_project(root: Path, docs: dict[str, dict]) -> Path:
     db_path = ag / "graph.db"
     db.init_db(db_path)
     return db_path
-
-
-def _set_link_status(db_path: Path, node_id: str, status: str) -> None:
-    with db._connect(db_path) as conn:
-        conn.execute("UPDATE nodes SET link_status = ? WHERE id = ?", (status, node_id))
 
 
 def _drift_ids(project_root: Path, filter: str) -> set[str]:
@@ -89,8 +85,8 @@ def test_drift_query_reaches_doc_quality_and_link_signals(tmp_path: Path) -> Non
         name="Drift the documented code and rebuild",
         purpose="LINKED_STALE arises through the real path: the linked code changes and the full rebuild records it",
     )
-    other_id = "proj::docs.spec::other"
-    long_id = "proj::docs.spec::long"
+    other_id = "proj::docs/spec::other"
+    long_id = "proj::docs/spec::long"
     time.sleep(0.05)
     (tmp_path / "mod.py").write_text("def f():\n    return 2\n", encoding="utf-8")
     builder.build(tmp_path, discovery_only=False)
@@ -131,8 +127,11 @@ def test_drift_query_reaches_doc_quality_and_link_signals(tmp_path: Path) -> Non
 def test_doc_tool_parity_roundtrip(tmp_path: Path) -> None:
     """Doc tools behave as before: order round-trips, nested IDs resolve, edits auto-mark, unrelated link-staleness sticks."""
     口 = Step(
-        step_num=1, name="Build a nested doc", purpose="Sections incl. a dot-path child on a normally-built project"
+        step_num=1,
+        name="Build a nested doc whose appendix documents code",
+        purpose="Sections incl. a dot-path child on a normally-built project; the appendix links a function",
     )
+    (tmp_path / "mod.py").write_text("def f():\n    return 1\n", encoding="utf-8")
     db_path = _write_project(
         tmp_path,
         {
@@ -146,19 +145,36 @@ def test_doc_tool_parity_roundtrip(tmp_path: Path) -> None:
                         "content": "db overview",
                         "sections": [{"id": "tables", "heading": "Tables", "content": "table details"}],
                     },
-                    {"id": "appendix", "heading": "Appendix", "content": "appendix body"},
+                    {
+                        "id": "appendix",
+                        "heading": "Appendix",
+                        "content": "appendix body",
+                        "links": [{"node_id": "proj::mod::f"}],
+                    },
                 ],
             }
         },
     )
     builder.build(tmp_path)
-    doc_id = "proj::docs.arch"
+    doc_id = "proj::docs/arch"
     appendix_id = f"{doc_id}::appendix"
     nested_id = f"{doc_id}::database-layer.tables"
-    _set_link_status(db_path, appendix_id, "LINKED_STALE")
 
     口 = Step(
         step_num=2,
+        name="Drift the documented function and rebuild",
+        purpose="The appendix becomes LINKED_STALE through the real path: its linked code changes, build and check run",
+    )
+    time.sleep(0.05)
+    (tmp_path / "mod.py").write_text("def f():\n    return 2\n", encoding="utf-8")
+    builder.build(tmp_path)
+    compute_check_summary(db_path, tmp_path)
+    with db._connect(db_path) as conn:
+        link = conn.execute("SELECT link_status FROM nodes WHERE id = ?", (appendix_id,)).fetchone()[0]
+    assert link == "LINKED_STALE"
+
+    口 = Step(
+        step_num=3,
         name="Update a nested dot-path section",
         purpose="Nested IDs resolve; the edited section auto-marks (writer-is-verifier)",
     )
@@ -171,15 +187,16 @@ def test_doc_tool_parity_roundtrip(tmp_path: Path) -> None:
     assert row["own_status"] == "VERIFIED"
 
     口 = Step(
-        step_num=3,
+        step_num=4,
         name="Unrelated link-staleness sticks",
-        purpose="Editing one section never clears another node's LINKED_STALE",
+        purpose="Editing one section never clears another node's LINKED_STALE; the stored rows equal a full recompute",
     )
     with db._connect(db_path) as conn:
         link = conn.execute("SELECT link_status FROM nodes WHERE id = ?", (appendix_id,)).fetchone()[0]
     assert link == "LINKED_STALE"
+    assert_matches_full_recompute(db_path, tmp_path)
 
-    口 = Step(step_num=4, name="Patch, add, delete", purpose="The remaining CRUD tools keep identical behavior")
+    口 = Step(step_num=5, name="Patch, add, delete", purpose="The remaining CRUD tools keep identical behavior")
     out = axiom_graph_patch_section(str(tmp_path), f"{doc_id}::overview", new_string="appended line", anchor="$")
     assert "Error" not in out
     rendered = axiom_graph_read_doc(str(tmp_path), doc_id)
@@ -191,7 +208,7 @@ def test_doc_tool_parity_roundtrip(tmp_path: Path) -> None:
     assert "Error" not in out
 
     口 = Step(
-        step_num=5,
+        step_num=6,
         name="Rendered order round-trips",
         purpose="read_doc order is document order after edits and a rebuild",
     )
@@ -217,7 +234,7 @@ def test_purged_section_stays_purged_across_builds(tmp_path: Path) -> None:
     builder.build(tmp_path)
     (tmp_path / "docs" / "temp.json").unlink()
     builder.build(tmp_path)
-    sec_id = "proj::docs.temp::a"
+    sec_id = "proj::docs/temp::a"
 
     口 = Step(
         step_num=2,
@@ -234,7 +251,7 @@ def test_purged_section_stays_purged_across_builds(tmp_path: Path) -> None:
             is not None
         )
     # Purging an already-removed node is a clean no-op, not an error.
-    results = purge_nodes(db_path, [sec_id], "test cleanup")
+    results = purge_nodes(db_path, tmp_path, [sec_id], "test cleanup", actor="agent")
     assert not results[0].purged
     assert results[0].reason == "not_found_in_index"
 
@@ -267,7 +284,7 @@ def test_vanished_section_pruned_on_build(tmp_path: Path) -> None:
         },
     )
     builder.build(tmp_path)
-    drop_id = "proj::docs.prune::drop"
+    drop_id = "proj::docs/prune::drop"
     with db._connect(db_path) as conn:
         assert conn.execute("SELECT 1 FROM nodes WHERE id = ?", (drop_id,)).fetchone() is not None
 
@@ -281,7 +298,7 @@ def test_vanished_section_pruned_on_build(tmp_path: Path) -> None:
     with db._connect(db_path) as conn:
         assert conn.execute("SELECT 1 FROM nodes WHERE id = ?", (drop_id,)).fetchone() is None
         dangling = conn.execute("SELECT 1 FROM edges WHERE from_id = ? OR to_id = ?", (drop_id, drop_id)).fetchone()
-        keep = conn.execute("SELECT 1 FROM nodes WHERE id = 'proj::docs.prune::keep'").fetchone()
+        keep = conn.execute("SELECT 1 FROM nodes WHERE id = 'proj::docs/prune::keep'").fetchone()
     assert dangling is None, "pruned section must take its edges with it"
     assert keep is not None
 
@@ -307,7 +324,7 @@ def test_graph_citizenship_composes_and_subtree_aggregation(tmp_path: Path) -> N
         },
     )
     builder.build(tmp_path)
-    doc_id = "proj::docs.nest"
+    doc_id = "proj::docs/nest"
     parent_id = f"{doc_id}::parent"
     child_id = f"{doc_id}::parent.child"
 

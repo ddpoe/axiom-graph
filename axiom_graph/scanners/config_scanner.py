@@ -19,10 +19,17 @@ logger = logging.getLogger(__name__)
 from axiom_annotations import task
 
 from axiom_graph.index.file_state import file_unchanged_since
+from axiom_graph.index.walk import TreeListing
 from axiom_graph.models import AxiomEdge, AxiomNode, hash16
 
 
 _SUPPORTED_EXTENSIONS = {".md", ".json", ".yaml", ".yml", ".toml"}
+
+
+def _suffix(name: str) -> str:
+    """Return ``Path(name).suffix`` lower-cased: the last dot part, ``""`` for a dotfile or no dot."""
+    i = name.rfind(".")
+    return name[i:].lower() if 0 < i < len(name) - 1 else ""
 
 
 def _first_line(text: str) -> str:
@@ -74,6 +81,8 @@ def scan_config_dir(
     prefix: str = "config",
     stored_mtimes: dict[str, float] | None = None,
     skip_dirs: frozenset[str] | None = None,
+    parse_filter=None,
+    listing: TreeListing | None = None,
 ) -> tuple[list[AxiomNode], list[AxiomEdge], int]:
     """Walk config_dir for config files and return (nodes, edges, files_skipped).
 
@@ -88,7 +97,13 @@ def scan_config_dir(
             when any component of its project-root-relative path is in this
             set. Mirrors the whole-tree (.py/.js) scanners so a config dir
             that nests an excluded tree (e.g. ``.claude/worktrees/<name>/``)
-            does not leak its files into the parent index.
+            does not leak its files into the parent index.  A skipped
+            directory below ``config_dir`` is never listed.
+        parse_filter: Optional callable taking each walked file's absolute
+            path and deciding whether it is parsed (``build``'s discovery
+            walk); it replaces the ``stored_mtimes`` fast-pass.
+        listing: The operation's shared directory listing; a fresh one
+            when omitted.
 
     Returns:
         Tuple of (nodes, edges, files_skipped_by_mtime).
@@ -100,9 +115,11 @@ def scan_config_dir(
     if not config_dir.exists():
         return nodes, edges, 0
 
-    for path in sorted(config_dir.rglob("*")):
-        if not path.is_file():
-            continue
+    listing = listing if listing is not None else TreeListing()
+    candidates = listing.matches(
+        config_dir, lambda name: _suffix(name) in _SUPPORTED_EXTENSIONS, skip_names=skip_dirs or (), files_only=True
+    )
+    for path in sorted(candidates):
         if path.suffix.lower() not in _SUPPORTED_EXTENSIONS:
             continue
 
@@ -118,7 +135,11 @@ def scan_config_dir(
         # never be newer than the bytes we indexed.
         rel_path = rel.as_posix()
         file_mtime = path.stat().st_mtime
-        if stored_mtimes:
+        if parse_filter is not None:
+            if not parse_filter(path):
+                files_skipped += 1
+                continue
+        elif stored_mtimes:
             stored = stored_mtimes.get(rel_path)
             if file_unchanged_since(stored, file_mtime):
                 files_skipped += 1

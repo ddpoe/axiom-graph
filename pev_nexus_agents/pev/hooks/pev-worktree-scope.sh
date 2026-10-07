@@ -1,6 +1,8 @@
 #!/bin/bash
 # pev-worktree-scope.sh — PreToolUse(Write|Edit) hook for PEV subagents.
-# Enforces that Write/Edit calls target only files inside the worktree.
+# Enforces that Write/Edit calls target only files inside the worktree, or
+# inside this session's Claude Code scratchpad directory (and nowhere else
+# in the temp root).
 #
 # Active ONLY when agent_type starts with "pev:" (i.e., a PEV subagent is
 # executing the tool call — not the orchestrator or other plugins' agents).
@@ -8,8 +10,12 @@
 
 INPUT=$(cat)
 
+# Fail closed for PEV agents when jq is missing (see lib/pev-hook-common.sh).
+. "$(dirname "${BASH_SOURCE[0]}")/lib/pev-hook-common.sh"
+pev_require_jq pretool
+
 # Gate: PEV subagents only
-AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // empty' 2>/dev/null)
+AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // empty')
 case "$AGENT_TYPE" in
   pev:*) ;;
   *) exit 0 ;;
@@ -88,12 +94,33 @@ else
   fi
 fi
 
+# The session scratchpad is the one place outside the worktree a PEV agent
+# may write: Claude Code tells agents to keep temporary files there. Its
+# shape is <temp root>/claude[-<uid>]/<project slug>/<session_id>/scratchpad,
+# so only this session's scratchpad matches, never the temp root or another
+# session's directory.
+in_session_scratchpad() {
+  local sid root rest
+  sid=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null | tr -d '\r')
+  [[ "$sid" =~ ^[A-Za-z0-9_-]+$ ]] || return 1
+  for root in "${TMPDIR:-}" "${TEMP:-}" "${TMP:-}" /tmp; do
+    [ -n "$root" ] || continue
+    root=$(normalize "$root")
+    root=$(cd "$root" 2>/dev/null && pwd -P) || continue
+    [ -n "$root" ] || continue
+    rest="${FILE_PATH#"$root"/}"
+    [ "$rest" = "$FILE_PATH" ] && continue
+    case "/$rest/" in */../*|*/./*) return 1 ;; esac
+    [[ "$rest" =~ ^claude(-[0-9]+)?/[^/]+/${sid}/scratchpad/[^/] ]] && return 0
+  done
+  return 1
+}
+
 # Check: file_path must start with worktree_path
 case "$FILE_PATH" in
   "$WORKTREE_PATH"/*) exit 0 ;;
   "$WORKTREE_PATH")   exit 0 ;;
-  *)
-    echo "BLOCKED: Write/Edit target '$FILE_PATH' is outside the worktree '$WORKTREE_PATH'" >&2
-    exit 2
-    ;;
 esac
+in_session_scratchpad && exit 0
+echo "BLOCKED: Write/Edit target '$FILE_PATH' is outside the worktree '$WORKTREE_PATH'" >&2
+exit 2

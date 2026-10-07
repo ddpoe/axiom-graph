@@ -35,7 +35,8 @@ Produce output.
 | --- | --- |
 | <a href="rendering.html#axiom-graph-render"><code>render</code></a> | Render nodes at a given detail level. |
 | <a href="rendering.html#axiom-graph-render-site"><code>render-site</code></a> | Render the consumer documentation site from DocJSON. |
-| <a href="rendering.html#axiom-graph-export"><code>export</code></a> | Export the full index to `index.json`. |
+| <a href="rendering.html#axiom-graph-export"><code>export</code></a> | Export the whole index (every node and edge) as JSON. |
+| <a href="rendering.html#axiom-graph-workflows"><code>workflows export</code></a> | Export workflows and every source file they reach to one shareable file. |
 | <a href="rendering.html#axiom-graph-viz"><code>viz</code></a> | Launch the visualization dashboard. |
 
 ```{toctree}

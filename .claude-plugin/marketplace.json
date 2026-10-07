@@ -4,7 +4,7 @@
     "name": "ddpoe"
   },
   "metadata": {
-    "description": "Claude Code plugin marketplace bundled with the axiom-graph repo. Ships PEV (Plan-Execute-Validate agent workflow) and hook-spike (plugin-hook test harness). Absorbed from ddpoe/pev-agent-nexus per ADR-005 Phase 5.",
+    "description": "Claude Code plugin marketplace bundled with the axiom-graph repo. Ships PEV (Plan-Execute-Validate agent workflow) and hook-spike (plugin-hook test harness).",
     "version": "1.0.0"
   },
   "plugins": [
@@ -12,7 +12,7 @@
       "name": "pev",
       "source": "./pev_nexus_agents/pev",
       "description": "PEV (Plan-Execute-Validate) agent workflow with axiom-graph integration — /pev-cycle (full) and /pev-instance (slim)",
-      "version": "1.4.1",
+      "version": "2.0.0",
       "author": {
         "name": "ddpoe"
       },

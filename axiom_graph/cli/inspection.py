@@ -10,7 +10,7 @@ from pathlib import Path
 
 import click
 
-from axiom_graph.cli._core import _require_db, _row_for_json
+from axiom_graph.cli._core import _require_db
 from axiom_graph.index import db
 from axiom_graph.lifecycle import api as lifecycle_api
 from axiom_graph.query import api as query_api
@@ -119,13 +119,13 @@ def cmd_history_checkpoint(
             stdin=subprocess.DEVNULL,
             timeout=5,
         )
-        git_sha = result.stdout.strip()[:12]
+        git_sha = result.stdout.strip() or None
     except subprocess.TimeoutExpired:
         logger.warning("git rev-parse HEAD timed out")
     except Exception as exc:
         logger.debug("git rev-parse HEAD failed (expected if not a git repo): %s", exc)
 
-    sha_label = f"git:{git_sha}" if git_sha else "no git sha"
+    sha_label = f"git:{git_sha[:12]}" if git_sha else "no git sha"
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     click.echo(f"Checkpoint set: {sha_label} ({today})")
 
@@ -185,15 +185,19 @@ def cmd_history_agent_verified(project_root: str) -> None:
 
 @main.command("report")
 @click.argument("project_root", type=click.Path(exists=True, file_okay=False))
-@click.option("--since-sha", default=None, help="Git SHA (prefix) of a checkpoint to start from.")
+@click.option(
+    "--since-sha",
+    default=None,
+    help="Git SHA (prefix, 4+ chars) to start from: a checkpoint, a build row, or any commit git knows.",
+)
 @click.option("--since", "since_timestamp", default=None, help="ISO-8601 datetime cutoff.")
 @click.option(
     "--format",
     "output_format",
-    type=click.Choice(["text", "json"], case_sensitive=False),
+    type=click.Choice(["text", "json", "condensed"], case_sensitive=False),
     default="text",
     show_default=True,
-    help="Output format.",
+    help="Output format: text (one line per event), condensed (aggregated by container), or json.",
 )
 @click.option(
     "--change-type",
@@ -203,6 +207,12 @@ def cmd_history_agent_verified(project_root: str) -> None:
 )
 @click.option(
     "--node", "node_pattern", default=None, help="Glob pattern for node IDs (e.g. axiom_graph::axiom_graph.viz.*)."
+)
+@click.option(
+    "--exclude-node",
+    "exclude_node_patterns",
+    multiple=True,
+    help="Glob pattern for node IDs to leave out (repeatable), e.g. a cycle manifest: '{doc_id}*'.",
 )
 @click.option(
     "--node-type",
@@ -216,8 +226,8 @@ def cmd_history_agent_verified(project_root: str) -> None:
 )
 @workflow(
     purpose="Generate an impact report from node history since a reference point",
-    inputs="project_root path, since_sha/since_timestamp/output_format options",
-    outputs="Grouped history report printed to stdout",
+    inputs="project_root path, since_sha/since_timestamp, filters (incl. repeatable --exclude-node), output_format",
+    outputs="Report printed to stdout, headed by the resolved reference; non-zero exit on an unresolvable --since-sha",
 )
 def cmd_report(
     project_root: str,
@@ -226,14 +236,20 @@ def cmd_report(
     output_format: str,
     change_type_pattern: str | None,
     node_pattern: str | None,
+    exclude_node_patterns: tuple[str, ...],
     node_type_filter: str | None,
     list_refs: bool,
 ) -> None:
     """Impact report: what changed since a checkpoint, SHA, or datetime.
 
-    Resolution order: --since-sha (checkpoint with matching SHA), then
-    --since (datetime), then the most recent checkpoint.  If no reference
-    point exists, all history is included.
+    Resolution order: --since-sha (a checkpoint, then a build row with a
+    matching SHA, then the commit's git commit time), then --since
+    (datetime), then the most recent checkpoint, then the most recent
+    SHA-bearing history row.  Only when none of those exist — and no
+    reference was given — is the whole history reported.  A --since-sha
+    that neither the index nor git can resolve (unknown, ambiguous, or
+    shorter than 4 characters) is an error.  Every format starts with
+    the reference it was measured against.
     """
     root = Path(project_root).resolve()
     path = _require_db(root)
@@ -252,128 +268,94 @@ def cmd_report(
         return
 
     口 = Step(
-        step_num=1, name="Load history rows", purpose="Resolve reference point and query all history rows after it"
+        step_num=1,
+        name="Resolve reference and load classified history",
+        purpose="Resolve the reference point (index, then git commit time) and classify the rows after it",
+        critical="An unresolvable explicit --since-sha must exit non-zero, never report over all history",
     )
-    data = lifecycle_api.compute_report(
-        path,
-        since_sha=since_sha,
-        since_timestamp=since_timestamp,
-        change_type_pattern=change_type_pattern,
-        node_pattern=node_pattern,
-        node_type=node_type_filter,
-    )
+    try:
+        data = lifecycle_api.compute_report(
+            path,
+            since_sha=since_sha,
+            since_timestamp=since_timestamp,
+            change_type_pattern=change_type_pattern,
+            node_pattern=node_pattern,
+            node_type=node_type_filter,
+            exclude_node_pattern=list(exclude_node_patterns),
+            project_root=root,
+        )
+    except lifecycle_api.UnresolvedReferenceError as exc:
+        raise click.ClickException(str(exc)) from exc
 
-    if data.no_rows:
-        click.echo("No history events found after the reference point.")
+    口 = Step(step_num=2, name="Format and output", purpose="Render the report as text, condensed text, or JSON")
+    if output_format == "json":
+        click.echo(json.dumps(lifecycle_api.report_to_dict(data), indent=2))
         return
+    detail = "condensed" if output_format == "condensed" else "full"
+    click.echo(lifecycle_api.render_report_text(data, detail))
+
+
+@main.command("diff")
+@click.argument("node_ids", nargs=-1, required=True)
+@click.argument("project_root", type=click.Path(exists=True, file_okay=False))
+@click.option(
+    "--baseline",
+    "baseline_sha",
+    default=None,
+    help="Commit or rev expression to diff against (e.g. abc1234 or HEAD~3). "
+    "Default: for a node gone stale, the last recorded commit before it went stale; "
+    "otherwise its last verified/checkpoint commit, else its oldest indexed commit.",
+)
+@click.option(
+    "--summary",
+    "summary_only",
+    is_flag=True,
+    default=False,
+    help="Print only metadata and the +N / -M line counts, not the old and new source.",
+)
+@workflow(
+    purpose="Print what changed in one or more nodes since a baseline commit, as the axiom_graph_diff MCP tool does",
+    inputs="node ids, project_root, optional --baseline, --summary flag",
+    outputs="One JSON report per node separated by '---'; exit 1 if any node returned an error",
+)
+def cmd_diff(node_ids: tuple[str, ...], project_root: str, baseline_sha: str | None, summary_only: bool) -> None:
+    """Show what changed in nodes since a baseline commit.
+
+    Prints, for each of NODE_IDS, the same JSON the ``axiom_graph_diff``
+    MCP tool returns; several nodes are separated by a ``---`` line.  The
+    node is found by identity in the baseline and current file, not at its
+    indexed line range.  A node that cannot be diffed prints its
+    ``{"error", "reason"}`` JSON in its place and the rest still run; the
+    command then exits 1.
+
+    \b
+    Example:
+        axiom-graph diff proj::pkg.mod::func . --baseline HEAD~3 --summary
+    """
+    root = Path(project_root).resolve()
+    path = _require_db(root)
+
+    口 = Step(step_num=1, name="Diff each node", purpose="Build each node's diff report through the lifecycle API")
+    reports = [
+        lifecycle_api.node_diff_report(path, root, nid, baseline_sha=baseline_sha, summary_only=summary_only)
+        for nid in node_ids
+    ]
 
     口 = Step(
         step_num=2,
-        name="Classify events",
-        purpose="Bucket history rows into content changes, staleness transitions, link changes, and verifications",
+        name="Print and set the exit code",
+        purpose="Print each report as the MCP tool formats it, joined by its batch delimiter; exit 1 if any errored",
     )
-    if data.no_matches:
-        click.echo("No history events match the given filters.")
-        return
-
-    content_changes = data.content_changes
-    staleness_transitions = data.staleness_transitions
-    link_changes = data.link_changes
-    verifications = data.verifications
-    human_verified_ids = data.human_verified_ids
-
-    口 = Step(
-        step_num=3,
-        name="Compute summary counters",
-        purpose="Count nodes changed, became stale, verified, links modified",
-    )
-    summary = data.summary
-
-    口 = Step(step_num=4, name="Format and output", purpose="Render report in requested format (text or JSON)")
-
-    if output_format == "json":
-        click.echo(
-            json.dumps(
-                {
-                    "summary": summary,
-                    "content_changes": {nid: [_row_for_json(r) for r in evts] for nid, evts in content_changes.items()},
-                    "staleness_transitions": [_row_for_json(r) for r in staleness_transitions],
-                    "link_changes": [_row_for_json(r) for r in link_changes],
-                    "verifications": [_row_for_json(r) for r in verifications],
-                },
-                indent=2,
-            )
-        )
-        return
-
-    # --- Text output ---
-    summary_line = (
-        f"{summary['nodes_changed']} nodes changed, "
-        f"{summary['became_stale']} became stale, "
-        f"{summary['verified']} verified ({summary['agent_only']} agent-only), "
-        f"{summary['links_modified']} links modified"
-    )
-    click.echo(summary_line)
-    click.echo("=" * len(summary_line))
-
-    if content_changes:
-        click.echo("\nCONTENT CHANGES")
-        click.echo("-" * 40)
-        for node_id, evts in sorted(content_changes.items()):
-            types = ", ".join(sorted({e["change_type"] for e in evts}))
-            click.echo(f"  {node_id}  [{types}]")
-
-    if staleness_transitions:
-        click.echo("\nSTALENESS TRANSITIONS")
-        click.echo("-" * 40)
-        for r in staleness_transitions:
-            meta_str = ""
-            if r.get("meta"):
-                try:
-                    m = json.loads(r["meta"])
-                    parts = []
-                    if m.get("from"):
-                        parts.append(f"was {m['from']}")
-                    if m.get("linked_node"):
-                        parts.append(f"via {m['linked_node']}")
-                    meta_str = f"  ({', '.join(parts)})" if parts else ""
-                except Exception:
-                    pass
-            click.echo(f"  {r['node_id']}  {r['change_type']}{meta_str}")
-
-    if link_changes:
-        click.echo("\nLINK CHANGES")
-        click.echo("-" * 40)
-        for r in link_changes:
-            target = ""
-            actor = ""
-            if r.get("meta"):
-                try:
-                    m = json.loads(r["meta"])
-                    target = m.get("target", "")
-                    actor = m.get("actor", "")
-                except Exception:
-                    pass
-            arrow = "→" if r["change_type"] == "LINK_ADDED" else "✕"
-            actor_tag = f"  [{actor}]" if actor else ""
-            click.echo(f"  {r['node_id']}  {arrow} {target}{actor_tag}")
-
-    if verifications:
-        click.echo("\nVERIFICATION ACTIVITY")
-        click.echo("-" * 40)
-        for r in verifications:
-            flag = (
-                " ⚠ agent-only"
-                if (r["change_type"] == "AGENT_VERIFIED" and r["node_id"] not in human_verified_ids)
-                else ""
-            )
-            click.echo(f"  {r['node_id']}  {r['change_type']}{flag}")
+    click.echo(lifecycle_api.NODE_DIFF_BATCH_DELIMITER.join(lifecycle_api.format_node_diff_report(r) for r in reports))
+    if any("error" in r for r in reports):
+        raise SystemExit(1)
 
 
 __all__ = [
     "cmd_list",
     "cmd_graph",
     "cmd_report",
+    "cmd_diff",
     "history_group",
     "cmd_history_checkpoint",
     "cmd_history_agent_verified",

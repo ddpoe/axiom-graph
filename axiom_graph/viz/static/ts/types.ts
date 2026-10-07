@@ -35,14 +35,6 @@ export interface AxiomEdge {
   weight?: number;
 }
 
-/** Embeddings availability info from /api/meta. */
-export interface EmbeddingsInfo {
-  available: boolean;
-  count: number;
-  node_count: number;
-  coverage: number;
-}
-
 /** Project metadata from /api/meta. */
 export interface ProjectMeta {
   project_id: string;
@@ -52,7 +44,6 @@ export interface ProjectMeta {
   tags: string[];
   type_counts: Record<string, number>;
   test_paths?: string[];
-  embeddings?: EmbeddingsInfo;
 }
 
 /** Staleness status string (own dimension). */
@@ -170,9 +161,10 @@ export interface DocListEntry {
   source?: string;
   tags?: string[];
   section_count?: number;
-  /** POSIX path relative to the project root, e.g. "docs/adrs/015.json".
-   *  The only field that records which configured docs root a doc came
-   *  from — ids flatten every root into the same "docs." namespace. */
+  /** POSIX path relative to the project root, e.g. "docs/adrs/015.docjson".
+   *  The authoritative record of where a doc lives; the id body carries the
+   *  same path, but this field is present even for entries whose id the
+   *  caller has not resolved. */
   file_path?: string;
 }
 
@@ -289,7 +281,6 @@ export interface AppState {
   _sinceChangeKinds: Record<string, string[]>;
   /** Net change-kinds currently enabled in the kind filter (all on by default). */
   _sinceEnabledKinds: Set<string>;
-  searchMode: 'keyword' | 'semantic';
   searchQuery: string;
   searchResultNodes: AxiomNode[] | null;
 }

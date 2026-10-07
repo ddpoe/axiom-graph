@@ -21,13 +21,33 @@ from __future__ import annotations
 from tests.conftest import seed_section_node
 
 import hashlib
+import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from axiom_annotations import workflow
 
 from axiom_graph.index import db
+from axiom_graph.lifecycle import api as lifecycle_api
 from axiom_graph.models import AxiomEdge, AxiomNode
+
+
+@pytest.fixture(autouse=True)
+def _list_the_stored_statuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests pin the projection over statuses they store, so the listing reads them as stored.
+
+    The default read refresh (``"changed-files"``) would recompute the stored
+    rows from the files and the history first; ``tests/test_read_tool_refresh.py``
+    covers that.
+    """
+    real = lifecycle_api.refresh_before_read
+
+    def _off(db_path, root, node_ids=None, *, mode=None):
+        return real(db_path, root, node_ids, mode="off")
+
+    monkeypatch.setattr(lifecycle_api, "refresh_before_read", _off)
 
 
 # ---------------------------------------------------------------------------
@@ -269,22 +289,22 @@ class TestGroupBy:
         # Two feature docs with sections that document the first two nodes.
         _write_doc_with_section(
             db_path,
-            "p::docs.features.indexer.design",
-            "p::docs.features.indexer.design::overview",
+            "p::docs/features/indexer/design",
+            "p::docs/features/indexer/design::overview",
         )
         _write_doc_with_section(
             db_path,
-            "p::docs.features.viz.design",
-            "p::docs.features.viz.design::overview",
+            "p::docs/features/viz/design",
+            "p::docs/features/viz/design::overview",
         )
         _add_documents_edge(
             db_path,
-            "p::docs.features.indexer.design::overview",
+            "p::docs/features/indexer/design::overview",
             "p::axiom_graph.indexer::f_idx",
         )
         _add_documents_edge(
             db_path,
-            "p::docs.features.viz.design::overview",
+            "p::docs/features/viz/design::overview",
             "p::axiom_graph.viz::f_viz",
         )
         # f_undoc has no inbound documents edge.
@@ -373,8 +393,8 @@ class TestGroupBy:
             _upsert_node(db_path, node_id, own_status=own, link_status=link)
 
         # Seed one long docjson shadow row (DOC_SECTION_LONG candidate).
-        long_id = "p::docs.spec::long_sec"
-        long_doc_id = "p::docs.spec"
+        long_id = "p::docs/spec::long_sec"
+        long_doc_id = "p::docs/spec"
         long_content = "x" * (DOC_SECTION_LONG_THRESHOLD + 50)
         _write_doc_with_section(db_path, long_doc_id, long_id, content=long_content)
 
@@ -441,14 +461,14 @@ class TestGroupBy:
         # Doc section that documents the offender (so via lookup finds it).
         _write_doc_with_section(
             db_path,
-            "p::docs.x",
-            "p::docs.x::sec",
+            "p::docs/x",
+            "p::docs/x::sec",
         )
-        _upsert_node(db_path, "p::docs.x::sec", link_status="LINKED_STALE")
-        _add_documents_edge(db_path, "p::docs.x::sec", "p::up::offender")
+        _upsert_node(db_path, "p::docs/x::sec", link_status="LINKED_STALE")
+        _add_documents_edge(db_path, "p::docs/x::sec", "p::up::offender")
 
         result = axiom_graph_drift_query(str(git_project), filter="LINKED_STALE", format="full")
-        assert "p::docs.x::sec" in result
+        assert "p::docs/x::sec" in result
         assert "via=p::up::offender" in result
 
 
@@ -504,15 +524,15 @@ class TestFrozenTagsFiltering:
         db_path = git_project / ".axiom_graph" / "graph.db"
         _write_frozen_tags_toml(git_project, ["adr"])
         # Frozen ADR section with LINKED_STALE.
-        _seed_frozen_doc_section(db_path, "p::docs.adr-1", "p::docs.adr-1::ctx", tags_json='["adr"]')
+        _seed_frozen_doc_section(db_path, "p::docs/adr-1", "p::docs/adr-1::ctx", tags_json='["adr"]')
         # Non-frozen section with LINKED_STALE.
-        _write_doc_with_section(db_path, "p::docs.spec", "p::docs.spec::sec")
-        _upsert_node(db_path, "p::docs.spec::sec", link_status="LINKED_STALE")
+        _write_doc_with_section(db_path, "p::docs/spec", "p::docs/spec::sec")
+        _upsert_node(db_path, "p::docs/spec::sec", link_status="LINKED_STALE")
 
         result = axiom_graph_drift_query(str(git_project), filter="LINKED_STALE", format="ids")
         ids = set(result.splitlines())
-        assert "p::docs.spec::sec" in ids
-        assert "p::docs.adr-1::ctx" not in ids
+        assert "p::docs/spec::sec" in ids
+        assert "p::docs/adr-1::ctx" not in ids
 
     def test_include_frozen_true_includes_with_marker(self, git_project: Path) -> None:
         """include_frozen=True surfaces frozen rows with [frozen] marker on format=full."""
@@ -520,7 +540,7 @@ class TestFrozenTagsFiltering:
 
         db_path = git_project / ".axiom_graph" / "graph.db"
         _write_frozen_tags_toml(git_project, ["adr"])
-        _seed_frozen_doc_section(db_path, "p::docs.adr-2", "p::docs.adr-2::ctx", tags_json='["adr"]')
+        _seed_frozen_doc_section(db_path, "p::docs/adr-2", "p::docs/adr-2::ctx", tags_json='["adr"]')
 
         result = axiom_graph_drift_query(
             str(git_project),
@@ -528,7 +548,7 @@ class TestFrozenTagsFiltering:
             format="full",
             include_frozen=True,
         )
-        assert "p::docs.adr-2::ctx" in result
+        assert "p::docs/adr-2::ctx" in result
         assert "[frozen]" in result
 
     def test_broken_link_on_frozen_keeps_marker(self, git_project: Path) -> None:
@@ -539,8 +559,8 @@ class TestFrozenTagsFiltering:
         _write_frozen_tags_toml(git_project, ["adr"])
         _seed_frozen_doc_section(
             db_path,
-            "p::docs.adr-3",
-            "p::docs.adr-3::ctx",
+            "p::docs/adr-3",
+            "p::docs/adr-3::ctx",
             tags_json='["adr"]',
             link_status="BROKEN_LINK",
         )
@@ -551,7 +571,7 @@ class TestFrozenTagsFiltering:
             format="full",
         )
         # Even though include_frozen=False, BROKEN_LINK on frozen is retained.
-        assert "p::docs.adr-3::ctx" in result
+        assert "p::docs/adr-3::ctx" in result
         assert "[frozen-source]" in result
 
     def test_non_frozen_broken_link_has_no_marker(self, git_project: Path) -> None:
@@ -563,8 +583,8 @@ class TestFrozenTagsFiltering:
         # Non-frozen doc with BROKEN_LINK.
         _seed_frozen_doc_section(
             db_path,
-            "p::docs.guide",
-            "p::docs.guide::sec",
+            "p::docs/guide",
+            "p::docs/guide::sec",
             tags_json='["consumer"]',
             link_status="BROKEN_LINK",
         )
@@ -574,7 +594,7 @@ class TestFrozenTagsFiltering:
             filter="links",
             format="full",
         )
-        assert "p::docs.guide::sec" in result
+        assert "p::docs/guide::sec" in result
         assert "[frozen-source]" not in result
         assert "[frozen]" not in result
 
@@ -586,8 +606,8 @@ class TestFrozenTagsFiltering:
         _write_frozen_tags_toml(git_project, ["adr"])
         _seed_frozen_doc_section(
             db_path,
-            "p::docs.adr-4",
-            "p::docs.adr-4::ctx",
+            "p::docs/adr-4",
+            "p::docs/adr-4::ctx",
             tags_json='["adr"]',
             link_status="BROKEN_LINK",
         )
@@ -599,7 +619,7 @@ class TestFrozenTagsFiltering:
             include_frozen=True,
         )
         # Just the bare ID — no markers in ids format.
-        assert "p::docs.adr-4::ctx" in result
+        assert "p::docs/adr-4::ctx" in result
         assert "[frozen]" not in result
         assert "[frozen-source]" not in result
 
@@ -631,9 +651,9 @@ class TestViaBatching:
         # _connect.  After the fix, the page resolves vias in one SELECT.
         N = 25
         _upsert_node(db_path, "p::up::offender", own_status="CONTENT_UPDATED")
-        _write_doc_with_section(db_path, "p::docs.x", "p::docs.x::ignored")
+        _write_doc_with_section(db_path, "p::docs/x", "p::docs/x::ignored")
         for i in range(N):
-            sec_id = f"p::docs.x::sec_{i:02d}"
+            sec_id = f"p::docs/x::sec_{i:02d}"
             _upsert_node(db_path, sec_id, link_status="LINKED_STALE")
             _add_documents_edge(db_path, sec_id, "p::up::offender")
 
@@ -680,9 +700,9 @@ class TestViaBatching:
         db_path = git_project / ".axiom_graph" / "graph.db"
         N = 15
         _upsert_node(db_path, "p::up::offender", own_status="CONTENT_UPDATED")
-        _write_doc_with_section(db_path, "p::docs.x", "p::docs.x::ignored")
+        _write_doc_with_section(db_path, "p::docs/x", "p::docs/x::ignored")
         for i in range(N):
-            sec_id = f"p::docs.x::sec_{i:02d}"
+            sec_id = f"p::docs/x::sec_{i:02d}"
             _upsert_node(db_path, sec_id, link_status="LINKED_STALE")
             _add_documents_edge(db_path, sec_id, "p::up::offender")
 
@@ -714,7 +734,9 @@ class TestViaBatching:
 # ===========================================================================
 
 
-HEADER_LINE = "# node_id  status_pair (own/link)  location  via"
+HEADER_LINE = (
+    "# id=<node_id>  <own>/<link>  loc=<location>  via=<direct offenders>  root=<root offenders, when different>"
+)
 
 
 class TestFullFormatHeader:
@@ -738,7 +760,7 @@ class TestFullFormatHeader:
         assert lines[0] == "[1 of 1 drifted nodes]"
         assert lines[1] == HEADER_LINE
         # Data row still present and unchanged in shape.
-        assert any("p::a::cu  CONTENT_UPDATED/VERIFIED" in ln for ln in lines[2:])
+        assert any("id=p::a::cu  CONTENT_UPDATED/VERIFIED" in ln for ln in lines[2:])
 
     def test_grouped_full_first_line_is_header(self, git_project: Path) -> None:
         """Grouped ``format='full'``: count header, then the column header once."""
@@ -808,7 +830,7 @@ def _grouped_member_ids(result: str) -> list[str]:
 class TestGroupedDefaultIsCounts:
     """A grouped call with no explicit format returns the counts distribution."""
 
-    @pytest.mark.parametrize("axis", ["status", "location_prefix", "feature"])
+    @pytest.mark.parametrize("axis", ["status", "location_prefix", "feature", "node_kind"])
     def test_grouped_default_returns_counts_not_full(self, git_project: Path, axis: str) -> None:
         """``group_by=<axis>`` with no ``format`` yields ``group  count`` lines."""
         from axiom_graph.mcp_server import axiom_graph_drift_query
@@ -842,7 +864,7 @@ class TestGroupedDefaultIsCounts:
 
         result = axiom_graph_drift_query(str(git_project), filter="all")
         assert HEADER_LINE in result.splitlines()
-        assert "p::a::cu  CONTENT_UPDATED/VERIFIED" in result
+        assert "id=p::a::cu  CONTENT_UPDATED/VERIFIED" in result
 
 
 class TestGroupedPagination:
@@ -996,3 +1018,333 @@ class TestGroupedPageOutOfRange:
             format="ids",
         )
         assert result == "(no matches)"
+
+
+# ===========================================================================
+# Offender attribution: via= from computed staleness, root= for chains
+# ===========================================================================
+
+
+def _write_json_doc(project: Path, filename: str, payload: dict) -> None:
+    docs_dir = project / "docs"
+    docs_dir.mkdir(exist_ok=True)
+    (docs_dir / filename).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _linking_doc(section_id: str, link_node_id: str, *, tags: list[str] | None = None) -> dict:
+    return {
+        "title": section_id.title(),
+        "tags": tags or [],
+        "sections": [
+            {
+                "id": section_id,
+                "heading": section_id.title(),
+                "content": f"Documents {link_node_id}.",
+                "links": [{"node_id": link_node_id}],
+            },
+        ],
+    }
+
+
+def _row_for(result: str, node_id: str) -> str:
+    rows = [ln for ln in result.splitlines() if ln.strip().startswith(f"id={node_id}  ")]
+    assert len(rows) == 1, f"expected one row for {node_id}, got {rows!r} in:\n{result}"
+    return rows[0]
+
+
+@workflow(
+    purpose=(
+        "A doc section stays LINKED_STALE after the function it documents is "
+        "re-verified; drift_query still names that function as the offender, "
+        "taken from the computed staleness attribution rather than the "
+        "function's current own_status"
+    ),
+)
+def test_via_names_offender_whose_own_status_is_verified_again(mini_project: Path) -> None:
+    from axiom_graph.lifecycle.api import build_index, compute_check_summary, mark_clean_nodes
+    from axiom_graph.mcp_server import axiom_graph_drift_query
+
+    db_path = mini_project / ".axiom_graph" / "graph.db"
+    src = mini_project / "src"
+    src.mkdir()
+    code = src / "core.py"
+    code.write_text("def foo():\n    return 0\n", encoding="utf-8")
+    _write_json_doc(mini_project, "guide.json", _linking_doc("impl", "proj::src.core::foo"))
+    build_index(db_path, mini_project, project_id="proj", discovery_only=False)
+    time.sleep(0.05)
+    code.write_text("def foo():\n    return 1\n", encoding="utf-8")
+    build_index(db_path, mini_project, project_id="proj", discovery_only=False)
+
+    time.sleep(0.05)
+    mark_clean_nodes(db_path, mini_project, ["proj::src.core::foo"], "code reviewed", verified_by="agent")
+    statuses = compute_check_summary(db_path, mini_project).statuses
+    assert statuses["proj::src.core::foo"][0] == "VERIFIED"
+    assert statuses["proj::docs/guide::impl"][1] == "LINKED_STALE"
+
+    result = axiom_graph_drift_query(str(mini_project), filter="LINKED_STALE", format="full")
+    row = _row_for(result, "proj::docs/guide::impl")
+    assert "via=proj::src.core::foo" in row
+    # Direct and root offenders coincide, so no separate root= is printed.
+    assert "root=" not in row
+
+
+@workflow(
+    purpose=(
+        "In a transitive doc-to-doc chain, drift_query shows each section's "
+        "direct offender as via= and the originating code node as root=, the "
+        "same root offender reverify resolves"
+    ),
+)
+def test_transitive_chain_shows_direct_via_and_root_offender(mini_project: Path) -> None:
+    from axiom_graph.index.staleness import _get_linked_stale_ids, resolve_root_offenders
+    from axiom_graph.lifecycle.api import build_index
+    from axiom_graph.mcp_server import axiom_graph_drift_query
+
+    db_path = mini_project / ".axiom_graph" / "graph.db"
+    (mini_project / "axiom-graph.toml").write_text(
+        '[axiom_graph.staleness]\ntransitive_tags = ["consumer"]\n', encoding="utf-8"
+    )
+    src = mini_project / "src"
+    src.mkdir()
+    code = src / "core.py"
+    code.write_text("def foo():\n    return 0\n", encoding="utf-8")
+    _write_json_doc(mini_project, "base.json", _linking_doc("impl", "proj::src.core::foo"))
+    _write_json_doc(mini_project, "top.json", _linking_doc("sec", "proj::docs/base::impl", tags=["consumer"]))
+    build_index(db_path, mini_project, project_id="proj", discovery_only=False)
+    time.sleep(0.05)
+    code.write_text("def foo():\n    return 1\n", encoding="utf-8")
+    build_index(db_path, mini_project, project_id="proj", discovery_only=False)
+
+    result = axiom_graph_drift_query(str(mini_project), filter="LINKED_STALE", format="full")
+    top_row = _row_for(result, "proj::docs/top::sec")
+    assert "via=proj::docs/base::impl" in top_row
+    assert "root=proj::src.core::foo" in top_row
+
+    roots = resolve_root_offenders(_get_linked_stale_ids(db_path, transitive_tags=["consumer"]))
+    assert roots["proj::docs/top::sec"] == ["proj::src.core::foo"]
+
+
+class TestOffenderListDisplay:
+    """Offender lists are uncapped data, truncated for display at 10."""
+
+    def test_more_than_ten_offenders_show_ten_plus_remainder(self, git_project: Path) -> None:
+        """12 offenders print the first 10, then ``(+2 more)``."""
+        from axiom_graph.mcp_server import axiom_graph_drift_query
+
+        db_path = git_project / ".axiom_graph" / "graph.db"
+        _write_doc_with_section(db_path, "p::docs/x", "p::docs/x::sec")
+        _upsert_node(db_path, "p::docs/x::sec", link_status="LINKED_STALE")
+        offenders = [f"p::up::off{i:02d}" for i in range(12)]
+        for oid in offenders:
+            _upsert_node(db_path, oid, own_status="CONTENT_UPDATED")
+            _add_documents_edge(db_path, "p::docs/x::sec", oid)
+
+        result = axiom_graph_drift_query(str(git_project), filter="LINKED_STALE", format="full")
+        row = _row_for(result, "p::docs/x::sec")
+        via = row.split("via=", 1)[1]
+        assert via.endswith(" (+2 more)")
+        assert len(via.removesuffix(" (+2 more)").split(",")) == 10
+
+
+class TestAdvisoryAndFilterVocab:
+    """filter='all' labels advisory rows; VERIFIED is not a drift filter."""
+
+    def test_filter_all_labels_doc_section_long_rows(self, git_project: Path) -> None:
+        """Advisory rows carry ``[DOC_SECTION_LONG]``; drift rows do not."""
+        from axiom_graph.db.docs import DOC_SECTION_LONG_THRESHOLD
+        from axiom_graph.mcp_server import axiom_graph_drift_query
+
+        db_path = git_project / ".axiom_graph" / "graph.db"
+        _write_doc_with_section(
+            db_path, "p::docs/long", "p::docs/long::sec", content="x" * (DOC_SECTION_LONG_THRESHOLD + 50)
+        )
+        _upsert_node(db_path, "p::a::cu", own_status="CONTENT_UPDATED")
+
+        result = axiom_graph_drift_query(str(git_project), filter="all", format="full")
+        assert _row_for(result, "p::docs/long::sec").endswith("[DOC_SECTION_LONG]")
+        assert "[DOC_SECTION_LONG]" not in _row_for(result, "p::a::cu")
+
+    def test_filter_verified_is_rejected(self, git_project: Path) -> None:
+        """``filter='VERIFIED'`` raises rather than listing healthy nodes as drift."""
+        from axiom_graph.mcp_server import axiom_graph_drift_query
+
+        with pytest.raises(ValueError, match="VERIFIED"):
+            axiom_graph_drift_query(str(git_project), filter="VERIFIED")
+
+
+class TestLocationGlobSemantics:
+    """Globs are path-segment aware and never fail silently."""
+
+    @pytest.fixture
+    def seeded(self, git_project: Path) -> Path:
+        db_path = git_project / ".axiom_graph" / "graph.db"
+        for node_id, loc in {
+            "p::tests.test_a::t1": "tests/test_a.py#L3-L9",
+            "p::tests.test_a": "tests/test_a.py",
+            "p::tests.sub.test_b::t2": "tests/sub/test_b.py#L1-L4",
+            "p::src.mod::f": "src/mod.py#L1-L2",
+            "p::lib.mod::g": "lib/mod.py#L1-L2",
+        }.items():
+            _upsert_node(db_path, node_id, own_status="CONTENT_UPDATED", location=loc, level_3_location=loc)
+        return git_project
+
+    @pytest.mark.parametrize(
+        ("glob", "expected"),
+        [
+            ("tests/*.py", {"p::tests.test_a::t1", "p::tests.test_a"}),
+            ("tests/**", {"p::tests.test_a::t1", "p::tests.test_a", "p::tests.sub.test_b::t2"}),
+            ("tests/**/test_b.py", {"p::tests.sub.test_b::t2"}),
+            ("{src,lib}/*", {"p::src.mod::f", "p::lib.mod::g"}),
+            ("[!t]*/mod.py", {"p::src.mod::f", "p::lib.mod::g"}),
+            ("tests/test_?.py", {"p::tests.test_a::t1", "p::tests.test_a"}),
+        ],
+    )
+    def test_glob_matches_by_path_segment(self, seeded: Path, glob: str, expected: set[str]) -> None:
+        """``*`` stays in one segment, ``**`` recurses, sets and braces work."""
+        from axiom_graph.mcp_server import axiom_graph_drift_query
+
+        result = axiom_graph_drift_query(str(seeded), filter="all", location_glob=glob, format="ids")
+        ids = {ln for ln in result.splitlines() if ln and not ln.startswith("[")}
+        assert ids == expected
+
+    @pytest.mark.parametrize("glob", ["tests/[ab.py", "{src,lib/*", "{a,{b,c}}/*"])
+    def test_malformed_glob_raises(self, seeded: Path, glob: str) -> None:
+        """A malformed glob raises instead of silently matching nothing."""
+        from axiom_graph.mcp_server import axiom_graph_drift_query
+
+        with pytest.raises(ValueError, match="location_glob"):
+            axiom_graph_drift_query(str(seeded), filter="all", location_glob=glob)
+
+
+# ===========================================================================
+# Grouping a mixed code / test / doc drift list
+# ===========================================================================
+
+
+def _seed_mixed_drift(project_root: Path) -> None:
+    """Seed two test functions in one file, a test helper, a code function,
+    a doc-level node, a doc section and a frozen-doc section, all drifted.
+
+    The project config lists ``tests/`` as a test path and freezes docs
+    tagged ``adr``.
+    """
+    (project_root / "axiom-graph.toml").write_text(
+        '[axiom_graph.scan]\ntest_paths = ["tests/"]\n\n[axiom_graph.staleness]\nfrozen_tags = ["adr"]\n'
+    )
+    db_path = project_root / ".axiom_graph" / "graph.db"
+    for node_id, subtype, loc in [
+        ("p::tests.test_x::test_a", "test", "tests/test_x.py#L1-L5"),
+        ("p::tests.test_x::test_b", "test", "tests/test_x.py#L7-L9"),
+        ("p::tests.helpers::make", "function", "tests/helpers.py#L1-L3"),
+        ("p::axiom_graph.mod::f", "function", "axiom_graph/mod/m.py#L1-L4"),
+    ]:
+        _upsert_node(
+            db_path,
+            node_id,
+            own_status="CONTENT_UPDATED",
+            subtype=subtype,
+            location=loc.split("#")[0],
+            level_3_location=loc,
+        )
+    _write_doc_with_section(db_path, "p::docs/spec", "p::docs/spec::sec")
+    with db._connect(db_path) as conn:
+        conn.execute("UPDATE nodes SET link_status = 'LINKED_STALE' WHERE id = 'p::docs/spec::sec'")
+    _upsert_node(
+        db_path,
+        "p::docs/spec",
+        own_status="CONTENT_UPDATED",
+        node_type="composite_process",
+        subtype="docjson_doc",
+        location="docs/docs/spec.json",
+    )
+    _seed_frozen_doc_section(db_path, "p::docs/adr-1", "p::docs/adr-1::ctx", tags_json='["adr"]')
+
+
+def _grouped_ids(result: str) -> dict[str, set[str]]:
+    """Parse a grouped ``ids`` / ``full`` listing into ``{group: {ids}}``."""
+    groups: dict[str, set[str]] = {}
+    current = None
+    for ln in result.split("\n\n")[0].splitlines()[1:]:
+        if ln.startswith("[") and ln.endswith("]"):
+            current = groups.setdefault(ln[1:-1], set())
+        elif ln.startswith("  ") and current is not None:
+            current.add(ln.strip().split()[0].removeprefix("id="))
+    return groups
+
+
+def _grouped_counts(result: str) -> dict[str, int]:
+    """Parse a ``counts`` listing into ``{group: count}``."""
+    out: dict[str, int] = {}
+    for ln in result.split("\n\n")[0].splitlines():
+        group, n = ln.rsplit(maxsplit=1)
+        out[group.strip()] = int(n)
+    return out
+
+
+class TestMixedKindGrouping:
+    """Grouping a drift list that mixes code, tests and docs."""
+
+    @workflow(
+        purpose=(
+            "Grouping drift by location prefix puts every test function of one "
+            "file in that file's group, with no line-range suffix in any key, "
+            "while code and doc rows group as before."
+        )
+    )
+    @pytest.mark.parametrize("format", ["counts", "ids"])
+    def test_location_prefix_groups_test_functions_by_file(self, git_project: Path, format: str) -> None:
+        """Two test functions in one file share one group; code and doc keys are unchanged."""
+        from axiom_graph.query.api import compute_drift_query
+
+        _seed_mixed_drift(git_project)
+        result = compute_drift_query(
+            git_project / ".axiom_graph" / "graph.db",
+            git_project,
+            filter="all",
+            group_by="location_prefix",
+            format=format,
+        )
+
+        expected = {
+            "tests/test_x.py": {"p::tests.test_x::test_a", "p::tests.test_x::test_b"},
+            "tests/helpers.py": {"p::tests.helpers::make"},
+            "axiom_graph/mod": {"p::axiom_graph.mod::f"},
+            "docs/docs": {"p::docs/spec", "p::docs/spec::sec"},  # seeded at docs/docs/spec.json
+        }
+        if format == "counts":
+            assert _grouped_counts(result) == {k: len(v) for k, v in expected.items()}
+        else:
+            assert _grouped_ids(result) == expected
+        assert "#L" not in result
+
+    @workflow(
+        purpose=(
+            "Grouping drift by node kind splits it into code, test and doc in "
+            "every format: a helper under the configured test paths counts as "
+            "test, and frozen doc rows are dropped as on the other axes."
+        )
+    )
+    @pytest.mark.parametrize("format", ["counts", "ids", "full"])
+    def test_node_kind_splits_code_test_and_doc(self, git_project: Path, format: str) -> None:
+        """node_kind buckets match in counts, ids and full; the frozen section is absent."""
+        from axiom_graph.query.api import compute_drift_query
+
+        _seed_mixed_drift(git_project)
+        result = compute_drift_query(
+            git_project / ".axiom_graph" / "graph.db",
+            git_project,
+            filter="all",
+            group_by="node_kind",
+            format=format,
+        )
+
+        expected = {
+            "code": {"p::axiom_graph.mod::f"},
+            "test": {"p::tests.test_x::test_a", "p::tests.test_x::test_b", "p::tests.helpers::make"},
+            "doc": {"p::docs/spec", "p::docs/spec::sec"},
+        }
+        if format == "counts":
+            assert _grouped_counts(result) == {k: len(v) for k, v in expected.items()}
+        else:
+            assert _grouped_ids(result) == expected
+        assert "p::docs/adr-1::ctx" not in result

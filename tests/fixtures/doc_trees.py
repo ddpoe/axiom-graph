@@ -31,15 +31,67 @@ derivation is sensitive to:
     preservation.
 ``many_docs``
     An arbitrary number of flat documents, for cost/scaling assertions.
+``markdown_classes``
+    Markdown files whose stems converge with each other and with a
+    DocJSON file -- the cross-class overlap the extension rule closes.
+``markdown_only``
+    Markdown documents with H2 sections and no convergence at all.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 
+import pytest
+
 
 DEFAULT_PROJECT_ID = "proj"
+
+
+@contextlib.contextmanager
+def retired_derivation():
+    """Make a build inside this block derive the identities the old rule did.
+
+    A migration only has something to move when the index holds retired
+    identities.  Once the live rule *is* the post-migration rule, a project
+    indexed by the running code already sits on its migrated identities and
+    ``doc-ids execute`` correctly reports there is nothing to do -- so any test
+    whose subject is the migration has to seed its index as the previous
+    release would have, and leaving the block is the "upgrade".
+
+    Routed through the frozen ``current_*`` functions rather than restating the
+    retired rule, so the seeded namespace is by construction the one the
+    migration's ``old_id`` half looks for.
+
+    Yields:
+        None.  The substitutions are undone on exit.
+    """
+    from axiom_graph.index import doc_ids
+
+    def _as_doc_file(root_entry: str, rel_to_root: str) -> "doc_ids.DocFile":
+        return doc_ids.DocFile(
+            path=Path(root_entry) / rel_to_root,
+            rel_path=f"{root_entry}/{rel_to_root}",
+            rel_to_root=rel_to_root,
+            root_entry=root_entry,
+        )
+
+    with pytest.MonkeyPatch.context() as previous_release:
+        previous_release.setattr(
+            doc_ids,
+            "derive_doc_id",
+            lambda project_id, root_entry, rel: doc_ids.current_doc_id(project_id, _as_doc_file(root_entry, rel)),
+        )
+        previous_release.setattr(
+            doc_ids,
+            "derive_markdown_doc_id",
+            lambda project_id, root_entry, rel: doc_ids.current_markdown_doc_id(
+                project_id, _as_doc_file(root_entry, rel)
+            ),
+        )
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +368,67 @@ def many_docs(project_root: Path, count: int, *, project_id: str = DEFAULT_PROJE
                 {"id": "two", "heading": "Two", "content": f"Second of {i}."},
             ],
         )
+    return project_root
+
+
+def write_markdown(
+    project_root: Path,
+    rel_path: str,
+    *,
+    title: str | None = None,
+    headings: list[str] | None = None,
+) -> Path:
+    """Write one Markdown document at *rel_path* under *project_root*.
+
+    Args:
+        project_root: Project root the path is relative to.
+        rel_path: POSIX-style relative path ending in ``.md``.
+        title: H1 title.  Defaults to the file stem.
+        headings: H2 headings, each given a short body.  Defaults to a single
+            ``Overview`` heading.
+
+    Returns:
+        Absolute path to the written file.
+    """
+    path = project_root / rel_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    h1 = title if title is not None else path.stem
+    body = [f"# {h1}", "", f"Introductory prose for {rel_path} that is long enough to be a summary.", ""]
+    for heading in headings if headings is not None else ["Overview"]:
+        body.extend([f"## {heading}", "", f"Body of {heading} in {rel_path}.", ""])
+    path.write_text("\n".join(body), encoding="utf-8")
+    return path
+
+
+def markdown_classes(project_root: Path, *, project_id: str = DEFAULT_PROJECT_ID) -> Path:
+    """Markdown files whose stems converge, plus an ``x.md`` beside an ``x.json``.
+
+    Three shapes in one root, all of which the retired stem-only derivation
+    folds together and the path-based one keeps apart:
+
+    - ``docs/guides/notes.md`` and ``docs/reference/notes.md`` -- one stem,
+      two directories,
+    - ``docs/overview.md`` beside ``docs/overview.json`` -- one stem, two
+      document classes.
+    """
+    write_toml(project_root, ["docs"], project_id=project_id)
+    write_markdown(project_root, "docs/guides/notes.md", title="Guide Notes", headings=["Setup", "Usage"])
+    write_markdown(project_root, "docs/reference/notes.md", title="Reference Notes", headings=["Fields"])
+    write_markdown(project_root, "docs/overview.md", title="Overview (markdown)", headings=["Summary"])
+    write_doc(project_root, "docs/overview.json", title="Overview (DocJSON)")
+    return project_root
+
+
+def markdown_only(project_root: Path, *, project_id: str = DEFAULT_PROJECT_ID) -> Path:
+    """Markdown documents with H2 sections and no stem convergence at all."""
+    write_toml(project_root, ["docs"], project_id=project_id)
+    write_markdown(
+        project_root,
+        "docs/handbook/onboarding.md",
+        title="Onboarding",
+        headings=["First Day", "Second Day"],
+    )
+    write_markdown(project_root, "docs/glossary.md", title="Glossary", headings=["Terms"])
     return project_root
 
 

@@ -45,7 +45,7 @@ def _write_doc(project: Path, doc_id: str, sections: list[dict]) -> str:
     doc = {"id": doc_id, "title": doc_id.title(), "sections": sections}
     res = axiom_graph_write_doc(str(project), doc)
     assert "Wrote" in res, res
-    return f"proj::docs.{doc_id}"
+    return f"proj::docs/{doc_id}"
 
 
 def _raw_content(project: Path, doc_node_id: str, short_id: str) -> str:
@@ -194,3 +194,80 @@ def test_patch_section_via_mcp_wrapper(project: Path) -> None:
     assert _raw_content(project, doc_id, "s") == "- a\n- b"
     err = mcp_patch_section(str(project), section_id, "x", old_string="absent")
     assert err.startswith("ERROR"), err
+
+
+# --- Result shows the edited region -------------------------------------------
+
+
+def _region(res: str) -> str:
+    """Return the text inside the result's fenced ``edited region`` block."""
+    head, _, rest = res.partition("edited region")
+    assert rest, res
+    lines = rest.split("\n")[1:]
+    fence = lines[0]
+    assert fence.startswith("```"), res
+    end = lines.index(fence, 1)
+    return "\n".join(lines[1:end])
+
+
+def test_patch_result_replace_shows_line_with_two_lines_context(project: Path) -> None:
+    """Replacing one middle line of a 50-line section shows it plus 2 lines each side, nothing more."""
+    body = "\n".join(f"line {i}" for i in range(1, 51))
+    doc_id = _write_doc(project, "big", [{"id": "s", "heading": "S", "content": body}])
+    res = axiom_graph_patch_section(str(project), f"{doc_id}::s", "line 30 edited\n", old_string="line 30\n")
+
+    assert _region(res) == "line 28\nline 29\nline 30 edited\nline 31\nline 32", res
+    assert "(lines 28-32 of 50)" in res, res
+
+
+def test_patch_result_append_to_table_shows_split(project: Path) -> None:
+    """An appended row shows the table's last rows, so a blank line splitting the table is visible."""
+    table = "Intro.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n"
+    doc_id = _write_doc(project, "tbl", [{"id": "s", "heading": "S", "content": table}])
+    res = axiom_graph_patch_section(str(project), f"{doc_id}::s", "\n| 5 | 6 |", anchor="$")
+
+    assert _region(res) == "| 1 | 2 |\n| 3 | 4 |\n\n| 5 | 6 |", res
+
+
+def test_patch_result_large_insert_is_bounded(project: Path) -> None:
+    """A 100-line insert shows its first 10 lines, an omitted-lines marker, then its last 10."""
+    doc_id = _write_doc(project, "led", [{"id": "s", "heading": "S", "content": ""}])
+    insert = "\n".join(f"row {i}" for i in range(1, 101))
+    res = axiom_graph_patch_section(str(project), f"{doc_id}::s", insert, anchor="$")
+
+    region = _region(res).split("\n")
+    assert region[:10] == [f"row {i}" for i in range(1, 11)], res
+    assert region[10] == "... (80 lines omitted)", res
+    assert region[11:] == [f"row {i}" for i in range(91, 101)], res
+
+
+def test_patch_result_reports_length_and_hash(project: Path) -> None:
+    """The result reports the new character and line count next to the unchanged content_hash line."""
+    doc_id = _write_doc(project, "led", [{"id": "s", "heading": "S", "content": "- a"}])
+    res = axiom_graph_patch_section(str(project), f"{doc_id}::s", "- b", anchor="$")
+
+    assert "\n  length: 7 chars, 2 lines\n" in res, res
+    assert "\n  content_hash: " in res, res
+    hash_line = next(ln for ln in res.splitlines() if ln.startswith("  content_hash: "))
+    assert len(hash_line.split(": ", 1)[1]) == 64, res
+
+
+def test_patch_result_region_round_trips_as_old_string(project: Path) -> None:
+    """Text copied from the edited region matches when passed as the next call's old_string."""
+    body = "\n".join(f"- item {i}" for i in range(1, 11))
+    doc_id = _write_doc(project, "led", [{"id": "s", "heading": "S", "content": body}])
+    section_id = f"{doc_id}::s"
+    res = axiom_graph_patch_section(str(project), section_id, "- item 5 (done)", old_string="- item 5")
+
+    region = _region(res)
+    res2 = axiom_graph_patch_section(str(project), section_id, region.replace("(done)", "(closed)"), old_string=region)
+    assert "replaced in" in res2, res2
+    assert "- item 5 (closed)" in _raw_content(project, doc_id, "s")
+
+
+def test_patch_result_fence_outlasts_backticks_in_region(project: Path) -> None:
+    """A region holding a code fence is wrapped in a longer fence, so the block can't be closed early."""
+    doc_id = _write_doc(project, "led", [{"id": "s", "heading": "S", "content": "Text."}])
+    res = axiom_graph_patch_section(str(project), f"{doc_id}::s", "```py\nx = 1\n```", anchor="$")
+
+    assert "\n````\nText.\n```py\nx = 1\n```\n````" in res, res

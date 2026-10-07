@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from axiom_annotations import Step, task
@@ -20,6 +21,8 @@ from axiom_annotations import Step, task
 from axiom_graph.models import AxiomNode
 
 from axiom_graph.db._core import (
+    MISSING_LIVE_HASH,
+    OPEN_RECEIPT_HASH,
     _HISTORY_ROW_LIMIT,
     _connect,
     _derive_change_type,
@@ -27,6 +30,7 @@ from axiom_graph.db._core import (
     _now_utc,
     _row_to_node,
     _steps_to_json,
+    pairs_ready,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,16 +86,41 @@ def upsert_verification(
     verification time.  Both must still match on subsequent staleness
     checks for the node to remain VERIFIED.
     """
-    verified_at = _now_utc()
     with _connect(db_path) as conn:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO node_verification
-                (node_id, status, verified_at, verified_by, reason, code_hash_at, desc_hash_at)
-            VALUES (?, 'VERIFIED', ?, ?, ?, ?, ?)
-            """,
-            (node_id, verified_at, verified_by, reason, code_hash_at, desc_hash_at),
-        )
+        upsert_verification_conn(conn, node_id, verified_by, code_hash_at, desc_hash_at, reason)
+
+
+def upsert_verification_conn(
+    conn: sqlite3.Connection,
+    node_id: str,
+    verified_by: str,
+    code_hash_at: str,
+    desc_hash_at: str | None = None,
+    reason: str | None = None,
+) -> None:
+    """Insert or replace a verification row on an open connection.
+
+    See :func:`upsert_verification`.  The REPLACE deletes the node's old
+    pairs through the foreign-key cascade; a writer that records pairs
+    writes them next, in the same transaction
+    (:func:`replace_verification_targets_conn`).
+
+    Args:
+        conn: Open SQLite connection (caller owns the transaction).
+        node_id: The verified node.
+        verified_by: Provenance (``'human'`` / ``'agent:{model}'``).
+        code_hash_at: The node's code hash at verification time.
+        desc_hash_at: The node's desc hash at verification time.
+        reason: Free-form reason, or ``None``.
+    """
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO node_verification
+            (node_id, status, verified_at, verified_by, reason, code_hash_at, desc_hash_at)
+        VALUES (?, 'VERIFIED', ?, ?, ?, ?, ?)
+        """,
+        (node_id, _now_utc(), verified_by, reason, code_hash_at, desc_hash_at),
+    )
 
 
 def update_node_baseline(
@@ -117,6 +146,11 @@ def update_node_baseline(
     ``MAX(file_mtime)`` lookup.  Leaving it untouched lets the next build
     re-scan the file and regenerate those fields.
 
+    The node's live hashes are cleared with the baseline (``live_code_hash``
+    set to ``''``, the reset marker), so readers take the new baseline as its
+    live value until the next staleness pass re-hashes the file, and that
+    pass may not fast-pass the file.
+
     Args:
         db_path: Path to the axiom-graph SQLite database.
         node_id: The node to update.
@@ -124,10 +158,585 @@ def update_node_baseline(
         desc_hash: Current desc/heading hash from the file on disk.
     """
     with _connect(db_path) as conn:
+        update_node_baseline_conn(conn, node_id, code_hash, desc_hash)
+
+
+def update_node_baseline_conn(
+    conn: sqlite3.Connection,
+    node_id: str,
+    code_hash: str,
+    desc_hash: str | None = None,
+) -> None:
+    """Reset a node's baseline hashes on an open connection.
+
+    See :func:`update_node_baseline`.  On a schema-v5 index the live hashes
+    are cleared too: ``live_code_hash = ''`` reads as "live equals the
+    baseline" and marks the node as reset since its file was last re-hashed
+    (:func:`get_unhashed_node_ids`).  A module or config anchor is the
+    exception: its ``live_code_hash`` carries the fingerprint of the bytes
+    its file's last re-hash read, not a node hash (no reset marker applies
+    to it), so it keeps that fingerprint from the file's record, which is
+    what a re-hash of the file (``check --full``) stores.
+
+    Args:
+        conn: Open SQLite connection (caller owns the transaction).
+        node_id: The node to update.
+        code_hash: The new code/body baseline.
+        desc_hash: The new desc/heading baseline.
+    """
+    if pairs_ready(conn):
+        conn.execute(
+            "UPDATE nodes SET code_hash = ?, desc_hash = ?, own_status = 'VERIFIED', "
+            "live_code_hash = CASE WHEN node_type = 'composite_process' "
+            "AND COALESCE(subtype, '') IN ('module', 'config') "
+            "THEN COALESCE((SELECT f.hashed_fp FROM file_state f WHERE f.location = nodes.location), '') "
+            "ELSE '' END, live_desc_hash = NULL WHERE id = ?",
+            (code_hash, desc_hash, node_id),
+        )
+    else:
         conn.execute(
             "UPDATE nodes SET code_hash = ?, desc_hash = ?, own_status = 'VERIFIED' WHERE id = ?",
             (code_hash, desc_hash, node_id),
         )
+
+
+# ---------------------------------------------------------------------------
+# Live hashes and verification pairs (schema v5)
+# ---------------------------------------------------------------------------
+
+
+def load_live_view_conn(
+    conn: sqlite3.Connection,
+) -> tuple[dict[str, tuple[str | None, str | None]], set[str]]:
+    """Return every node's live hashes as the index last saw them, plus the NOT_FOUND ids.
+
+    The DB-only view the pair readers compare against: a node's stored live
+    pair when its ``live_code_hash`` is set, else its baseline pair (the
+    live pair is read together, so a NULL live desc hash stays a real
+    value).  A node with no code hash is left out.  On an index below
+    schema v5 every node reads at its baseline.
+
+    Args:
+        conn: Open SQLite connection.
+
+    Returns:
+        ``(hashes, not_found)``: node id -> ``(code_hash, desc_hash)``, and
+        the ids whose stored ``own_status`` is ``NOT_FOUND``.
+    """
+    hashes: dict[str, tuple[str | None, str | None]] = {}
+    not_found: set[str] = set()
+    if pairs_ready(conn):
+        rows = conn.execute("SELECT id, own_status, code_hash, desc_hash, live_code_hash, live_desc_hash FROM nodes")
+        for r in rows:
+            if r["own_status"] == "NOT_FOUND":
+                not_found.add(r["id"])
+            if r["live_code_hash"] and r["live_code_hash"] != MISSING_LIVE_HASH:
+                hashes[r["id"]] = (r["live_code_hash"], r["live_desc_hash"])
+            elif r["code_hash"]:
+                hashes[r["id"]] = (r["code_hash"], r["desc_hash"])
+    else:
+        for r in conn.execute("SELECT id, own_status, code_hash, desc_hash FROM nodes"):
+            if r["own_status"] == "NOT_FOUND":
+                not_found.add(r["id"])
+            if r["code_hash"]:
+                hashes[r["id"]] = (r["code_hash"], r["desc_hash"])
+    return hashes, not_found
+
+
+def get_live_rows_conn(conn: sqlite3.Connection, node_ids: Iterable[str]) -> dict[str, dict]:
+    """Return what the staleness engine reads of each node to judge it without a parse.
+
+    Args:
+        conn: Open SQLite connection.
+        node_ids: The nodes.
+
+    Returns:
+        Node id -> ``{node_type, subtype, location, own_status, link_status,
+        code_hash, desc_hash, live_code_hash, live_desc_hash}`` (the live
+        columns read as ``None`` below schema v5).
+    """
+    ids = list(dict.fromkeys(node_ids))
+    v5 = pairs_ready(conn)
+    live_cols = "live_code_hash, live_desc_hash" if v5 else "NULL AS live_code_hash, NULL AS live_desc_hash"
+    out: dict[str, dict] = {}
+    for start in range(0, len(ids), 500):
+        chunk = ids[start : start + 500]
+        for r in conn.execute(
+            "SELECT id, node_type, subtype, location, own_status, link_status, code_hash, desc_hash, "
+            f"{live_cols} FROM nodes WHERE id IN ({','.join('?' * len(chunk))})",
+            chunk,
+        ):
+            out[r["id"]] = dict(r)
+    return out
+
+
+def index_has_nodes_conn(conn: sqlite3.Connection) -> bool:
+    """Return whether the index holds any node row (one index step, not a count)."""
+    return conn.execute("SELECT MAX(rowid) FROM nodes").fetchone()[0] is not None
+
+
+def get_liveness_rows_conn(
+    conn: sqlite3.Connection,
+    *,
+    node_ids: Iterable[str] = (),
+    locations: Iterable[str] = (),
+) -> dict[str, tuple[str, str | None, str | None]]:
+    """Return what the live-node rule reads of the given nodes and of every node at the given files.
+
+    Both reads are batched point lookups (``id`` primary key, the
+    ``location`` index), so the cost follows the ids and files asked about,
+    not the size of the index.
+
+    Args:
+        conn: Open SQLite connection.
+        node_ids: Node ids to read.
+        locations: Stored ``location`` values whose every node is read.
+
+    Returns:
+        Node id -> ``(node_type, location, own_status)`` for each row found;
+        an id with no row is absent.
+    """
+    out: dict[str, tuple[str, str | None, str | None]] = {}
+    for column, values in (("id", list(dict.fromkeys(node_ids))), ("location", list(dict.fromkeys(locations)))):
+        for start in range(0, len(values), 500):
+            chunk = values[start : start + 500]
+            for r in conn.execute(
+                f"SELECT id, node_type, location, own_status FROM nodes WHERE {column} IN ({','.join('?' * len(chunk))})",  # noqa: S608 - fixed column, placeholders only
+                chunk,
+            ):
+                out[r["id"]] = (r["node_type"], r["location"], r["own_status"])
+    return out
+
+
+def get_reset_locations_conn(conn: sqlite3.Connection, locations: Iterable[str] | None = None) -> set[str]:
+    """Return the files holding a node whose baseline a verification reset since its last re-hash.
+
+    Args:
+        conn: Open SQLite connection.
+        locations: Only these files; ``None`` for every file.
+
+    Returns:
+        The locations (empty below schema v5).
+    """
+    if not pairs_ready(conn):
+        return set()
+    sql = """
+        SELECT DISTINCT location FROM nodes
+        WHERE live_code_hash = '' AND code_hash != ''
+          AND ((node_type = 'atomic_process' AND COALESCE(subtype, '') NOT IN ('step', 'autostep'))
+               OR (node_type = 'composite_process' AND subtype IN ('docjson', 'docjson_doc', 'workflow', 'task')))
+    """
+    if locations is None:
+        return {r[0] for r in conn.execute(sql)}
+    locs = list(dict.fromkeys(locations))
+    out: set[str] = set()
+    for start in range(0, len(locs), 500):
+        chunk = locs[start : start + 500]
+        out.update(r[0] for r in conn.execute(f"{sql} AND location IN ({','.join('?' * len(chunk))})", chunk))
+    return out
+
+
+def get_verifications_for_conn(conn: sqlite3.Connection, node_ids: Iterable[str]) -> dict[str, dict]:
+    """Return the verification rows of *node_ids* (as :func:`get_all_verifications`, for a few nodes).
+
+    Args:
+        conn: Open SQLite connection.
+        node_ids: The nodes.
+
+    Returns:
+        Node id -> its verification row; nodes without one are omitted.
+    """
+    ids = list(dict.fromkeys(node_ids))
+    out: dict[str, dict] = {}
+    for start in range(0, len(ids), 500):
+        chunk = ids[start : start + 500]
+        for r in conn.execute(
+            "SELECT node_id, status, verified_at, verified_by, reason, code_hash_at, desc_hash_at "
+            f"FROM node_verification WHERE node_id IN ({','.join('?' * len(chunk))})",
+            chunk,
+        ):
+            out[r["node_id"]] = dict(r)
+    return out
+
+
+def get_verification_targets_for_conn(
+    conn: sqlite3.Connection, node_ids: Iterable[str]
+) -> dict[str, dict[str, tuple[str, str | None]]]:
+    """Return the recorded pairs of *node_ids* (as :func:`get_all_verification_targets_conn`, for a few nodes).
+
+    Args:
+        conn: Open SQLite connection to a schema-v5 index.
+        node_ids: The verified nodes.
+
+    Returns:
+        Verified node id -> target id -> recorded ``(code_hash, desc_hash)``.
+    """
+    ids = list(dict.fromkeys(node_ids))
+    pairs: dict[str, dict[str, tuple[str, str | None]]] = {}
+    for start in range(0, len(ids), 500):
+        chunk = ids[start : start + 500]
+        for r in conn.execute(
+            "SELECT node_id, target_id, code_hash, desc_hash FROM node_verification_targets "
+            f"WHERE node_id IN ({','.join('?' * len(chunk))})",
+            chunk,
+        ):
+            pairs.setdefault(r["node_id"], {})[r["target_id"]] = (r["code_hash"], r["desc_hash"])
+    return pairs
+
+
+def get_unhashed_node_ids(db_path: Path) -> set[str]:
+    """Return the nodes whose baseline a verification reset since a pass last re-hashed them.
+
+    A verification resets a node's baseline to the node's current hash and
+    marks its live hash ``''``; the next staleness pass that re-hashes the
+    file stores a real one.  Until then the file-level anchor may still
+    fingerprint an older version of the file than the node's baseline (a
+    file reverted to that version would match it), so the engine's mtime
+    fast pass must not vouch for the location.  Empty below schema v5.
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+
+    Returns:
+        Ids of hashed node kinds (atomic nodes other than step views, and
+        DocJSON / workflow / task composites) carrying the reset marker.
+    """
+    with _connect(db_path) as conn:
+        if not pairs_ready(conn):
+            return set()
+        rows = conn.execute(
+            """
+            SELECT id FROM nodes
+            WHERE live_code_hash = '' AND code_hash != ''
+              AND ((node_type = 'atomic_process' AND COALESCE(subtype, '') NOT IN ('step', 'autostep'))
+                   OR (node_type = 'composite_process' AND subtype IN ('docjson', 'docjson_doc', 'workflow', 'task')))
+            """
+        ).fetchall()
+    return {r["id"] for r in rows}
+
+
+def get_last_hashed_fingerprints(db_path: Path, anchor_subtypes: Iterable[str]) -> dict[str, str]:
+    """Return the whole-file fingerprint each file-level anchor was last re-hashed at.
+
+    A staleness pass that re-hashes a file stores the hash of the file
+    content it read as the live hash of the file's anchor node (the module,
+    DocJSON or config node whose ``code_hash`` fingerprints the whole file
+    as it was scanned).  A verification that reset the anchor's own
+    baseline leaves the reset marker ``''`` there instead.  An anchor no
+    pass has re-hashed has no entry.  Empty below schema v5.
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+        anchor_subtypes: The subtypes that mark a file-level anchor.
+
+    Returns:
+        Anchor id -> its stored live code hash (``''`` for the reset marker).
+    """
+    subtypes = sorted(set(anchor_subtypes))
+    if not subtypes:
+        return {}
+    with _connect(db_path) as conn:
+        if not pairs_ready(conn):
+            return {}
+        placeholders = ",".join("?" * len(subtypes))
+        rows = conn.execute(
+            f"SELECT id, live_code_hash FROM nodes WHERE live_code_hash IS NOT NULL AND subtype IN ({placeholders})",
+            subtypes,
+        ).fetchall()
+    return {r["id"]: r["live_code_hash"] for r in rows}
+
+
+def get_all_verification_targets_conn(
+    conn: sqlite3.Connection,
+) -> dict[str, dict[str, tuple[str, str | None]]]:
+    """Return every recorded pair, grouped by the verified node (one query).
+
+    Args:
+        conn: Open SQLite connection to a schema-v5 index.
+
+    Returns:
+        Verified node id -> target id -> the ``(code_hash, desc_hash)`` its
+        verification recorded.
+    """
+    pairs: dict[str, dict[str, tuple[str, str | None]]] = {}
+    for r in conn.execute("SELECT node_id, target_id, code_hash, desc_hash FROM node_verification_targets"):
+        pairs.setdefault(r["node_id"], {})[r["target_id"]] = (r["code_hash"], r["desc_hash"])
+    return pairs
+
+
+def get_verification_targets(db_path: Path, node_id: str) -> dict[str, tuple[str, str | None]]:
+    """Return the pairs one node's verification recorded.
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+        node_id: The verified node.
+
+    Returns:
+        Target id -> recorded ``(code_hash, desc_hash)``; empty when the node
+        has no pairs or the index is below schema v5.
+    """
+    with _connect(db_path) as conn:
+        if not pairs_ready(conn):
+            return {}
+        rows = conn.execute(
+            "SELECT target_id, code_hash, desc_hash FROM node_verification_targets WHERE node_id = ?",
+            (node_id,),
+        ).fetchall()
+    return {r["target_id"]: (r["code_hash"], r["desc_hash"]) for r in rows}
+
+
+def replace_verification_targets_conn(
+    conn: sqlite3.Connection,
+    node_id: str,
+    pairs: dict[str, tuple[str, str | None]],
+) -> None:
+    """Replace a verified node's pair set inside the caller's transaction.
+
+    Called right after the node's verification row is written, so the row
+    and its pairs commit together.  The old set is deleted explicitly rather
+    than relying on a REPLACE of the verification row to cascade.
+
+    Args:
+        conn: Open SQLite connection (caller owns the transaction).
+        node_id: The verified node; its ``node_verification`` row must exist.
+        pairs: Target id -> ``(code_hash, desc_hash)`` to record.
+    """
+    conn.execute("DELETE FROM node_verification_targets WHERE node_id = ?", (node_id,))
+    if pairs:
+        conn.executemany(
+            "INSERT INTO node_verification_targets (node_id, target_id, code_hash, desc_hash) VALUES (?, ?, ?, ?)",
+            [(node_id, target, code, desc) for target, (code, desc) in pairs.items()],
+        )
+
+
+def update_verification_snapshot_conn(
+    conn: sqlite3.Connection,
+    node_id: str,
+    code_hash_at: str | None,
+    desc_hash_at: str | None,
+) -> bool:
+    """Update only the snapshot hashes of a node's verification row (a text-only verification).
+
+    ``verified_at``, ``verified_by``, ``reason`` and the recorded pairs keep
+    describing the last verification of the node's links.
+
+    Args:
+        conn: Open SQLite connection (caller owns the transaction).
+        node_id: The verified node.
+        code_hash_at: The node's code hash now.
+        desc_hash_at: The node's desc hash now.
+
+    Returns:
+        Whether the node had a verification row to update.
+    """
+    cur = conn.execute(
+        "UPDATE node_verification SET code_hash_at = ?, desc_hash_at = ? WHERE node_id = ?",
+        (code_hash_at, desc_hash_at, node_id),
+    )
+    return cur.rowcount > 0
+
+
+def touch_verification_conn(
+    conn: sqlite3.Connection,
+    node_id: str,
+    verified_by: str,
+    reason: str | None,
+) -> bool:
+    """Move a verification row's time, verifier and reason to now, keeping its snapshot hashes.
+
+    What a link-only verification writes on an existing row: ``verified_at``,
+    ``verified_by`` and ``reason`` describe the latest verification of the
+    node's links, while ``code_hash_at`` / ``desc_hash_at`` keep describing
+    the last verification of its own content.
+
+    Args:
+        conn: Open SQLite connection (caller owns the transaction).
+        node_id: The verified node.
+        verified_by: Provenance (``'human'`` / ``'agent:{model}'``).
+        reason: Free-form reason, or ``None``.
+
+    Returns:
+        Whether the node had a verification row to update.
+    """
+    cur = conn.execute(
+        "UPDATE node_verification SET verified_at = ?, verified_by = ?, reason = ? WHERE node_id = ?",
+        (_now_utc(), verified_by, reason, node_id),
+    )
+    return cur.rowcount > 0
+
+
+def refresh_verification_targets_conn(
+    conn: sqlite3.Connection,
+    node_id: str,
+    pairs: dict[str, tuple[str, str | None]],
+) -> None:
+    """Replace the recorded pairs of the named targets only; every other pair of the node is kept.
+
+    Args:
+        conn: Open SQLite connection (caller owns the transaction).
+        node_id: The verified node; its ``node_verification`` row must exist.
+        pairs: Target id -> ``(code_hash, desc_hash)`` to record.
+    """
+    if not pairs:
+        return
+    conn.executemany(
+        "INSERT OR REPLACE INTO node_verification_targets (node_id, target_id, code_hash, desc_hash) VALUES (?, ?, ?, ?)",
+        [(node_id, target, code, desc) for target, (code, desc) in sorted(pairs.items())],
+    )
+
+
+def pin_verification_targets_conn(conn: sqlite3.Connection, node_id: str, target_ids) -> None:
+    """Record an open receipt (:data:`OPEN_RECEIPT_HASH`) for each target that holds no pair yet.
+
+    Args:
+        conn: Open SQLite connection (caller owns the transaction).
+        node_id: The verified node; its ``node_verification`` row must exist.
+        target_ids: The open offenders to keep open.
+    """
+    ids = sorted(set(target_ids))
+    if not ids:
+        return
+    conn.executemany(
+        "INSERT OR IGNORE INTO node_verification_targets (node_id, target_id, code_hash, desc_hash) "
+        "VALUES (?, ?, ?, NULL)",
+        [(node_id, target, OPEN_RECEIPT_HASH) for target in ids],
+    )
+
+
+def rekey_verification_targets_conn(conn: sqlite3.Connection, old_id: str, new_id: str) -> None:
+    """Point every pair recorded against *old_id* at *new_id*, hashes unchanged.
+
+    The one target-rekey helper every rename path calls.  A verified node
+    that already holds a pair for *new_id* keeps it, and its leftover pair
+    for *old_id* is dropped.  A no-op below schema v5.
+
+    Args:
+        conn: Open SQLite connection (caller owns the transaction).
+        old_id: The target's id before the rename.
+        new_id: The target's id after it.
+    """
+    if old_id == new_id or not pairs_ready(conn):
+        return
+    conn.execute(
+        "UPDATE OR IGNORE node_verification_targets SET target_id = ? WHERE target_id = ?",
+        (new_id, old_id),
+    )
+    conn.execute("DELETE FROM node_verification_targets WHERE target_id = ?", (old_id,))
+
+
+def write_baseline_verifications_conn(
+    conn: sqlite3.Connection,
+    node_ids: list[str],
+    *,
+    verified_by: str,
+    verification_op: str,
+    reason: str,
+    git_sha: str | None = None,
+    pairs_for: Callable[[sqlite3.Connection, str], dict[str, tuple[str, str | None]] | None] | None = None,
+) -> list[str]:
+    """Verify freshly indexed nodes against the hashes the index just stored.
+
+    For each id, writes one ``node_verification`` row whose snapshot hashes
+    are the node row's current ``code_hash`` / ``desc_hash`` (no file is
+    re-parsed) and one preserved ``AGENT_VERIFIED`` history row whose
+    ``meta`` carries *reason* and ``verification_op``.  An id that already
+    has a verification row, or has no node row, is skipped: this helper
+    never overwrites a real verification.
+
+    When *pairs_for* is given, each written verification also records its
+    pairs (one per dependency target) in the same transaction.
+
+    Args:
+        conn: Open SQLite connection (caller owns the transaction).
+        node_ids: Node ids to baseline, in order; duplicates are written once.
+        verified_by: Provenance recorded on the verification row.
+        verification_op: Operation recorded in the history row's ``meta``.
+        reason: Reason recorded on both rows.
+        git_sha: HEAD sha recorded on the history row, when known.
+        pairs_for: ``(conn, node_id) -> pairs`` giving the pairs to record
+            for a node (``None`` records none), e.g.
+            :meth:`axiom_graph.index.mark_clean.PairRecorder.pairs_for`.
+
+    Returns:
+        The ids that received a verification row.
+    """
+    written: list[str] = []
+    now = _now_utc()
+    meta = json.dumps({"reason": reason, "verification_op": verification_op})
+    ids = list(dict.fromkeys(node_ids))
+    # Both lookups read once per chunk of ids.  The loop's own writes touch
+    # neither: no node row changes, and an id's verification row is written
+    # only after its own check (the ids are distinct).
+    hashes: dict[str, tuple[str | None, str | None]] = {}
+    verified: set[str] = set()
+    for start in range(0, len(ids), 500):
+        chunk = ids[start : start + 500]
+        marks = ",".join("?" * len(chunk))
+        for r in conn.execute(f"SELECT id, code_hash, desc_hash FROM nodes WHERE id IN ({marks})", chunk):
+            hashes[r[0]] = (r[1], r[2])
+        verified.update(
+            r[0] for r in conn.execute(f"SELECT node_id FROM node_verification WHERE node_id IN ({marks})", chunk)
+        )
+    for node_id in ids:
+        code_hash, desc_hash = hashes.get(node_id, (None, None))
+        if code_hash is None:
+            continue
+        if node_id in verified:
+            continue
+        conn.execute(
+            """
+            INSERT INTO node_verification
+                (node_id, status, verified_at, verified_by, reason, code_hash_at, desc_hash_at)
+            VALUES (?, 'VERIFIED', ?, ?, ?, ?, ?)
+            """,
+            (node_id, now, verified_by, reason, code_hash, desc_hash),
+        )
+        node_pairs = pairs_for(conn, node_id) if pairs_for is not None else None
+        if node_pairs is not None:
+            replace_verification_targets_conn(conn, node_id, node_pairs)
+        conn.execute(
+            """
+            INSERT INTO node_history (node_id, scanned_at, change_type, git_sha, meta, preserved)
+            VALUES (?, ?, 'AGENT_VERIFIED', ?, ?, 1)
+            """,
+            (node_id, now, git_sha, meta),
+        )
+        written.append(node_id)
+    return written
+
+
+def restamp_verifications(db_path: Path, node_ids: list[str], verified_by: str) -> int:
+    """Move ``verified_at`` to now for the given ids, if still carrying *verified_by*.
+
+    Keyed by the explicit id list first: a row is touched only when its id
+    is listed **and** its ``verified_by`` still equals *verified_by*, so a
+    real verification that replaced the row in between is never rewritten
+    and rows written by earlier builds are never selected.  History is not
+    touched.
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+        node_ids: Ids this operation wrote verification rows for.
+        verified_by: The provenance those rows were written with.
+
+    Returns:
+        Number of rows re-stamped.
+    """
+    ids = list(dict.fromkeys(node_ids))
+    if not ids:
+        return 0
+    now = _now_utc()
+    total = 0
+    with _connect(db_path) as conn:
+        for start in range(0, len(ids), 500):
+            chunk = ids[start : start + 500]
+            cur = conn.execute(
+                f"UPDATE node_verification SET verified_at = ? "
+                f"WHERE verified_by = ? AND node_id IN ({','.join('?' * len(chunk))})",
+                [now, verified_by, *chunk],
+            )
+            total += cur.rowcount
+    return total
 
 
 def get_verification(db_path: Path, node_id: str) -> dict | None:
@@ -152,13 +761,25 @@ def get_verification(db_path: Path, node_id: str) -> dict | None:
 def get_all_verifications(db_path: Path) -> dict[str, dict]:
     """Return all verification rows as a dict keyed by node_id (single query)."""
     with _connect(db_path) as conn:
-        rows = conn.execute(
-            """
-            SELECT node_id, status, verified_at, verified_by, reason, code_hash_at, desc_hash_at
-            FROM node_verification
-            """
-        ).fetchall()
-        return {row["node_id"]: dict(row) for row in rows}
+        return get_all_verifications_conn(conn)
+
+
+def get_all_verifications_conn(conn: sqlite3.Connection) -> dict[str, dict]:
+    """Return all verification rows as a dict keyed by node_id (single query), on an open connection.
+
+    Args:
+        conn: Open SQLite connection.
+
+    Returns:
+        node_id -> verification row as a dict.
+    """
+    rows = conn.execute(
+        """
+        SELECT node_id, status, verified_at, verified_by, reason, code_hash_at, desc_hash_at
+        FROM node_verification
+        """
+    ).fetchall()
+    return {row["node_id"]: dict(row) for row in rows}
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +1006,29 @@ def get_node(db_path: Path, node_id: str) -> AxiomNode | None:
         return node
 
 
+def get_nodes_conn(conn: sqlite3.Connection, node_ids: Iterable[str]) -> dict[str, AxiomNode]:
+    """Return the nodes of *node_ids* that exist, with tags populated, in batched reads.
+
+    Args:
+        conn: Open SQLite connection.
+        node_ids: The ids to read; duplicates are read once.
+
+    Returns:
+        Node id -> :class:`AxiomNode` (as :func:`get_node` returns it).
+    """
+    ids = list(dict.fromkeys(node_ids))
+    out: dict[str, AxiomNode] = {}
+    for start in range(0, len(ids), 500):
+        chunk = ids[start : start + 500]
+        marks = ",".join("?" * len(chunk))
+        for row in conn.execute(f"SELECT * FROM nodes WHERE id IN ({marks})", chunk):
+            out[row["id"]] = _row_to_node(row)
+        for t in conn.execute(f"SELECT node_id, tag FROM tags WHERE node_id IN ({marks}) ORDER BY rowid", chunk):
+            if t["node_id"] in out:
+                out[t["node_id"]].tags.append(t["tag"])
+    return out
+
+
 def query_nodes(
     db_path: Path,
     node_type: str | None = None,
@@ -508,6 +1152,55 @@ def get_step_node_ids_by_location_conn(
         for row in rows:
             result.setdefault(row["location"], set()).add(row["id"])
     return result
+
+
+def get_nodes_at_locations_conn(
+    conn: sqlite3.Connection,
+    locations: Iterable[str],
+    node_types: Iterable[str] = (),
+) -> list[AxiomNode]:
+    """Return the nodes stored at *locations*, in node-table order (indexed by location).
+
+    Args:
+        conn: Open connection.
+        locations: Project-relative file paths, as stored.
+        node_types: Keep only these node types; every type when empty.
+
+    Returns:
+        The nodes.
+    """
+    locs = sorted(set(locations))
+    types = list(node_types)
+    type_sql = f" AND node_type IN ({','.join('?' * len(types))})" if types else ""
+    out: list[AxiomNode] = []
+    for start in range(0, len(locs), 500):
+        chunk = locs[start : start + 500]
+        rows = conn.execute(
+            f"SELECT * FROM nodes WHERE location IN ({','.join('?' * len(chunk))}){type_sql} ORDER BY rowid",
+            (*chunk, *types),
+        ).fetchall()
+        out.extend(_row_to_node(r) for r in rows)
+    return out
+
+
+def node_ids_at_locations_conn(conn: sqlite3.Connection, locations: Iterable[str]) -> set[str]:
+    """Return the ids of the nodes stored at *locations* (indexed by location).
+
+    Args:
+        conn: Open connection.
+        locations: Project-relative file paths, as stored.
+
+    Returns:
+        Node ids.
+    """
+    locs = sorted(set(locations))
+    out: set[str] = set()
+    for start in range(0, len(locs), 500):
+        chunk = locs[start : start + 500]
+        out.update(
+            r[0] for r in conn.execute(f"SELECT id FROM nodes WHERE location IN ({','.join('?' * len(chunk))})", chunk)
+        )
+    return out
 
 
 def count_parentless_step_nodes_by_location_conn(conn: sqlite3.Connection) -> dict[str, int]:
@@ -685,6 +1378,26 @@ def delete_nodes_by_location(conn: sqlite3.Connection, location: str, git_sha: s
     return len(node_ids)
 
 
+def clear_location_file_mtime_conn(conn: sqlite3.Connection, location: str) -> int:
+    """Clear the stored ``file_mtime`` of every row at *location*.
+
+    Drops the location out of the builder's scan-skip cache, so the next
+    build rescans the file whatever stamps its rows carried.
+
+    Args:
+        conn: Open DB connection (caller commits).
+        location: Project-relative file path.
+
+    Returns:
+        Number of rows whose stored mtime was cleared.
+    """
+    cur = conn.execute(
+        "UPDATE nodes SET file_mtime = NULL WHERE location = ? AND file_mtime IS NOT NULL",
+        (location,),
+    )
+    return cur.rowcount
+
+
 def delete_node_by_id(
     conn: sqlite3.Connection,
     node_id: str,
@@ -705,7 +1418,7 @@ def delete_node_by_id(
         conn: Open SQLite connection (caller manages the transaction).
         node_id: The full node ID to delete.
         reason_meta: Optional dict merged into the DELETED history row's meta
-            (e.g. ``{"actor": "agent:pev-auditor", "reason": "..."}``).
+            (e.g. ``{"actor": "agent", "reason": "..."}``).
             Defaults to ``{"actor": "system"}`` when not provided.
     """
     row = conn.execute(
@@ -789,9 +1502,33 @@ __all__ = [
     "get_node_hashes",
     # Verification
     "upsert_verification",
+    "upsert_verification_conn",
     "update_node_baseline",
+    "update_node_baseline_conn",
+    "write_baseline_verifications_conn",
+    "restamp_verifications",
     "get_verification",
     "get_all_verifications",
+    "get_all_verifications_conn",
+    # Live hashes and verification pairs
+    "load_live_view_conn",
+    "get_unhashed_node_ids",
+    "get_live_rows_conn",
+    "get_liveness_rows_conn",
+    "index_has_nodes_conn",
+    "get_nodes_conn",
+    "get_reset_locations_conn",
+    "get_verifications_for_conn",
+    "get_verification_targets_for_conn",
+    "get_last_hashed_fingerprints",
+    "get_all_verification_targets_conn",
+    "get_verification_targets",
+    "replace_verification_targets_conn",
+    "update_verification_snapshot_conn",
+    "touch_verification_conn",
+    "refresh_verification_targets_conn",
+    "pin_verification_targets_conn",
+    "rekey_verification_targets_conn",
     # Upsert
     "upsert_node",
     "upsert_node_conn",
@@ -804,8 +1541,11 @@ __all__ = [
     # Workflow step rows
     "STEP_NODE_SUBTYPES",
     "get_step_node_ids_by_location_conn",
+    "get_nodes_at_locations_conn",
+    "node_ids_at_locations_conn",
     "count_parentless_step_nodes_by_location_conn",
     # Deletes
     "delete_nodes_by_location",
     "delete_node_by_id",
+    "clear_location_file_mtime_conn",
 ]

@@ -1,221 +1,217 @@
-<!-- generated from axiom_graph::docs.consumer.concepts.docjson @ 35c65fb44be5; do not edit -->
+<!-- generated from axiom_graph::docs/consumer/concepts/docjson @ d37736aba121; do not edit -->
 
-# DocJSON: structured docs where a section is its own node
+# DocJSON documents
 
-## A section is its own node
+## What DocJSON is
 
-axiom-graph stores documentation as structured JSON ("DocJSON"), one `.json` file per document in your project's `docs/` directory. The content inside a section is still plain markdown. The JSON is just the envelope that gives axiom-graph the structure it needs to do the one thing plain markdown can't: **treat each section as its own node in the graph.**
+axiom-graph stores documentation as DocJSON: one JSON file per document in your docs folder (`docs/` by default; `docs_dirs` in [configuration](../get-started/configuration.md) changes it), with each section's text written in Markdown. Every section becomes its own node in [the mesh](the-mesh.md), so you can:
 
-That single design choice is what this whole page is about. When a section is a node, axiom-graph can:
+- link a section to the code it describes,
+- have that one section flagged when the code changes, and
+- read or edit one section without loading the whole document.
 
-- **Link that section** (not the whole document) to the exact code it describes.
-- **Detect drift** at section granularity (when that code changes, *that* section goes stale, not the whole file).
-- **Return that section alone** when an agent or human asks for it.
+Markdown files in the docs folders are indexed too, one node per `##` section, but they cannot hold links to code and the doc tools do not edit them.
 
-This is the core of axiom-graph's value: shrinking what anyone has to load. An agent reads one section, not the whole document, the same way reading source returns a function by line range instead of the whole file. A doc section is a first-class node in [the mesh](the-mesh.md) (see also [the ontology](ontology.md)), so the [two reads](the-mesh.md#two-reads-one-mesh) — retrieval and drift — apply to it like any other node.
+## File format
 
-This page covers the shape of a DocJSON file, how sections nest, how a section binds to code, and how that binding keeps consumer docs honest through a proxy chain.
-
-## The shape of a document
-
-A DocJSON file has three top-level keys:
-
-| Key | Required | Description |
-|---|---|---|
-| `title` | yes | Human-readable title, rendered as the page heading |
-| `sections` | yes | Array of section objects (may be empty) |
-| `tags` | no | String array for filtering (e.g. `"consumer"`, `"guide"`) |
-
-A minimal document:
+A document is a `.docjson` file with a `title`, a `sections` array and optional `tags`:
 
 ```json
 {
-  "title": "Data Model",
-  "tags": ["database", "schema"],
+  "title": "Caching",
+  "tags": ["guide"],
   "sections": [
     {
-      "id": "nodes-table",
-      "heading": "Nodes Table",
-      "content": "Every indexed entity is a row in the `nodes` table. Each node has a unique `id`, a `node_type`, and summary text fields."
-    },
-    {
-      "id": "edges-table",
-      "heading": "Edges Table",
-      "content": "Relationships are stored in the `edges` table. Each edge has a `from_id`, `to_id`, and `edge_type`."
+      "id": "overview",
+      "heading": "Overview",
+      "content": "Responses are cached for five minutes. Call `invalidate()` to clear the cache early.",
+      "links": [{"node_id": "myproject::myproject.cache::invalidate"}]
     }
   ]
 }
 ```
 
-Each section object:
-
-| Key | Required | Description |
+| Key | Required | Meaning |
 |---|---|---|
-| `id` | yes | Lowercase-hyphen slug (e.g. `"nodes-table"`). Becomes part of the section's node ID. |
-| `heading` | yes | Display heading for the section |
-| `content` | no | Markdown body. Stored in the index as the node's `level_2` field. |
-| `level` | no | Heading depth 2–6. Defaults to `depth + 2` (top-level `##`, child `###`, grandchild `####`). |
-| `tags` | no | Section-level tags (e.g. `["deprecated"]`), independent of document tags. |
-| `links` | no | Array of `{"node_id": "..."}` objects connecting the section to code or doc nodes. |
-| `sections` | no | Nested child sections (up to 3 levels deep). |
+| `title` | yes | Page title. |
+| `sections` | yes | Array of sections; may be empty. |
+| `tags` | no | Document tags, used for filtering and by the `[axiom_graph.staleness]` settings. |
 
-Note what is **not** a key: the document's identity. A document's node ID comes from its **file path** relative to `docs/`, not from any field in the JSON. `docs/concepts/docjson.json` becomes the node ID `myproject::docs.concepts.docjson`. You never set node IDs by hand.
+Each section:
 
-## How node IDs work
+| Key | Required | Meaning |
+|---|---|---|
+| `id` | yes | Lowercase-hyphen slug, unique among its siblings. Becomes part of the section's node id. |
+| `heading` | yes | Section heading. |
+| `content` | no | Markdown body. |
+| `links` | no | `[{"node_id": "..."}]`: the code or doc nodes the section describes. |
+| `sections` | no | Nested sections, up to three levels in all. |
+| `tags` | no | Section tags. |
+| `level` | no | Heading level, 2 to 6. Defaults to 2 for top-level sections and one more for each level of nesting. |
 
-Every node in the graph has a unique ID derived from its location. Understanding the format helps when you add links or query the graph.
+Sections saved by the doc tools also carry an `axiom_stamp` object, which records that a tool wrote them. Leave it as it is.
 
-**Code nodes** follow `{project}::{dotpath}::{name}`:
+Files ending in `.json` are read as DocJSON too. The `docs_extensions` setting in [configuration](../get-started/configuration.md) sets which extensions are read; its first entry, `.docjson` by default, is the one new documents get.
 
-| What | Node ID |
+If you are upgrading an index from axiom-graph 2.x, doc and section ids change form in 3.0. Follow the migration steps in the [changelog](https://github.com/ddpoe/axiom-graph/blob/master/CHANGELOG.md), which use the `axiom-graph doc-ids` commands, before your first build.
+
+## Document and section ids
+
+A document's id comes from its path, not from anything inside the file: the project id, `::`, then the docs folder and the file's path inside it, without the extension. A section adds `::` and its own id, and a nested section joins its parents' ids with dots.
+
+| What | Node id |
 |---|---|
-| Module `axiom_graph/db/nodes.py` | `axiom_graph::axiom_graph.db.nodes` |
-| Function `upsert_node` in it | `axiom_graph::axiom_graph.db.nodes::upsert_node` |
+| `docs/architecture.docjson` | `myproject::docs/architecture` |
+| Section `overview` in it | `myproject::docs/architecture::overview` |
+| Section `tables` nested under `database` | `myproject::docs/architecture::database.tables` |
 
-**Doc nodes** use the file path relative to `docs/`, with separators replaced by dots:
+Code nodes have ids of the form `{project}::{module}::{name}`; see [the mesh](the-mesh.md). You rarely need to build an id yourself: `axiom_graph_read_doc` prints each section's id next to its heading, and `axiom_graph_search` finds ids for code and docs.
 
-| What | Node ID |
-|---|---|
-| Doc file `docs/architecture.json` | `axiom_graph::docs.architecture` |
-| Section `overview` in it | `axiom_graph::docs.architecture::overview` |
-| Nested child section | `axiom_graph::docs.architecture::overview.subsection` |
+Because the extension is not part of the id, `x.json` and `x.docjson` in one folder name the same document. The build warns about the pair and indexes `x.docjson`. To convert a docs tree from `.json` to `.docjson` with every id kept, run `axiom-graph doc-ids rename-extension <PROJECT_ROOT>` (a preview), then again with `--execute`.
 
-The part after `::` is the section path. For a top-level section it's just the slug; for nested sections it's a dot-path (covered next). To discover existing node IDs, use `axiom_graph_search` or `axiom_graph_list` — never invent them.
+## Nested sections
 
-## Nested sections (depth up to 3)
-
-A section can recursively contain sub-sections via an optional `sections` key. This lets you break a large topic into focused, individually addressable pieces *without* fragmenting it into a separate document — keeping related content together while still giving each piece its own node.
+A section can hold its own `sections`. Use this to split a long topic into parts that can each be linked, flagged and read on their own, while keeping them in one document:
 
 ```json
 {
-  "id": "database-layer",
-  "heading": "Database Layer",
-  "content": "Overview of the DB design.",
+  "id": "database",
+  "heading": "Database",
+  "content": "Overview of the storage layer.",
   "sections": [
-    {"id": "tables", "heading": "Tables", "content": "Core table definitions..."},
-    {"id": "migrations", "heading": "Migrations", "content": "How migrations work..."}
+    {"id": "tables", "heading": "Tables", "content": "..."},
+    {"id": "migrations", "heading": "Migrations", "content": "..."}
   ]
 }
 ```
 
-**Dot-path node IDs.** Nested sections use dot-separated paths after the `::` separator, mirroring how axiom-graph names hierarchical code nodes (`module.class.method`):
+Nesting goes three levels deep: a section, its children and their children. `axiom_graph_add_section` can add a child under a section at any of the first two levels. The doc tools refuse anything deeper, and the build skips a deeper level in a hand-edited file with a warning. If you need more depth, move the topic into its own document.
 
-| What | Node ID | Depth |
-|---|---|---|
-| Top-level section | `axiom_graph::docs.architecture::database-layer` | 0 |
-| Child section | `axiom_graph::docs.architecture::database-layer.tables` | 1 |
-| Grandchild section | `axiom_graph::docs.architecture::database-layer.tables.nodes-table` | 2 |
+Each section's dot-path must be unique in its document. The doc tools refuse a write that would give two sections the same one, such as two siblings with the same id. If a hand edit creates such a pair, the build indexes the first, skips the second with a warning, and the tools cannot address either; fix the ids in the file, then accept the edit as described under editing files by hand below.
 
-**Depth limit: 3 levels** (depth 0, 1, 2). The scanner warns and ignores a `sections` key on a depth-2 node. If you need to go deeper, that's the signal to split into a separate document.
-
-**Containment becomes graph edges.** Nesting emits parent-to-child `composes` edges, so the hierarchy is queryable like any other relationship — depth is just traversal distance. Heading level auto-maps to depth (`##` / `###` / `####`), and an explicit `level` still overrides.
-
-**Backward compatible.** A section with no `sections` key is a leaf, exactly like the original flat format. Existing documents work with zero changes — nested sections are a strict superset.
-
-**Staleness flows down the tree.** A parent section is marked `LINKED_STALE` when any child is stale, so you can trace drift from a document down to the exact sub-section that needs attention. See [staleness](staleness.md).
+A parent section is flagged `LINKED_STALE` while any section nested under it is stale, so drift shows at every level above it. See [staleness](staleness.md).
 
 ## Linking a section to code
 
-The point of a section being a node is that it can be wired to the exact code it describes. Each entry in a section's `links` array creates a `documents` edge from the section node to a code node:
+Each entry in a section's `links` array connects the section to one node, usually a function or method:
 
 ```json
-{
-  "id": "staleness-engine",
-  "heading": "Staleness Engine",
-  "content": "The staleness engine compares code hashes to detect when docs are out of date.",
-  "links": [
-    {"node_id": "axiom_graph::axiom_graph.index.staleness::compute_staleness"}
-  ]
-}
+"links": [{"node_id": "myproject::myproject.cache::invalidate"}]
 ```
 
-That one edge type, `documents`, does double duty — it is what `axiom_graph_read_doc` follows to show linked code summaries beneath a section, and it is what the staleness engine follows to flag the section when that code changes. One mesh, two reads. (Edge types are defined in [the ontology](ontology.md).)
+`axiom_graph_read_doc` lists a section's links under it. When linked code changes, that section is flagged `LINKED_STALE`; its sibling sections are not. A link to a whole module flags the section when any function in the module changes, or when one is added or removed. Add links with `axiom_graph_add_link` (several at once with `node_ids`), or include them in the document you pass to `axiom_graph_write_doc`. Both warn when a target id is not in the index. The target goes under `node_id`, as above, or the entry can be the bare id string. Other keys such as `target` or `type` are not read, and every link is a `documents` link. A doc tool refuses any other entry and names the section and the entry. A build skips such an entry in a hand-edited file and names it in a warning.
 
-The payoff of section-granular linking is **precision in both directions**:
+Link the functions, methods and entry points the section describes: the code whose change would mean the prose needs another look. A quick test: if someone rewrote this function, would a reader need to re-check this section? Skip private helpers the section never mentions and modules cited only for orientation. Every link can flag the section, so extra links add noise.
 
-- **Precise context.** An agent that needs to understand staleness reads the one section linked to `compute_staleness`, not the entire architecture document.
-- **Precise staleness.** When `compute_staleness` changes, *that* section is flagged — not the whole file, not its siblings. You know exactly which prose to re-check.
+## Linking to another doc section
 
-**What to link.** Link public functions, classes, decorators, and entry points the section explicitly describes — anything whose contract a code change could invalidate. The quick test: imagine someone rewrites the linked function; would a reader need to re-check this section? If yes, link it. If no, skip it. Do **not** link private helpers the section never mentions, or whole modules cited only for orientation — every link is a staleness trigger, and over-linking creates noise.
-
-## Proxy linking: consumer docs link to docs, not raw code
-
-Consumer-facing pages like this one describe capabilities, not individual functions. So instead of linking straight to code, they link to a **dev-doc section** that documents the capability — and that dev-doc section is what binds to the code. This forms a chain:
+A link can also point at another doc section. A common setup is for user guides to link to the developer doc that describes a feature, and for only the developer doc to link to code:
 
 ```
-code function  <--documents--  dev-doc section  <--documents--  consumer-doc section
+code  <--  dev-doc section  <--  user-guide section
 ```
 
-The same `documents` edge is used at every hop. Because axiom-graph propagates staleness transitively along these edges, the consumer page inherits drift without ever naming a function:
+When the code changes, the dev-doc section is flagged and the flag passes on to the guide sections that link to it. The guides never name a function, and the developer doc is the one place that tracks the code.
 
+The flag only passes to documents whose tags are listed in `transitive_tags`, which is empty by default:
+
+```toml
+[axiom_graph.staleness]
+transitive_tags = ["consumer"]
 ```
-compute_staleness            (changed)
-  ↑ documents
-staleness design::architecture   LINKED_STALE  via ...::compute_staleness
-  ↑ documents
-concepts/staleness::how-it-works LINKED_STALE  via staleness design::architecture
-```
 
-Two things fall out of this:
+Only code changes travel along the chain; editing the dev-doc section's text does not flag the guide. [Staleness](staleness.md) covers how the flag spreads and clears, and [the docs-honesty loop](../examples/docs-honesty-loop.md) walks through the setup.
 
-- **Stability under renames.** When a symbol is renamed or moved, the dev-doc layer absorbs the change. The consumer page rides the chain and keeps pointing at a stable doc target instead of a node ID that just moved.
-- **Honesty without coupling.** Consumer prose stays correct even though it never references code directly — the dev-doc proxy is the binding surface.
+## Editing docs with the MCP tools
 
-This is exactly how the page you're reading is wired. The full mechanism — transitive propagation, the dev-doc proxy, and the publish loop — is the subject of [the docs-honesty loop](../examples/docs-honesty-loop.md#the-proxy-linking-architecture).
+Agents edit DocJSON through the `axiom_graph_*` doc tools, one section at a time. Each tool writes the file and updates the index, so no build is needed afterwards.
 
-## Editing sections through MCP
-
-Because each section is a node, you patch one section at a time rather than rewriting a file. The MCP server is the primary surface for this — agents (and humans using an MCP client) manage docs without hand-editing JSON.
-
-| Tool | What it does |
+| To | Use |
 |---|---|
-| `axiom_graph_read_doc` | Render a document (or one `section`) as markdown, with node IDs annotated in comments. |
-| `axiom_graph_write_doc` | Create a new DocJSON file and index it in one step. |
-| `axiom_graph_update_section` | Whole-replace one section's content, heading, or ID. Only that section is touched. |
-| `axiom_graph_patch_section` | Edit part of a section's content without re-sending the whole body: append (`anchor="$"`), prepend (`anchor="^"`), or `Edit`-style unique-match replace (`old_string`). |
-| `axiom_graph_add_section` | Append a section to an existing doc — optionally nested under a `parent_id` or positioned `after` a sibling — without rewriting the file. |
-| `axiom_graph_delete_section` | Remove a section and everything nested under it. |
-| `axiom_graph_add_link` / `axiom_graph_delete_link` | Add or remove `documents` edges from a section to code nodes (batch-capable). |
+| Read a document or some of its sections | `axiom_graph_read_doc` (`outline=true` first, then `section_ids`) |
+| Create a document, or replace one whole | `axiom_graph_write_doc` |
+| Copy a document to a new one, changing some sections | `axiom_graph_clone_doc` |
+| Replace a section's content, heading or id | `axiom_graph_update_section` |
+| Append to, prepend to, or change part of a section | `axiom_graph_patch_section` |
+| Add sections | `axiom_graph_add_section` |
+| Delete a section and everything under it | `axiom_graph_delete_section` |
+| Change a document's title or tags | `axiom_graph_update_doc_meta` |
+| Delete a document | `axiom_graph_delete_doc` |
+| Add or remove links | `axiom_graph_add_link` / `axiom_graph_delete_link` |
+| Keep a hand edit as it stands | `axiom_graph_accept_doc_edits` |
 
-A few behaviors worth knowing:
+A few things to know:
 
-- **Dot-path targeting.** Pass a dot-path section ID (`database-layer.tables.indexes`) to `update_section` and the nested target resolves correctly. The fully qualified form (`axiom_graph::docs.foo::database-layer.tables.indexes`) works anywhere a section ID is accepted.
-- **Renames cascade.** Renaming a section in-place via `new_id` re-paths every child whose ID was prefixed by the old slug.
-- **Auto-slug.** If you omit a section's `id` in `write_doc`, axiom-graph derives a slug from the heading (`"Database Layer"` → `database-layer`). Set an explicit `id` only when you want a particular slug for cross-references.
-- **Partial edits over whole-replace.** `update_section` always replaces the whole section body; `patch_section` appends, prepends, or spot-replaces. The append/prepend modes skip the read-modify-write round trip — handy (and clobber-safe) for accreting sections like changelogs and ledgers. The `^`/`$` anchors are out-of-band parameters, so a body full of `$VAR`, `$x^2$`, or `Ctrl-^` is never mis-parsed.
+- `update_section`, `patch_section` and `delete_section` take the full section id that `read_doc` prints, such as `myproject::docs/architecture::database.tables`. `add_section` takes the doc id and a new slug, plus `parent_id` (the parent's dot-path) to nest it or `after` (a sibling's id) to place it.
+- `patch_section` takes `anchor="$"` to append, `anchor="^"` to prepend, or `old_string` to replace text that appears exactly once. Its result shows the edited lines, so you can check the edit without reading the section again.
+- In `write_doc`, a top-level `id` is the file's path under the docs folder (`"guides/caching"` writes `docs/guides/caching.docjson`), not a node id. Without one, the file name comes from the title. `docs_root` picks another configured docs folder.
+- To start a document from an existing one, such as a template, use `axiom_graph_clone_doc`. `set_sections` replaces the content of the sections you name, `omit_sections` leaves sections out, and `title` and `tags` replace the source's; everything else, links included, is copied. It refuses a section id the source does not have, and it never overwrites an existing doc:
 
-The human path (the CLI and viz) is secondary; for hand-authoring the raw format, see the [configuration](../get-started/configuration.md) and [CLI](../get-started/use-the-cli.md) guides.
+  ```
+  axiom_graph_clone_doc(source_doc_id="myproject::docs/templates/feature", new_id="features/caching",
+                        title="Caching", set_sections={"overview": "Responses are cached for five minutes."})
+  ```
 
-## Saving a section verifies it
+- To edit several sections in one call, pass `edits=[...]` to `update_section` or `patch_section`: a list of items, each with the keys a single call takes (including `addresses` and `expected_hash`), across any number of docs. Every item is checked first, so one bad item writes nothing. The reply gives each item's `content_hash`.
+- `update_section` takes `expected_hash`, the `content_hash` from your last write result, and refuses the write if the section has changed since. `write_doc` takes `expected_hash` too: pass the `doc_hash` its reply (or `clone_doc`'s) ended with, and it refuses, writing nothing, if the file has changed since.
+- A save writes the whole file or nothing, so a failed write leaves the previous file intact.
+- Renaming a section with `new_id` also re-points the links in other docs that point at it. If one of those docs stays busy with another write, the rename fails with nothing written. A doc it still could not re-point, or a doc file it could not read, is named in a `WARNING:` line of the reply; point those links at the new id with `delete_link` and `add_link`.
+- For long content, pass a file: `content_file` on the section tools, `doc_file` on `write_doc`.
+- A write that would nest too deep or give two sections one dot-path returns an `ERROR:` message and writes nothing.
 
-Saving a section through the MCP write tools (`update_section`, `add_section`, `write_doc`, the link tools) does more than rewrite JSON — it records a **verification snapshot** for any existing section node whose content or heading actually changed. axiom-graph compares each section's stored hashes before and after the write; for every existing node whose `code_hash` (prose body) or `desc_hash` (heading) differs, it emits an `AGENT_VERIFIED` history row at the new hash.
+The full tool list is in [Connect your agent](../get-started/connect-your-agent.md).
 
-The practical effect: **the writer is the verifier.** If the section you just edited was `LINKED_STALE`, that flag clears as a side effect of the save, because the new snapshot is now newer than the linked code's last change. You don't run a separate "mark clean" step for your own edit.
+## Saving a section verifies its text
 
-The scope is deliberately narrow:
+When `write_doc`, `update_section`, `patch_section` or `add_section` saves a section whose content is new or changed, the section's own text is marked verified, with an `AGENT_VERIFIED` entry in its history.
 
-- Only **existing** nodes that actually changed are candidates. Brand-new sections (created by `write_doc`) are default-clean via the normal first-index path — no spurious verification.
-- Only the **saved section** clears. Parents, siblings, and the linked code nodes keep their own status; they get their own snapshots only when verified separately. (This preserves the sticky-LINKED_STALE invariant for everything you didn't touch — see [staleness](staleness.md).)
+A save does not review the code the section describes, so it never clears `LINKED_STALE`:
 
-This is the mechanism behind the docs loop: edit the stale section, the save clears it, re-render the site. Clearing is a deliberate verification act, not an accidental side effect of any file write.
+- Saving leaves every link status as it was: the section's, its parent's, and every other node's. If the section was `LINKED_STALE` because code it links to changed, it stays so, and the reply ends with `still LINKED_STALE via: ...` naming what is left.
+- To clear it, pass `addresses=[node ids]` to `update_section` or `patch_section`, naming the changed nodes the edit reconciles: the ids in `check`'s `via` column or in `axiom_graph_drift_query`. The section clears once every node it was flagged through is named. If the text is already right, pass `addresses` to `update_section` with no new content. Naming a node the section is not flagged through is an error, and nothing is written.
+- Or verify the section as it stands with `axiom-graph mark-clean <NODE_ID> <PROJECT_ROOT>` or `axiom_graph_mark_clean`.
+- The flag also clears by itself if the code goes back to the version the section was verified against.
+- Only the saved section's text is verified. Its parent, its siblings and the code it links to keep their status.
+- Changing only the links, the heading or the id, or saving unchanged content, verifies nothing.
+- A flag that reached the section through a link to another doc section stays until that section is verified.
+- A section saved on another branch keeps this split when it merges: its text arrives verified, and each link arrives verified only where the code is still at the version the save checked it against (see [editing the files by hand](docjson.md#editing-the-files-by-hand)).
 
-## Build reconciles edges to the JSON
+[Staleness](staleness.md) covers the other ways to clear drift.
 
-The `links` array in the JSON is the source of truth for a section's `documents` edges. But JSON gets edited outside the MCP tools too — a raw editor, a bulk find-and-replace, a merge. To keep the graph from drifting away from the files, **`axiom_graph_build` reconciles `documents` edges against the JSON `links` on every build.**
+## Editing the files by hand
 
-For each section walked during a build, axiom-graph enforces that the DB's set of `documents` edges for that section equals the section's JSON `links` set exactly — including the empty set. Orphan edges left behind by external edits are deleted (recorded in history as `LINK_REMOVED`), and missing edges are added. The reconciler runs after stale-node purging and before broken-link detection, so a build leaves the mesh matching what's actually on disk.
+You can edit a DocJSON file directly, but use the doc tools where you can: axiom-graph cannot tell a hand edit from an accidental one. The next build, or the next doc-tool write to the same document, reads the file and:
 
-The takeaway for authors: **the JSON is canonical.** Hand-edit `links` if you like; the next build makes the graph agree. You don't have to manually clean up edges after editing files directly.
+- updates the index to match it, including the links, so a link deleted from a `links` array is dropped from the index;
+- reports each hand-edited section once as a raw DocJSON edit (`RAW_DOCJSON_EDIT` in its history) and leaves it unverified.
 
-## Authoring a document, start to finish
+```
+2 DocJSON section(s) were edited outside the doc tools (raw DocJSON edits) and are not verified.
+```
 
-Putting it together, the loop for writing and maintaining a DocJSON document:
+To settle a flagged section, redo the change with a doc tool, which stamps and verifies it, or accept the file as it stands:
 
-1. **Create** a `.json` file in `docs/` (lowercase-hyphen names; subdirectories are fine). At minimum supply `title` and `sections`. Or create it in one step with `axiom_graph_write_doc`.
-2. **Build** with `axiom_graph_build` so axiom-graph indexes the new sections as nodes.
-3. **Read back** with `axiom_graph_read_doc` to confirm the rendered output and that linked node summaries appear under each section.
-4. **Find gaps** with `axiom_graph_list_undocumented` — code nodes with no inbound `documents` edge from any section.
-5. **Link** sections to the code (or dev-doc) they describe, via `links` in the JSON or `axiom_graph_add_link`.
-6. **Check** with `axiom_graph_check` to see which sections are `LINKED_STALE` (linked node changed) or `BROKEN_LINK` (linked node gone), then update the affected sections — which, by the writer-is-verifier rule above, clears them.
+```bash
+axiom-graph stamps accept <PROJECT_ROOT> --list   # show flagged sections
+axiom-graph stamps accept <PROJECT_ROOT> --all
+```
 
-That last step is the steady state: code drifts, `check` surfaces exactly the sections that drifted with it, you fix the prose, the save clears the flag. The mesh stays trustworthy because staleness is the read that keeps it that way. To see the full publish-and-republish cycle for a site built on these docs, see [the docs-honesty loop](../examples/docs-honesty-loop.md).
+From an agent, `axiom_graph_accept_doc_edits` does the same (`dry_run=true` to list, `all_flagged=true` to accept them all). It accepts all the sections you list or none: if one can't be accepted (unknown id, unreadable file, a doc being written by someone else), it returns one error naming each and writes nothing. `mark-clean` does not clear the flag. To turn detection off, set `raw_docjson_edits = "off"` under `[axiom_graph.docjson]`.
+
+Each section a doc tool saves carries an `axiom_stamp` in the file. Its `hash` is a fingerprint of the section's heading, content and links as the tool saved them, and it is not the `content_hash` a tool prints after a write: that one covers the section's text only and is what `expected_hash` checks. The stamp is how a build tells a tool's save from a hand edit, and it records the version of each linked code node the save was checked against.
+
+The stamp travels with the file through merges and pulls, and a section an agent wrote on another branch arrives in two parts. Its text arrives verified, because the stamp shows a tool wrote exactly that text. Each link arrives verified only if the code it links to is still at the version the stamp records; a link to code that has changed since, or that the save left open, keeps the state your checkout already had for it. So a merged section can read verified for its text and still be `LINKED_STALE` for one link.
+
+The same applies when a section a tool wrote is already flagged as changed because your index has not caught up with the merged file: if its stamp is still valid, the next build or `check` accepts it as a tool write and it reads verified. A section you edited by hand fails its stamp, so it stays flagged. A merged file nobody has built yet is picked up by the build after the merge, or by the second `check`.
+
+With the PEV plugin installed, a hook warns when an agent edits a `.docjson` file directly; set `PEV_DOCJSON_GUARD=block` to deny those edits instead.
+
+## Writing a document, start to finish
+
+1. Find code that needs docs: `axiom_graph_list_undocumented` lists code that no section links to.
+2. Write the document with `axiom_graph_write_doc`, with `links` on each section. It is indexed and verified as it is written. A file written by hand also works: run `axiom-graph build <PROJECT_ROOT>`, then `axiom-graph stamps accept <PROJECT_ROOT> --all`.
+3. Read it back with `axiom_graph_read_doc` to check the text and the links under each section, and add any you missed with `axiom_graph_add_link`.
+4. When code changes, `axiom-graph check <PROJECT_ROOT>` (or `axiom_graph_drift_query`) lists the sections that are `LINKED_STALE` (linked code changed) or `BROKEN_LINK` (linked node no longer exists).
+5. Fix each flagged section with `update_section` or `patch_section`. The save verifies it.
+
+[The docs-honesty loop](../examples/docs-honesty-loop.md) runs this cycle end to end and publishes the result as a site.

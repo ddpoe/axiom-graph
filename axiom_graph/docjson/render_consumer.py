@@ -35,6 +35,8 @@ from pathlib import Path
 
 import yaml
 
+from axiom_graph.index import doc_ids
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,7 +48,7 @@ def _strip_docid_links(markdown: str) -> str:
     """Reduce links that target an internal doc-id to plain text.
 
     A doc-id target contains ``::`` (e.g.
-    ``axiom_graph::docs.pev-requests.foo``). Such links are internal
+    ``axiom_graph::docs/pev-requests/foo``). Such links are internal
     references that must not leak into the public consumer site, so the
     link is collapsed to its visible text. Every other link -- relative
     page links, external URLs, intra-page anchors -- is left untouched.
@@ -209,21 +211,34 @@ class NavFolder:
 
 
 def _root_to_prefix(root: str) -> str:
-    """Derive the doc-id dotted prefix from the nav ``root`` source path.
+    """Derive the doc-id body prefix from the nav ``root`` source path.
 
-    ``docs/consumer`` -> ``consumer`` (the leading ``docs`` segment is the
-    scanner's docs dir and is consumed by the ``::docs.`` id prefix).
+    Delegates to the one derivation so a rendered doc ID cannot fall out of
+    step with the one the scanner indexed.  ``docs/consumer`` yields the body
+    prefix every document published under that boundary starts with.
 
     Args:
         root: The nav ``root`` value, a project-relative POSIX path.
 
     Returns:
-        Dotted prefix for doc-ids under this publish boundary.
+        Doc-id body prefix for documents under this publish boundary.
     """
-    parts = [p for p in root.replace("\\", "/").split("/") if p]
-    if parts and parts[0] == "docs":
-        parts = parts[1:]
-    return ".".join(parts)
+    return doc_ids.doc_id_body_prefix(root)
+
+
+def _nav_doc_id(project_id: str, prefix: str, rel_path: str) -> str:
+    """Return the doc ID for a nav entry at *rel_path* under *prefix*.
+
+    Args:
+        project_id: The project identifier.
+        prefix: Body prefix from :func:`_root_to_prefix`.
+        rel_path: POSIX path of the document beneath the publish boundary,
+            without its ``.json`` extension.
+
+    Returns:
+        The full doc node ID.
+    """
+    return f"{project_id}::{doc_ids.join_doc_id_body(prefix, rel_path)}"
 
 
 def parse_show(show: list, project_id: str, prefix: str, parent_rel: str = "") -> list:
@@ -247,7 +262,7 @@ def parse_show(show: list, project_id: str, prefix: str, parent_rel: str = "") -
         if isinstance(raw, str):
             stem = raw
             rel_path = f"{parent_rel}/{stem}" if parent_rel else stem
-            doc_id = f"{project_id}::docs.{prefix}.{rel_path.replace('/', '.')}"
+            doc_id = _nav_doc_id(project_id, prefix, rel_path)
             entries.append(
                 NavLeaf(
                     stem=stem,
@@ -271,13 +286,32 @@ def parse_show(show: list, project_id: str, prefix: str, parent_rel: str = "") -
     return entries
 
 
+#: Filename stem of a section folder's landing document.
+_FOLDER_LANDING_STEM = "index"
+
+
+def _has_folder_landing(folder_dir: Path) -> bool:
+    """Return whether *folder_dir* holds an ``index`` landing document.
+
+    The landing is ``index.docjson`` or ``index.json``: the extension never
+    reaches a doc id, so either names the folder's ``.../index`` document.
+
+    Args:
+        folder_dir: Absolute path of a section folder.
+
+    Returns:
+        True when a landing document file exists in the folder.
+    """
+    return doc_ids.existing_docjson_file(folder_dir, _FOLDER_LANDING_STEM) is not None
+
+
 def validate_site_nav(nav_data: dict, db_path: Path | None = None, source_root: Path | None = None) -> list[str]:
     """Validate the structure of parsed slim site nav data.
 
     Checks the v2 slim schema: required top-level keys (``site_name``,
     ``root``, ``show``); each ``show`` entry is a leaf string or a single-key
     section-folder mapping; section folders may not carry ``landing:`` when an
-    ``index.json`` exists in the folder on disk; and every leaf stem resolves
+    ``index.docjson`` / ``index.json`` exists in the folder on disk; and every leaf stem resolves
     to an indexed doc-id.
 
     Args:
@@ -324,9 +358,9 @@ def validate_site_nav(nav_data: dict, db_path: Path | None = None, source_root: 
                     errors.append(f"Unresolvable stem '{entry.rel_path}': no indexed doc with id {entry.doc_id}")
             elif isinstance(entry, NavFolder):
                 sub_dir = (folder_path / entry.stem) if folder_path is not None else None
-                if entry.landing is not None and sub_dir is not None and (sub_dir / "index.json").exists():
+                if entry.landing is not None and sub_dir is not None and _has_folder_landing(sub_dir):
                     errors.append(
-                        f"Section folder '{entry.rel_path}' has both index.json and "
+                        f"Section folder '{entry.rel_path}' has both an index document and "
                         f"landing: {entry.landing} -- ambiguous landing"
                     )
                 _walk(entry.children, sub_dir)
@@ -443,7 +477,7 @@ def build_site(
     doc-id links, prepends a provenance stamp, and writes the page to its
     mirrored nested output path under *output_dir* (so the output tree
     mirrors the ``docs/consumer/**`` source tree 1:1).  Each section folder
-    gets a landing page (``index.json`` convention / ``landing:`` override /
+    gets a landing page (``index.docjson`` / ``index.json`` convention / ``landing:`` override /
     synthetic ``# <Folder Name>``) with an appended ``{toctree}`` of its
     direct children.  Also generates the top-level ``index.md`` and a
     ``.render-manifest.json`` (nested output path -> doc_id + content hash)
@@ -488,7 +522,9 @@ def build_site(
     root = Path(project_root).resolve()
     db_path = db_path_for(root)
     cfg = AxiomGraphConfig.load(root)
-    project_id = cfg.project_id or root.name
+    from axiom_graph.index.builder import resolve_project_id
+
+    project_id = resolve_project_id(root, db_path, config=cfg)
 
     if nav_path is None:
         nav_path = root / cfg.site.nav_file
@@ -564,7 +600,7 @@ def build_site(
     def _folder_is_contentless(folder: NavFolder) -> bool:
         """True when a folder has no landing doc (synthetic-landing case c)."""
         folder_dir = source_root / folder.rel_path
-        return not (folder_dir / "index.json").exists() and not folder.landing
+        return not _has_folder_landing(folder_dir) and not folder.landing
 
     def _child_toctree(folder: NavFolder) -> list[str]:
         """Build a ``{toctree}`` listing a folder's DIRECT children only.
@@ -624,7 +660,7 @@ def build_site(
     def _render_folder(folder: NavFolder) -> None:
         """Render a section folder's landing page + nested child listing.
 
-        Landing precedence: (a) ``index.json`` in the folder -> render that
+        Landing precedence: (a) ``index.docjson`` / ``index.json`` in the folder -> render that
         doc; else (b) ``landing: <stem>`` -> render that named doc; else (c)
         a synthetic ``# <Folder Name>`` page.  In sphinx mode a ``{toctree}``
         of direct children is appended in all cases.  In plain mode (a)/(b)
@@ -634,9 +670,9 @@ def build_site(
         folder_dir = source_root / folder.rel_path
         landing_output = f"{folder.rel_path}/index.md"
 
-        index_doc_id = f"{project_id}::docs.{prefix}.{folder.rel_path.replace('/', '.')}.index"
-        if (folder_dir / "index.json").exists():
-            # (a) index.json convention
+        index_doc_id = _nav_doc_id(project_id, prefix, f"{folder.rel_path}/index")
+        if _has_folder_landing(folder_dir):
+            # (a) index.docjson / index.json convention
             doc_node = _db.get_node(db_path, index_doc_id)
             if doc_node is not None:
                 sections = _db.get_doc_sections(db_path, index_doc_id)
@@ -647,7 +683,7 @@ def build_site(
         elif folder.landing:
             # (b) named landing doc
             landing_rel = f"{folder.rel_path}/{folder.landing}"
-            landing_doc_id = f"{project_id}::docs.{prefix}.{landing_rel.replace('/', '.')}"
+            landing_doc_id = _nav_doc_id(project_id, prefix, landing_rel)
             doc_node = _db.get_node(db_path, landing_doc_id)
             if doc_node is not None:
                 sections = _db.get_doc_sections(db_path, landing_doc_id)
@@ -665,7 +701,7 @@ def build_site(
             body = f"# {folder_title}\n"
             _write_page(
                 landing_output,
-                f"{project_id}::docs.{prefix}.{folder.rel_path.replace('/', '.')}",
+                _nav_doc_id(project_id, prefix, folder.rel_path),
                 body,
                 extra_lines=_child_toctree(folder),
             )
@@ -676,7 +712,7 @@ def build_site(
             else:
                 _render_folder(child)
 
-    # A root-level ``index`` leaf (docs/consumer/index.json) is the guide's own
+    # A root-level ``index`` leaf (docs/consumer/index.docjson) is the guide's own
     # landing page.  Render it as the page body with the nav toctree appended --
     # mirroring the folder index.json convention -- rather than letting the
     # generated toctree clobber the authored thesis page.

@@ -1,105 +1,83 @@
-<!-- generated from axiom_graph::docs.consumer.concepts.ontology @ 24dfde617563; do not edit -->
+<!-- generated from axiom_graph::docs/consumer/concepts/ontology @ 751540b69193; do not edit -->
 
-# The Ontology
+# Node and Edge Types
 
-## Node Types
+## Node types
 
-axiom-graph does not model your codebase as "files and symbols." It models it as **processes and entities**, using a type system derived from the W3C Provenance Ontology (PROV-O). This is a deliberate, principled choice: a node type describes the *role* a thing plays in getting work done, not the language construct it happens to be written in. A Python function, a JavaScript arrow function, an axiom-annotation `@task`, and a doc section are all the *same shape* of thing — a unit of work — so they share a type.
+Every node is an `atomic_process` or a `composite_process`. The type is the role a node plays, not its language, so a Python function and a TypeScript function are both `atomic_process`.
 
-There are exactly **three** structural node types. (The model started with five; [ADR-009](the-mesh.md) collapsed `document` and `constraint` into the process/entity split, because almost everything in a codebase is either something that *does* work or something that work *consumes or produces*.)
-
-| Node Type | What it represents | Examples |
+| Type | What it is | Examples |
 |---|---|---|
-| **atomic_process** | The smallest meaningful unit of work — a leaf with no sub-parts. | A Python function, a test, a single doc section, a workflow step |
-| **composite_process** | A container that orchestrates or holds other processes. Scale-invariant. | A module, a package, a doc file, a config file, a `@workflow`, an xstate state machine |
-| **entity** | Data consumed or produced by a process — not logic. | A third-party package, a data file, a trained model, a config artifact |
+| `atomic_process` | A single unit of work | a function or method, a test, a doc section, a `Step` marker, a simple xstate state |
+| `composite_process` | A container of other nodes | a module, a doc file, a config file, a `@workflow` or `@task` envelope, a state machine |
 
-The key idea is **scale-invariance** for composite processes: a module, a package, a pipeline, and a `@workflow` envelope are all `composite_process`. The model does not care how big the container is, only that it contains other processes. Entities sit at the edges of the graph — they are always treated as CLEAN by [staleness](staleness.md) checks, because a data file has no logic to drift.
-
-Concretely: a `main()` and the test that exercises it are both `atomic_process`; the module holding them and the `@workflow` that wraps it are both `composite_process`; the pandas they import is an `entity`.
-
-This principled typing is what lets one mesh hold code, docs, tests, and orchestration together. Because everything is reduced to three shapes plus subtypes, an agent (or you) can traverse from a doc section straight to the function it documents without ever leaving the type system — that is the context-reduction payoff of [the mesh](the-mesh.md).
+To filter by type, use `axiom-graph list --type atomic_process` or the `node_type` argument of `axiom_graph_list` and `axiom_graph_search`.
 
 ## Subtypes
 
-Each of the three node types carries an optional **subtype** that records what kind of process or entity it is. The structural type drives validation and propagation; the subtype is the human- and agent-readable detail.
+The subtype says what kind of node it is within its type.
 
-| Subtype | Node Type | Meaning |
+| Subtype | Type | What it is |
 |---|---|---|
-| `function` | atomic_process | A Python function or method, or a JS/TS function |
-| `test` | atomic_process | A test function (identified by a `test_` prefix or a test-file location) |
-| `docjson` | atomic_process | A single section within a DocJSON file |
-| `step` | atomic_process | A `Step(...)` marker inside a `@workflow` / `@task` body |
-| `autostep` | atomic_process | An `AutoStep(...)` marker — a step whose next call is recorded as a `delegates_to` edge |
-| `state` | atomic_process | A leaf (simple) state in an xstate v5 machine |
-| `docjson` | composite_process | A DocJSON file (contains sections via `composes` edges) |
-| `config` | composite_process | A configuration file (settings, hooks, skills) |
-| `workflow` | composite_process | A function decorated with `@workflow` |
-| `task` | composite_process | A function decorated with `@task` |
-| `state_machine` | composite_process | An xstate v5 `createMachine(...)` envelope |
-| `state` | composite_process | A compound (non-leaf) xstate state with substates |
-| `external_package` | entity | A third-party dependency outside the standard library |
-| `data_artifact` | entity | A data file or dataset a workflow consumes or produces |
-| `config_artifact` | entity | A configuration artifact (e.g. a hyperparameter set) |
-| `model_artifact` | entity | A trained model produced by a workflow |
+| `function` | atomic_process | A Python or JS/TS function or method |
+| `test` | atomic_process | A test function (see below) |
+| `docjson_section` | atomic_process | A section of a DocJSON document |
+| `docjson` | atomic_process | A `##` section of a Markdown doc |
+| `step` | atomic_process | A `Step(...)` marker inside a `@workflow` or `@task` function |
+| `autostep` | atomic_process | An `AutoStep(...)` marker |
+| `state` | atomic_process | An xstate state with no nested states |
+| `module` | composite_process | A Python or JS/TS file |
+| `docjson_doc` | composite_process | A DocJSON document |
+| `docjson` | composite_process | A Markdown doc file |
+| `config` | composite_process | A file in a config directory |
+| `workflow` | composite_process | A `@workflow` envelope |
+| `task` | composite_process | A `@task` envelope |
+| `state_machine` | composite_process | An xstate machine (`createMachine(...)`) |
+| `state` | composite_process | An xstate state with nested states |
 
-Note that some subtype *names* appear under more than one structural type. A `docjson` atomic_process is one **section**; a `docjson` composite_process is the whole **file** that composes those sections — granular documentation falls straight out of the type system, since each section is its own addressable node. Likewise `state` is an atomic_process when it is a leaf state and a composite_process when it nests substates.
+A Python test is a function or method whose name starts with `test` in a `test_*.py` or `*_test.py` file (fixtures and nested functions excluded), or a `test_*` function in any other file. In JS/TS, every function in a test file (`*.test.*`, `*.spec.*`, `test_*`, `*_test`, `*_spec`) is a test.
 
-The `workflow`, `task`, `step`, `autostep`, `state_machine`, and `state` subtypes belong to the semantic layer — the annotated orchestration highways covered in [Annotations](annotations.md). They are how axiom-graph records *intent* and *step order* through a pipeline without trying to build a full call graph.
+Envelopes, steps and state machines are covered in [annotations](annotations.md).
 
-## Edge Types
+## Edge types
 
-If node types are the nouns, **edges are the verbs — and they are intent-typed.** Each edge declares *why* two nodes are related, not merely that they reference each other. This is the single biggest difference between axiom-graph and a generic call graph or import graph: `documents`, `validates`, and `delegates_to` are first-class semantics, not labels stapled onto a raw reference.
-
-| Edge Type | From → To | Meaning |
-|---|---|---|
-| `composes` | composite → atomic / composite | Structural containment: module → function, doc file → section, workflow → step |
-| `depends_on` | process → process / entity | Import or execution dependency |
-| `delegates_to` | process → process | Runtime invocation across a boundary; also how an `AutoStep` records the task it calls |
-| `annotates` | composite → atomic / composite | A `@workflow` / `@task` envelope annotates the underlying function (one per decorated function) |
-| `validates` | atomic → atomic / composite | Test coverage: a test verifies a function |
-| `documents` | process → any | A doc section describes a node |
-| `consumes` | process → entity | A process reads an entity as input |
-| `produces` | process → entity | A process creates an entity as output |
-| `constrains` | atomic → process / entity | A schema or contract restricts behavior |
-| `supersedes` | process → process | A replacement obsoletes the thing it replaces |
-
-The edges you will meet most often are `composes`, `depends_on`, `documents`, and `validates`. Because intent is encoded in the edge, the *same typed mesh* answers two very different questions with one read: "what does this depend on?" (traverse `depends_on`) and "what is now out of date?" (a [staleness](staleness.md) read that follows `documents` and `validates`). The mesh is the product; drift detection and intent-scoped retrieval are just two reads against it.
-
-Edge intent also determines how far drift travels. Propagation depth is chosen by what an edge *means*, not by uniform graph distance — `validates` propagates one hop (test → production), `documents` is transitive (doc → doc → code), and `annotates` is one hop. That transitive `documents` chain is exactly what lets consumer docs like this one ride a code → dev-doc → consumer-doc path and inherit staleness when the underlying code changes.
-
-## Build-Time Validation
-
-The type system is not advisory — it is **enforced**. Every node type, edge type, and the legal node-type pairings for each side of every edge are declared in a single file, `axiom_graph/ontology.yaml`. When you run a build, the builder checks each edge against these rules, and **an edge whose endpoints violate the ontology fails the build.**
-
-This is what keeps the mesh trustworthy. You cannot, for example, point a `validates` edge from a doc section, or hang a `composes` edge off an `atomic_process` — the schema forbids it, so the graph can never drift into an incoherent shape. The rules are precise: `composes` may only go from a composite to a process; `consumes` and `produces` may only target an entity; `annotates` runs strictly from an envelope to its function.
-
-Validation runs as part of the normal index build:
-
-```bash
-axiom-graph build
-```
-
-Because the ontology lives in one declarative YAML file rather than being scattered through scanner code, the type system is also where axiom-graph's framework-awareness is extended. Teaching the indexer a new declarative framework means adding its node and edge shapes here — the xstate v5 scanner (which introduced the `state_machine` and `state` subtypes) is the proven example of that extensibility in action.
-
-## Language Support
-
-The payoff of a process-centric type system is that **languages share types.** axiom-graph currently scans two languages, plus xstate v5 state machines as a concept extracted on top of JS/TS.
-
-| Language | Scanner | What it captures | Install |
+| Edge | From → to | Meaning | Created by |
 |---|---|---|---|
-| **Python** | AST-based | Functions, methods, classes, modules, packages, imports, docstrings, decorators, `@workflow` / `@task` envelopes, `Step` / `AutoStep` markers | Built in — no extra install |
-| **JavaScript / TypeScript** | tree-sitter | Named functions, arrow functions, class and object methods, HOF wrappers, ESM imports, test-runner calls, xstate v5 machines | `pip install axiom-graph[js]` |
+| `composes` | process → process | X contains Y | module → function, module → `@workflow` or `@task` envelope, function → nested function, document → section, section → subsection, envelope → step, machine → state |
+| `depends_on` | process → process | X imports or uses Y | module imports; Python functions that use an imported project module |
+| `delegates_to` | process → process | X hands off to Y | an `AutoStep` marker and the function called after it; xstate transitions and invoked actors |
+| `annotates` | composite → process | envelope X describes function Y | each `@workflow` or `@task` |
+| `validates` | process → process | test X calls Y | Python tests and the project functions they call |
+| `documents` | doc section → any node | doc section X describes Y | the `links` of a DocJSON section |
 
-Python support is comprehensive and included by default. The JS/TS scanner is an optional dependency: when tree-sitter is not installed, `.js` and `.ts` files are silently skipped rather than erroring.
+*Process* means `atomic_process` or `composite_process`; *composite* means `composite_process`.
 
-The important point is that **both languages feed the same three node types.** A Python function and a JS/TS function both become an `atomic_process` with subtype `function`. A Python module and a JS/TS module both become a `composite_process` (with no subtype — the language is implicit in the file path, so the model needs no per-language node types). Tests, imports, and dependencies map onto the same `validates`, `depends_on`, and `composes` edges regardless of source language. The xstate scanner is the only place that adds language-specific subtypes — `state_machine` and `state` — and it does so by extending the ontology, not by forking it.
+The scanners create every edge except `documents`. To add one, add a link to the doc section, for example with `axiom_graph_add_link` (see [DocJSON](docjson.md)). Which edges carry drift is covered in [staleness](staleness.md).
 
-To turn on JS/TS scanning, point axiom-graph at the paths to scan in your `axiom-graph.toml`:
+## How edges are checked
+
+The node types, edge types and allowed endpoints above are defined in `ontology.yaml`, which ships inside the axiom-graph package.
+
+`axiom-graph link` refuses an edge whose endpoints break these rules and prints the endpoints that are allowed. A build checks every edge the same way and lists any that break the rules under `warnings` in its output.
+
+## Language support
+
+| Source | What becomes nodes and edges | Setup |
+|---|---|---|
+| Python (`.py`) | modules, functions, methods, nested functions, imports, tests, `@workflow` / `@task` envelopes and their `Step` / `AutoStep` markers | Built in. Every `.py` file under the project root outside excluded directories |
+| JavaScript / TypeScript (`.js`, `.jsx`, `.ts`, `.tsx`) | modules, named functions, arrow functions assigned to a `const`, class and object methods, `import` statements, tests, `workflow(...)(fn)` / `task(...)(fn)` envelopes and their markers | `pip install "axiom-graph[js]"`, then set `js_paths` |
+| xstate v5 machines in JS/TS files | `createMachine({...})` and `setup({...}).createMachine({...})`: the machine, its states and its transitions | Same as JS/TS |
+| DocJSON (`.docjson`, `.json`) | documents, sections, and section links | Built in. Files under `docs_dirs` |
+| Markdown (`.md`) | the file and each `##` section | Built in. Files under `docs_dirs` |
+| Config files (`.md`, `.json`, `.yaml`, `.yml`, `.toml`) | one node per file | Built in. Files under `config_dirs` (default `.claude`) |
+
+JS/TS tests get the `test` subtype but no `validates` edges; only Python tests are linked to the code they call. JS/TS dependencies come from `import` statements only, not `require()`.
+
+JS/TS scanning is off until you list paths in `axiom-graph.toml`:
 
 ```toml
 [axiom_graph.scan]
 js_paths = ["src/**/*.ts", "lib/**/*.js"]
 ```
 
-See [Configuration](../get-started/configuration.md) for the full set of scan settings. Because the type schema is shared, a single graph traversal crosses language boundaries seamlessly — an agent following the mesh never has to know, or care, which language a given node was written in.
+If `js_paths` is set but the `js` extra is not installed, the build skips those files and prints a warning telling you to install it. [Configuration](../get-started/configuration.md) covers all the scan settings.

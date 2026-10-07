@@ -57,20 +57,38 @@ def test_connect_enables_wal_mode(db_path: Path) -> None:
 
 
 def test_connect_uses_timeout(db_path: Path) -> None:
-    """_connect() passes timeout=5 so a second writer waits instead of failing immediately."""
-    blocker = sqlite3.connect(str(db_path), timeout=0)
-    blocker.execute("PRAGMA journal_mode=WAL")
-    blocker.execute("BEGIN EXCLUSIVE")
+    """_connect() waits for another writer's lock instead of failing at once, then writes."""
+    held = threading.Event()
+    errors: list[BaseException] = []
 
-    def release():
-        time.sleep(0.3)
-        blocker.rollback()
-        blocker.close()
+    def hold_write_lock() -> None:
+        try:
+            blocker = sqlite3.connect(str(db_path), timeout=0, isolation_level=None)
+            try:
+                blocker.execute("PRAGMA journal_mode=WAL")
+                blocker.execute("BEGIN IMMEDIATE")
+                held.set()
+                time.sleep(0.3)
+                blocker.execute("ROLLBACK")
+            finally:
+                blocker.close()
+        except BaseException as exc:  # noqa: BLE001 - reported by the test thread
+            errors.append(exc)
+            held.set()
 
-    threading.Thread(target=release, daemon=True).start()
-
+    thread = threading.Thread(target=hold_write_lock)
+    thread.start()
+    assert held.wait(5)
+    assert errors == []
+    started = time.monotonic()
     with db._connect(db_path) as conn:
-        conn.execute("SELECT count(*) FROM nodes")
+        db.upsert_node_conn(conn, _make_node("pkg::mod::written_after_wait"))
+    waited = time.monotonic() - started
+    thread.join()
+    assert errors == []
+    assert waited >= 0.2, f"the write did not wait for the lock ({waited:.3f}s)"
+    with db._connect(db_path) as conn:
+        assert conn.execute("SELECT 1 FROM nodes WHERE id = 'pkg::mod::written_after_wait'").fetchone()
 
 
 def test_connect_enables_foreign_keys(db_path: Path) -> None:

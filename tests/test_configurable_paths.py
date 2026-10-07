@@ -172,7 +172,7 @@ def test_multi_root_docs_build_indexes_both_roots(tmp_path):
         all_ids = {r[0] for r in rows}
         rows2 = conn.execute("SELECT id FROM nodes WHERE source='doc_scanner'").fetchall()
         all_md_ids = {r[0] for r in rows2}
-    assert "proj::docs.bar" in all_ids, f"specs/ DocJSON not indexed: {all_ids}"
+    assert "proj::specs/bar" in all_ids, f"specs/ DocJSON not indexed: {all_ids}"
     # Markdown node IDs use the docs prefix
     assert any("foo" in nid for nid in all_md_ids | all_ids), "docs/ md not indexed"
 
@@ -203,8 +203,8 @@ def test_backward_compat_default_config_node_ids(tmp_path):
             ).fetchall()
         }
     # These IDs match the pre-change canonical derivation.
-    assert "proj::docs.foo" in ids
-    assert "proj::docs.foo::intro" in ids
+    assert "proj::docs/foo" in ids
+    assert "proj::docs/foo::intro" in ids
     # Backward-compat guard: default config with no explicit docs_dirs /
     # config_dirs must not emit new warnings, even when .claude/ is absent
     # (which is the case for this fixture — only docs/ was created).
@@ -458,8 +458,8 @@ def test_render_level_1_appends_location_for_doc_nodes():
 
     out = render_level_1(
         [
-            _node("proj::docs.test-policy", "docjson_doc", "specs/test-policy.json"),
-            _node("proj::docs.test-policy::budget", "docjson_section", "specs/test-policy.json"),
+            _node("proj::docs/test-policy", "docjson_doc", "specs/test-policy.json"),
+            _node("proj::docs/test-policy::budget", "docjson_section", "specs/test-policy.json"),
             _node("proj::mod::fn", "function", "src/mod.py#L10-L45"),
             _node("proj::mod", "module", "src/mod.py"),
         ]
@@ -517,8 +517,8 @@ def test_api_docs_listing_carries_file_path_for_every_root(tmp_path):
     assert resp.status_code == 200
 
     by_id = {d["id"]: d for d in resp.json()["docs"]}
-    primary = by_id.get("proj::docs.primary")
-    secondary = by_id.get("proj::docs.secondary")
+    primary = by_id.get("proj::docs/primary")
+    secondary = by_id.get("proj::specs/secondary")
     assert primary is not None, f"primary-root doc missing from listing: {sorted(by_id)}"
     assert secondary is not None, f"secondary-root doc missing from listing: {sorted(by_id)}"
 
@@ -538,8 +538,8 @@ def test_write_doc_without_docs_root_writes_under_primary(tmp_path):
     project = _multi_root_project(tmp_path)
     res = axiom_graph_write_doc(str(project), {"id": "alpha", "title": "Alpha", "sections": []})
     assert "Wrote" in res, res
-    assert (project / "docs" / "alpha.json").is_file()
-    assert not (project / "specs" / "alpha.json").exists()
+    assert (project / "docs" / "alpha.docjson").is_file()
+    assert not (project / "specs" / "alpha.docjson").exists()
 
 
 @workflow(
@@ -557,14 +557,14 @@ def test_write_doc_into_secondary_root_matches_scanner_derived_id(tmp_path):
         docs_root="specs",
     )
     assert "Wrote" in res, res
-    assert (project / "specs" / "policy.json").is_file(), "file must land under the requested root"
+    assert (project / "specs" / "policy.docjson").is_file(), "file must land under the requested root"
 
     builder.build(project)
     db_path = db_path_for(project)
     with db_mod._connect(db_path) as conn:
-        rows = conn.execute("SELECT id, file_path FROM docs WHERE id = 'proj::docs.policy'").fetchall()
+        rows = conn.execute("SELECT id, file_path FROM docs WHERE id = 'proj::specs/policy'").fetchall()
     assert len(rows) == 1, f"write_doc id must match the scanner's derivation exactly, got {rows}"
-    assert rows[0][1] == "specs/policy.json"
+    assert rows[0][1] == "specs/policy.docjson"
 
 
 def test_write_doc_docs_root_composes_with_subdir_slug(tmp_path):
@@ -577,7 +577,7 @@ def test_write_doc_docs_root_composes_with_subdir_slug(tmp_path):
         {"id": "sops/nested", "title": "Nested", "sections": []},
         docs_root="specs",
     )
-    assert (project / "specs" / "sops" / "nested.json").is_file()
+    assert (project / "specs" / "sops" / "nested.docjson").is_file()
 
 
 def test_write_doc_unknown_docs_root_errors_and_writes_nothing(tmp_path):
@@ -593,7 +593,7 @@ def test_write_doc_unknown_docs_root_errors_and_writes_nothing(tmp_path):
     assert res.startswith("ERROR"), res
     assert "docs" in res and "specs" in res, f"error must list the configured roots: {res}"
     assert not (project / "nope").exists()
-    assert not (project / "docs" / "stray.json").exists()
+    assert not (project / "docs" / "stray.docjson").exists()
 
 
 def test_write_doc_overwrites_existing_doc_in_secondary_root(tmp_path):
@@ -611,7 +611,7 @@ def test_write_doc_overwrites_existing_doc_in_secondary_root(tmp_path):
             },
             docs_root="specs",
         )
-    on_disk = json.loads((project / "specs" / "mutable.json").read_text(encoding="utf-8"))
+    on_disk = json.loads((project / "specs" / "mutable.docjson").read_text(encoding="utf-8"))
     assert on_disk["sections"][0]["content"] == "second"
 
 
@@ -621,10 +621,16 @@ def test_write_doc_overwrites_existing_doc_in_secondary_root(tmp_path):
 
 
 @workflow(
-    purpose="Verify the build surfaces a warning when two configured docs roots derive the same doc id",
+    purpose="Verify the same filename under two configured docs roots derives two identities and warns about nothing",
 )
-def test_duplicate_doc_id_across_roots_emits_warning(tmp_path):
-    """Same filename in two roots collapses to one id — the build says so."""
+def test_same_filename_in_two_roots_derives_two_ids_and_does_not_warn(tmp_path):
+    """The root is part of the identity, so this is two documents, not one.
+
+    This case used to collapse to a single id and the build warned about it,
+    which was the best it could do: one of the two files was silently absent
+    from the index and the warning was the only trace. The root now namespaces
+    the id, so both documents exist and there is nothing to report.
+    """
     _write_toml(
         tmp_path / "axiom-graph.toml",
         '[axiom_graph]\nproject_id = "proj"\n[axiom_graph.scan]\ndocs_dirs = ["docs", "specs"]\n',
@@ -634,10 +640,12 @@ def test_duplicate_doc_id_across_roots_emits_warning(tmp_path):
     from axiom_graph.index import builder
 
     result = builder.build(tmp_path)
-    collisions = [w for w in result["warnings"] if "proj::docs.collide" in w]
-    assert collisions, f"duplicate doc id must warn, got: {result['warnings']}"
-    assert "docs/collide.json" in collisions[0] and "specs/collide.json" in collisions[0], (
-        f"warning must name both source files: {collisions[0]}"
+    with db_mod._connect(db_path_for(tmp_path)) as conn:
+        by_id = {r[0]: r[1] for r in conn.execute("SELECT id, file_path FROM docs").fetchall()}
+    assert by_id.get("proj::docs/collide") == "docs/collide.json", by_id
+    assert by_id.get("proj::specs/collide") == "specs/collide.json", by_id
+    assert not [w for w in result["warnings"] if "collide" in w], (
+        f"two identities leave nothing to warn about: {result['warnings']}"
     )
 
 

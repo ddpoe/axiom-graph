@@ -9,6 +9,8 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
+import pytest
+
 
 # ---------------------------------------------------------------------------
 # 1. Config: js_paths field
@@ -156,6 +158,26 @@ class TestImportResolution:
         # No depends_on edge for type-only import
         dep_edges = [e for e in edges if e.edge_type == "depends_on"]
         assert not any("types" in e.to_id for e in dep_edges)
+
+    @pytest.mark.parametrize(
+        ("import_path", "expected"),
+        [
+            ("./a.machine", "a.machine.ts"),
+            ("./a.machine.js", "a.machine.ts"),
+            ("./a", "a.ts"),
+            ("./a.js", "a.ts"),
+            ("./dir", "dir/index.ts"),
+        ],
+    )
+    def test_relative_import_resolves_dotted_and_plain_names(self, tmp_path: Path, import_path: str, expected: str):
+        """An extension is appended to the full name, so a dotted filename never resolves to its stem."""
+        from axiom_graph.scanners.js_scanner import _resolve_import_path
+
+        for name in ("a.ts", "a.machine.ts", "dir/index.ts"):
+            (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / name).write_text("export const x = 1;\n")
+        resolved = _resolve_import_path(import_path, tmp_path / "main.ts", tmp_path)
+        assert resolved == (tmp_path / expected).resolve()
 
     def test_namespace_import(self, tmp_path: Path):
         from axiom_graph.scanners.js_scanner import scan_js_module

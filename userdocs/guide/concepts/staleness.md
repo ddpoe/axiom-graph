@@ -1,188 +1,208 @@
-<!-- generated from axiom_graph::docs.consumer.concepts.staleness @ 82e61794978c; do not edit -->
+<!-- generated from axiom_graph::docs/consumer/concepts/staleness @ 395af2934dee; do not edit -->
 
-# Staleness: the engine that keeps the mesh trustworthy
+# Staleness
 
-## Drift is a read on the mesh
+## What staleness tracks
 
-Code changes faster than the prose that describes it. A developer renames a parameter, refactors a function body, or deletes a module, and the docs that describe that code silently become wrong. Anyone reading those docs (human or agent) then makes decisions on information that no longer matches reality.
+axiom-graph flags code and docs that changed since someone last checked them, along with the docs, tests and workflows linked to them that may now be out of date. It follows the same links you navigate in [the mesh](the-mesh.md): a doc section that `documents` a function is flagged when the function changes.
 
-Staleness is how axiom-graph stops that. Recap, if you came from [the mesh](the-mesh.md#two-reads-one-mesh): drift detection is not a separate system bolted on beside the index. It is **a read against the same typed mesh** you use for context retrieval. When you ask the mesh which doc sections describe a function, you traverse `documents` edges. When that function changes, staleness propagates along *exactly those same edges* to flag every linked section, test, and workflow envelope. Intent-scoped retrieval and drift detection are two reads against one mesh; the mesh is the drift system.
+`axiom-graph build` and `axiom-graph check` update the flags, and the MCP tools bring the flags they show up to date before they answer. A flag tells you what to review. Once you have reviewed a node and fixed anything wrong, you verify it: axiom-graph records who checked it and clears the flag.
 
-That is why staleness is the engine, not a feature. Every time you run `axiom-graph check` (or `axiom-graph build`, which checks as it indexes), the engine compares the current state of your code against the last reviewed baseline and reports precisely which nodes need attention and why. When axiom-graph says a node is verified, it means the code it tracks has not changed since a human or trusted agent last reviewed it. When it says something is stale, it tells you what changed and through which edge.
+## Statuses
 
-Because the signal lives on the mesh, you read only what drifted. You do not re-scan the whole project or re-read whole files; you ask the engine for only the nodes that drifted and act on them. That is the same context-reduction discipline the rest of axiom-graph is built on, turned on the documentation itself.
+Each node has two statuses. Its **own status** says whether the node itself changed. Its **link status** says whether something it links to changed. The two are independent: a doc section can be `CONTENT_UPDATED` because you edited it and `LINKED_STALE` because the function it describes changed.
 
-## The two-column status model
-
-Every node carries **two independent status columns**: `own_status` (has this node's own content changed?) and `link_status` (have the things it depends on changed?). They move independently. A doc section can be `CONTENT_UPDATED` because you edited its prose *and* `LINKED_STALE` because the function it documents also changed, at the same time.
-
-### own_status (the content dimension)
+Own status:
 
 | Status | Meaning |
 |---|---|
-| `VERIFIED` | Content matches the last reviewed baseline. Current. |
-| `DESC_UPDATED` | Only the descriptor changed: a function's docstring, or a doc section's heading. |
-| `CONTENT_UPDATED` | The primary content changed: a function body, or a doc section's prose. |
-| `RENAMED` | The node's identity moved to a new location via rename detection (see [renames](staleness.md#renames-not_found-and-the-rename-lifecycle)). |
-| `NOT_FOUND` | The file or node no longer exists on disk. Deleted or moved without a detected match. |
+| `VERIFIED` | Matches the version last verified. |
+| `DESC_UPDATED` | Only the description changed, such as a function's docstring. |
+| `CONTENT_UPDATED` | The content changed: a function's body, or a doc section's text. |
+| `RENAMED` | The node was renamed or moved, and its history and links moved with it. |
+| `NOT_FOUND` | The node is no longer in its file, or the file is gone. |
 
-These form a severity ladder: `VERIFIED` < `DESC_UPDATED` < `CONTENT_UPDATED` < `RENAMED` < `NOT_FOUND`. When a container (a module or a document file) inherits status from its children, it shows the worst one, so problems surface at the container level without drilling into every leaf.
-
-### link_status (the dependency dimension)
+Link status:
 
 | Status | Meaning |
 |---|---|
-| `VERIFIED` | Everything this node links to is healthy. |
-| `LINKED_STALE` | Something this node references changed. The doc may no longer describe current behavior. |
-| `BROKEN_LINK` | This node links to a node ID that no longer exists in the index. |
+| `VERIFIED` | Nothing it links to changed since it was last verified. |
+| `LINKED_STALE` | Something it documents, tests or wraps changed after it was last verified. |
+| `BROKEN_LINK` | It links to a node ID that is not in the index. |
 
-The payoff of two columns is precision. `CONTENT_UPDATED` says "the author touched this"; `LINKED_STALE` says "reality moved under this." They demand different responses, so the engine never collapses them into one undifferentiated "stale" flag.
+A module or a doc shows the worst status among its parts, so one stale section marks its whole doc. From least to most severe, own statuses run `VERIFIED`, `DESC_UPDATED`, `CONTENT_UPDATED`, `RENAMED`, `NOT_FOUND`, and link statuses run `VERIFIED`, `LINKED_STALE`, `BROKEN_LINK`.
 
-## How detection works
+## What flags a node
 
-The engine checks cheap signals first and only does expensive work when something actually changed.
+`build` and `check` compare each node with the version last verified. The first time a node is indexed, that version is its baseline. A function's body and its docstring are compared separately.
 
-1. **File existence.** If a file is gone, every node from it is `NOT_FOUND` immediately.
-2. **Timestamp fast path.** If the file's mtime matches the stored baseline, all its nodes stay `VERIFIED` with no parsing. Checks over an unchanged project are nearly instantaneous.
-3. **Hash comparison.** For modified files, the engine re-parses and compares per-node content and descriptor hashes against the baseline. Content hash changed gives `CONTENT_UPDATED`; only the descriptor changed gives `DESC_UPDATED`; both changed reports `CONTENT_UPDATED` (the stronger signal); neither changed (the file was touched but the node's content is identical) stays `VERIFIED`.
-4. **Link analysis.** For every doc section that links to code, the engine asks: (a) has the linked code drifted since baseline, and (b) is there a verification snapshot on the doc newer than that drift? If (a) is yes and (b) is no, the section is `LINKED_STALE`. The same two-pass logic runs for tests that validate code.
-5. **Composite inheritance.** Modules and document files inherit the worst status from their children, surfacing trouble at the container level.
-6. **Verification promotion.** If a node has a verification snapshot whose hashes still match the current content, it is promoted back to `VERIFIED`, even if the file was otherwise modified.
+| Change | What is flagged |
+|---|---|
+| A function's body changes | The function is `CONTENT_UPDATED`. Doc sections linked to it, tests that exercise it, and the `@workflow` or `@task` on it become `LINKED_STALE`. |
+| Only a function's docstring changes | The function is `DESC_UPDATED`. The `@workflow` or `@task` on it becomes `LINKED_STALE`. Linked doc sections and tests are not flagged. |
+| The body of a task called through an `AutoStep` changes | The workflow that calls it becomes `LINKED_STALE`, through any chain of AutoSteps. |
+| A doc section's text changes | The section is `CONTENT_UPDATED`. |
+| A node disappears | The node is `NOT_FOUND`. |
+| A link points at a node that is not in the index | The section, test or workflow holding the link is `BROKEN_LINK`. |
 
-Each edge type propagates to a deliberately chosen depth, because a full call graph would flag every transitive caller and produce a backlog no one reviews. axiom-graph propagates by what each relationship *means*:
+**What a section is compared with.** Verifying a doc section or test records the version of each function it links to. The section is flagged while any of those functions is at another version. If a function goes back to the version the section was checked against, the flag clears on the next `check`. So an edit you revert leaves nothing to review, and a section you verified against the new code is flagged again if the code is reverted.
 
-| Edge | Source to target | Propagation |
-|---|---|---|
-| `validates` | test to production code | 1 hop |
-| `documents` | doc section to code, or doc to doc | Transitive, fixed-point, tag-gated |
-| `annotates` | workflow envelope to function | 1 hop |
-| `delegates_to` | AutoStep to task | Transitive, cycle-guarded |
+The doc tools verify the text they write, so a section's own status reads `CONTENT_UPDATED` only when its text was changed outside them.
 
-A docstring edit flips the workflow that `annotates` the function, but not every caller. A function-body change flips all linked doc sections and tests directly, and cascades to downstream consumer docs through the transitive loop on `documents` edges.
-
-## LINKED_STALE and transitive propagation
-
-`LINKED_STALE` is the engine's most useful signal. It answers "which documentation needs review because the code it describes changed?"
-
-When you link a doc section to a code node, you are telling the mesh "this prose describes that code." From then on, any change to that code flags the section `LINKED_STALE`. The output carries a **breadcrumb** so you know exactly where to look:
+`check` also prints a line for each file whose functions and the index disagree:
 
 ```
-docs.architecture::caching-layer   VERIFIED   LINKED_STALE   via myproject::cache::invalidate
+config.py has 1 new function — run build
 ```
 
-That reads: the caching-layer section is stale because `invalidate` changed.
+A new function joins the index on the next `build`. A function that is gone from its file stays `NOT_FOUND` until you record its rename or purge it (see [Renames and deleted code](staleness.md#renames-and-deleted-code)).
 
-### Transitive propagation
+The workflow markers are described in [annotations](annotations.md).
 
-User-facing docs rarely link straight to code. A guide links to a developer spec section, which links to code:
+## How a change reaches a doc
 
-```
-Consumer doc section  -->  Dev spec section  -->  Code node
-```
+When a doc section links to code (see [DocJSON](docjson.md)), a change to the code's body makes the section `LINKED_STALE`. `check` names the cause in its `via` column, with `(+N more)` when there are several.
 
-Without transitive propagation, a code change would flag the dev spec but the consumer doc would drift in silence. So axiom-graph propagates `LINKED_STALE` across `documents` edges as a cycle-guarded fixed-point: if the dev spec goes stale, every consumer section that links to it goes stale too, and the breadcrumbs trace the whole chain.
-
-```
-docs.consumer.guide::how-it-works   VERIFIED   LINKED_STALE   via docs.design::architecture
-docs.design::architecture           VERIFIED   LINKED_STALE   via myproject::core::process
-```
-
-Follow the trail: the consumer doc is stale because the design spec is stale, which is stale because `process()` changed.
-
-Transitive propagation is opt-in and tag-gated. You list the participating tags in `axiom-graph.toml` (see [configuration](../get-started/configuration.md)):
+User-facing docs usually link to a section of a developer doc rather than to code. To pass the flag along those doc-to-doc links, list the tags of the linking docs in `transitive_tags` (see [configuration](../get-started/configuration.md)):
 
 ```toml
 [axiom_graph.staleness]
 transitive_tags = ["consumer"]
 ```
 
-Only docs carrying a listed tag pick up transitive signals. Developer specs that link to other specs are unaffected unless their tag is included. A companion `frozen_tags` setting does the opposite, holding historical docs (ADRs, plans, completed PEV cycles) out of propagation so they stay as written.
+A section in a doc tagged `consumer` that links to another doc section then becomes `LINKED_STALE` whenever that section is, through any number of hops. Without a listed tag, links between docs carry no flag. Only `LINKED_STALE` travels this way: editing a section's text does not flag the sections that link to it.
 
-## LINKED_STALE is sticky
-
-The core invariant: **editing is not verification.** A doc section's prose can sit untouched while the linked code's contract shifts, and a single edit can be cosmetic, a typo fix, or entirely unrelated to the drift. Treating any edit as "resolved" would hide exactly the problem the engine exists to surface.
-
-So `LINKED_STALE` is **sticky**. It does *not* clear when you:
-
-- edit the doc's prose,
-- run another `check`, or
-- update (or even mark clean) the upstream code node.
-
-The only thing that clears `LINKED_STALE` on a node is a **verification snapshot on that node itself**, recorded by one of:
-
-- `axiom-graph mark-clean <node-id>` (or the `axiom_graph_mark_clean` MCP tool), or
-- the MCP **auto-mark-clean-on-write** hook: saving a section through `axiom_graph_update_section` / `axiom_graph_write_doc` records a verification snapshot whose timestamp is newer than the linked code's last change, which lets the link-analysis pass filter it out.
-
-A note on the surfaces: plain `axiom-graph mark-clean <node-id>` clears `LINKED_STALE` on that section just as the `axiom_graph_mark_clean` MCP tool does — both record the verification snapshot the next check reads. The one MCP-only convenience is auto-mark-clean-on-write: saving a section through `axiom_graph_update_section` / `axiom_graph_write_doc` records that snapshot for you, so an agent's edit clears the flag without a separate step.
-
-Stickiness flows through transitive propagation for free: an edited consumer doc cannot clear its own transitive `LINKED_STALE` just by editing itself. The chain stays stale until the upstream is verified, or the consumer section is verified with a snapshot newer than every contributing change. That is what makes the signal trustworthy enough to gate a merge on. Every one of those transitions — and the verification event that finally clears it — is appended to the [history log](history.md), the table this stickiness rule is enforced against.
-
-## Renames, NOT_FOUND, and the rename lifecycle
-
-When a symbol moves, naive detection sees one node vanish (`NOT_FOUND`) and a new one appear, severing the history and links that made the old node trustworthy. axiom-graph tries to repair that instead.
-
-During `build`, **rename detection** matches lost nodes against newly-discovered ones. It uses git as a scope reducer and body similarity to score candidates, plus an exact-hash pre-pass that catches cross-file moves a plain diff would miss. High-confidence pairs are **auto-applied**: the new node inherits the old node's history and edges and is marked `RENAMED` (sitting just below `NOT_FOUND` on the severity ladder), so its links survive the move. The build prints both buckets, for example `auto-applied N (revertable) ... M became NOT_FOUND`.
-
-There is deliberately **no pending tier and no "list pending" tool** — renames surface through the `RENAMED` status, not a separate queue. For the cases automation gets wrong, two lifecycle operations give you manual control, each on both the MCP and CLI surfaces:
-
-| Operation | What it does | MCP | CLI |
-|---|---|---|---|
-| Apply a rename | Weld a `NOT_FOUND` old node to a newly-created live node, migrating history and edges; new node becomes `RENAMED`. The escape hatch for a real rename that scored just under threshold. | `axiom_graph_apply_rename` | `axiom-graph rename apply <old> <new>` |
-| Revert a rename | Symmetric migrate-back: restore the old identity as live, detach the new node, drop the rename rows. | `axiom_graph_revert_rename` | `axiom-graph rename revert <new>` |
-
-Acknowledging a correct rename needs no new tool: a `RENAMED` node is cleared by `mark-clean`, the same as any other own-status drift. So a move that would otherwise have orphaned a doc instead arrives as a reviewable `RENAMED` flag with its provenance intact.
-
-## Verification: human and agent
-
-Clearing drift is a deliberate act of vouching for a node, not a side effect of touching a file. axiom-graph records that act in a verification table: each row stores the node ID, who verified it (`human` or `agent`), the content hash at the time, a timestamp, and an optional reason.
-
-During a check, after hashing produces a status, a **promotion step** runs: if a node would be stale but a verification snapshot exists whose hash still matches the current content, it is promoted back to `VERIFIED`. There are two paths to record one:
-
-- **Human:** `axiom-graph mark-clean <node-id> --reason "..."` records a human verification.
-- **Agent:** the `axiom_graph_mark_clean` MCP tool records an agent verification. On the MCP write path, saving a doc section auto-records an agent verification at the new hash.
-
-Agent verifications are **provisional, but visible**. The gate does not require human sign-off at the node level, which keeps an agent workflow moving, but `axiom-graph history agent-verified` lists every node an agent approved that a human has not yet reviewed. That list is the **pre-push gate**: a human scans what the agent vouched for before the work lands.
-
-The batch-level companion is the impact report. After making changes, marking nodes clean with reasons, and running tests, an agent runs `axiom_graph_report` (the `report` MCP tool) to produce a deterministic, SQL-only summary: what changed, what is verified versus still unverified, by whom, and the test results. The report attaches to the PR; the developer reads it as part of review, and CI runs `axiom-graph check --fail-on` so documentation that drifted out of date cannot merge.
-
-| `--fail-on` | Fails when |
-|---|---|
-| `none` | Never (default) |
-| `stale` | Any `CONTENT_UPDATED`, `DESC_UPDATED`, `RENAMED`, `NOT_FOUND`, `LINKED_STALE`, or `BROKEN_LINK` |
-| `unverified` | Any non-`VERIFIED` own_status |
-| `any` | Any non-`VERIFIED` status in either column |
-
-## Finding and resolving drift
-
-`axiom-graph check` (and the `axiom_graph_check` MCP tool) returns a one-line headline plus the problem nodes:
+After a change to `parse_config`, `check` shows the whole chain:
 
 ```
-own: 2 CONTENT_UPDATED / 0 DESC_UPDATED / 0 RENAMED / 1 NOT_FOUND · link: 3 LINKED_STALE / 0 BROKEN_LINK · 142 VERIFIED
+$ axiom-graph check .
+own: 2 CONTENT_UPDATED / 0 DESC_UPDATED / 0 RENAMED / 0 NOT_FOUND · link: 4 LINKED_STALE / 0 BROKEN_LINK · 140 VERIFIED
 
 NODE                                  OWN_STATUS       LINK_STATUS
------------------------------------------------------------------------------
-myproject::utils::parse_config        CONTENT_UPDATED  VERIFIED
-docs.architecture::config-section     VERIFIED         LINKED_STALE  via myproject::utils::parse_config
-docs.consumer.guide::configuration    VERIFIED         LINKED_STALE  via docs.architecture::config-section
+----------------------------------------------------------------------------
+myproject::config                     CONTENT_UPDATED  VERIFIED
+myproject::config::parse_config       CONTENT_UPDATED  VERIFIED
+myproject::docs/architecture          VERIFIED         LINKED_STALE
+myproject::docs/architecture::config  VERIFIED         LINKED_STALE  via myproject::config::parse_config
+myproject::docs/guide                 VERIFIED         LINKED_STALE
+myproject::docs/guide::configuration  VERIFIED         LINKED_STALE  via myproject::docs/architecture::config
 ```
 
-To enumerate, filter, group, or paginate the drift inventory, use the `axiom_graph_drift_query` MCP tool. Group by feature for a triage view, filter to one status and emit bare IDs to feed straight into a batch `mark-clean`, or scope by a path glob. The MCP `check` stays narrow on purpose so an agent that only needs the headline does not pay for a full enumeration; the CLI mirror is `axiom-graph check --all`.
+`docs/guide::configuration` is stale because `docs/architecture::config` is stale, which is stale because `parse_config` changed. The [docs-honesty loop](../examples/docs-honesty-loop.md) tutorial sets up this kind of chain for a published site.
 
-Resolving each status:
+## Finding and fixing drift
 
-- **`CONTENT_UPDATED` / `DESC_UPDATED` / `RENAMED`:** review the code, fix the doc if it is wrong, then `mark-clean` the node with a reason. The next check sees matching hashes and promotes it to `VERIFIED`.
-- **`LINKED_STALE`:** follow the `via` breadcrumb, read what changed, update the prose if needed, then verify *the section itself* (the upstream code being clean does not clear it; LINKED_STALE is sticky, as covered above). After a single trivial edit, `axiom_graph_reverify(source)` does this in one operation — verifies the source and clears every LINKED_STALE rooted at it (expanding composite parents, skipping anything also stale via another offender) instead of hand-enumerating dependents.
-- **`NOT_FOUND`:** the target is gone with no detected rename. Update the doc to the new location, remove the stale reference, or apply a manual rename if it really moved.
-- **`BROKEN_LINK`:** an edge points at a node ID that no longer exists. Remove the dangling link, then re-link to the correct target.
+`axiom-graph check .` prints a summary line and one row per flagged node, as in the example above. `--all` lists `VERIFIED` nodes too, and `--format json` prints JSON. `build` prints the same summary line when it finishes, and the [dashboard](../viz.md) shows the same statuses.
 
-Marking a composite node (a doc envelope, a section with children) clean has no direct effect when its `LINKED_STALE` is entirely inherited from stale descendants — `mark_clean` reports this explicitly, naming the stale descendants, instead of a silent no-op success.
+Documents tagged as frozen (see [configuration](../get-started/configuration.md)) are left out of these counts, the document itself included, except for a broken link in one. A frozen section is never flagged `LINKED_STALE` because its child sections changed.
 
-For the full command reference, see [use the CLI](../get-started/use-the-cli.md). The everyday loop is: write code, `build`, `check`, review what flagged, fix what is wrong, `mark-clean` what is still right, repeat. Drift becomes visible the moment it happens, not months later when someone trips over it.
+`check` recomputes only what changed since the last check. `check --full` re-hashes every file and recomputes every node. It gives the same statuses, more slowly.
 
-## Keeping published docs honest
+Over MCP, `axiom_graph_check` returns the summary line and the lines about new or missing functions; `full=true` matches `--full`. `axiom_graph_drift_query` lists the flagged nodes with their causes. It can filter by status (`filter="LINKED_STALE"`) or path (`location_glob="src/billing/**"`), group by `status`, `location_prefix`, `feature` or `node_kind` (`code`, `test` and `doc` in one call; `test` is everything under your configured `scan.test_paths`), return bare IDs (`format="ids"`) to pass to `axiom_graph_mark_clean` or `axiom_graph_reverify`, and page through long lists with `page` and `limit`.
 
-The staleness engine is what lets the published site you are reading stay honest about its own subject — this site is built that way, dogfooding.
+The MCP read tools (`axiom_graph_search`, `axiom_graph_source`, `axiom_graph_graph`, `axiom_graph_read_doc`, `axiom_graph_drift_query`) and the dashboard refresh the statuses they show before they answer, and tag each node they name that is not `VERIFIED`, for example `[CONTENT_UPDATED]`. `refresh_before_read` in `[axiom_graph.staleness]` (see [configuration](../get-started/configuration.md)) sets how:
 
-Consumer pages don't link to raw code; they link **through a dev-doc proxy** ([why, in detail](../examples/docs-honesty-loop.md#the-proxy-linking-architecture)). Because `consumer` is listed in `transitive_tags`, those pages **inherit `LINKED_STALE`** the moment code drift reaches the proxy they ride. That inherited flag is the signal — in precise breadcrumb form, "this published page now describes code that moved." A human or agent reviews the page against the changed proxy, updates the prose, and verifies it; per the sticky-`LINKED_STALE` rule above, that verification is the only thing that clears it. Then `render-site` republishes.
+| Value | Before a read answers |
+|---|---|
+| `"changed-files"` | Refreshes what the read shows from the files that changed. The default. |
+| `"check"` | Runs `check` first. |
+| `"off"` | Refreshes nothing, and adds `index is behind for N files — run check` when files have changed. |
 
-Detect, signal, review, verify, republish — the same engine that protects internal docs closes the loop on the public ones, so the published site cannot quietly drift from the code it documents. For the end-to-end walkthrough, see [the docs-honesty loop](../examples/docs-honesty-loop.md).
+| Status | What to do |
+|---|---|
+| `CONTENT_UPDATED`, `DESC_UPDATED` | Review the change, then run `axiom-graph mark-clean <node-id> . --reason "..."`. |
+| `RENAMED` | Check that the match is right, then `mark-clean` the node. If it is wrong, revert it (see [Renames and deleted code](staleness.md#renames-and-deleted-code)). |
+| `NOT_FOUND` | If the node moved, record the rename. If it was deleted, purge it. |
+| `LINKED_STALE` | Read the `via` node's change, update the section if it is wrong, then verify the section (see [Clearing LINKED_STALE](staleness.md#clearing-linked_stale)). |
+| `BROKEN_LINK` | Remove the link or point it at the right node, with `axiom_graph_delete_link` and `axiom_graph_add_link`. |
+
+## Clearing LINKED_STALE
+
+A `LINKED_STALE` that comes from code stays on a section until someone verifies the section against that code, or the code goes back to the version the section was checked against. Editing the file by hand, saving new text with a write tool, running `check` again, or marking the changed code clean does not clear it. These do:
+
+- **`addresses`.** `axiom_graph_update_section` and `axiom_graph_patch_section` take `addresses=[node ids]`: the changed nodes the section was flagged through, which `axiom_graph_drift_query` shows as `via`. Each named node is recorded as checked at its current version, and the section clears once every node it was flagged through is named, in one edit or across several. Pass it with the edit, or on its own (`update_section` with only `addresses`) when the text is already right. In a batch (`edits=[...]`) each item takes its own `addresses`. While other causes remain, the reply ends with `still LINKED_STALE via: ...`. Naming a node that is not a current cause is an error, and nothing is written:
+
+  ```
+  ERROR: addresses must name current offenders of myproject::docs/architecture::config; not offenders: myproject::config::load_defaults. Current offenders: myproject::config::parse_config. Nothing was written.
+  ```
+
+- `axiom-graph mark-clean <section-id> . --reason "..."`, or `axiom_graph_mark_clean` over MCP (pass `node_ids` to verify several at once). This clears the section whatever flagged it, for when you have checked everything.
+- `axiom_graph_reverify` on the code that changed, once you have checked that what depends on it is still right. It verifies that node and clears the `LINKED_STALE` it caused in one step, including on sections flagged through other docs. A section that another changed node also flags stays flagged, and the report lists it. A section that has its own unreviewed change is cleared of the `LINKED_STALE` only; its own `CONTENT_UPDATED` stays until you review it, and the report lists it as an own change kept. The report opens with how many nodes it cleared, then the `LINKED_STALE` count before and after, counted the way `check` counts. It stays short: it shows the first 20 skipped sections, 3 causes for each, and the first 10 ids it could not find. Pass `verbose=true` to see every source, every cleared node and every own change kept, and everything uncapped.
+
+Saving text with a write tool (`write_doc`, `update_section`, `patch_section`, `add_section`, `accept_doc_edits`, or `stamps accept`) marks the section's own text as reviewed, so its own status is `VERIFIED`. It never clears a `LINKED_STALE`: not the section's, not its parent's, and not any other node's.
+
+A later edit to the code flags the section again, as described in [What flags a node](staleness.md#what-flags-a-node).
+
+A section flagged through another doc clears when the section it links to is verified, or when you reverify the code at the root of the chain. Verifying the linking section alone does not clear it while the section it links to is still flagged. Naming that section in `addresses` is accepted but changes nothing; the reply ends with `still LINKED_STALE via: <section> (clears when it does)`. Review a flagged consumer page before you verify the developer section it links to, because verifying that section clears the consumer page too.
+
+Marking a doc, or a section with child sections, clean has no effect when its `LINKED_STALE` comes from its children. `mark-clean` says so and lists the sections to verify.
+
+## Renames and deleted code
+
+When you rename or move a function, `build` looks for a new node that matches the missing one. If it finds a confident match, the new node takes over the old node's history and links and is marked `RENAMED`, so doc sections linked to the old name follow it. The build summary counts these under `nodes renamed`. Review each one, then `mark-clean` it.
+
+When the build misses a rename, the old node shows `NOT_FOUND`. Record the rename yourself, or undo a wrong one:
+
+```bash
+axiom-graph rename apply myproject::billing::total myproject::invoices::total .
+axiom-graph rename revert myproject::invoices::total .
+```
+
+`rename apply` needs the old node to be `NOT_FOUND` and the new one to be newly indexed. The MCP tools are `axiom_graph_apply_rename` and `axiom_graph_revert_rename`. Applying a rename carries the verification of the docs that link the old node over to the new one: a doc stays verified only if the renamed code still matches the version it was verified against, and otherwise goes `LINKED_STALE` for a fresh review. A doc that could not be re-pointed because someone was writing it is named in the output as still linking the old id, and a doc file that could not be read is named separately. Rename detection covers code; doc sections are renamed through the doc tools (see [DocJSON](docjson.md)).
+
+When code is gone for good, remove its node with `axiom-graph purge <node-id> .`, or all of them with `axiom-graph purge --all-not-found .` (`axiom_graph_purge_node` over MCP). Record any missed rename first: a purged node cannot be renamed. Doc sections that linked to a purged node become `BROKEN_LINK`. Until you purge it, sections linked to a `NOT_FOUND` node are not flagged. A deleted file needs no purge: the next build removes its nodes, and sections that linked to them become `BROKEN_LINK`.
+
+## Frozen docs
+
+Some docs record a decision at a point in time, such as design records and plans, and should not be flagged when the code moves on. List their doc tags in `frozen_tags`:
+
+```toml
+[axiom_graph.staleness]
+frozen_tags = ["adr", "plan"]
+```
+
+Sections in a doc with a frozen tag get no new `LINKED_STALE`, from code, through other docs, or because a child section changed. A `LINKED_STALE` a section already had stays as long as code it links to has changed since you last verified the section; verify the section to clear it. Freezing the doc does not clear it, but once nothing causes it any more it clears on its own. `BROKEN_LINK` still shows. `check` and `drift_query` leave frozen sections, and the frozen doc itself, out of their results, except for `BROKEN_LINK`; pass `include_frozen=true` to `axiom_graph_check` or `axiom_graph_drift_query` to include them.
+
+## Human and agent verification
+
+Each verification records who made it and the reason given. `axiom-graph mark-clean` and `axiom-graph stamps accept` record a human verification. The MCP tools (`axiom_graph_mark_clean`, `axiom_graph_reverify`, `axiom_graph_accept_doc_edits` and the doc write tools) record an agent verification. A verification copied by `carry-forward` keeps the verifier it had. To see what agents verified before you push:
+
+```bash
+axiom-graph history agent-verified .
+```
+
+This lists every node whose latest history entry is an agent verification. `axiom-graph report .` summarises what changed since a checkpoint and who verified it; see [history](history.md).
+
+In CI, `axiom-graph check . --fail-on stale` fails the job while anything is flagged:
+
+| `--fail-on` | Exits 1 when |
+|---|---|
+| `none` | Never (the default). |
+| `stale` | Any node has an own or link status other than `VERIFIED`. |
+| `unverified` | Any node has an own status other than `VERIFIED`. Link status is ignored. |
+| `any` | Same as `stale`. |
+
+## After merging a worktree
+
+If you work in a git worktree with its own index (`axiom-graph checkout <worktree>` copies one in), the nodes you verify there are verified only in the worktree's index. After you merge the branch, run `build` in the main checkout, then copy the verifications over:
+
+```bash
+axiom-graph carry-forward ../my-worktree --dry-run
+axiom-graph carry-forward ../my-worktree
+```
+
+```
+Carried 1 verification(s) in full and 1 in part from feat @ ae1de6054c70.
+1 of the 1 carried in part now read VERIFIED; the rest stay stale through what did not carry (a link the worktree did not verify at this version) or until nodes they depend on settle.
+Stale here: 4 before -> 2 after.
+Not carried (2): 2 NOT_FOUND, RENAMED or BROKEN_LINK here.
+own: 0 CONTENT_UPDATED / 0 DESC_UPDATED / 0 RENAMED / 2 NOT_FOUND · link: 0 LINKED_STALE / 0 BROKEN_LINK · 5 VERIFIED
+```
+
+A stale node takes the worktree's whole verification when the worktree verified exactly what main now holds: the node is `VERIFIED` there, its content is the same, and every node it links to is at the version it was verified against.
+
+A node the worktree verified at the content main holds, but which still has a link flagged for something else, carries in part. It takes its own text verification, and the worktree's check of each link whose target is at the checked version here. Every other link keeps the state main gave it, so a link nobody checked is never marked verified by the merge. The report counts full and partial carries separately and says how many partial ones now read `VERIFIED`. For each partial carry it lists the links left open and why: no receipt in the worktree, absent in the worktree, or the linked node differs.
+
+Every other stale node keeps its status, and the report counts why: not verified in the worktree, content differs, a link is absent in the worktree, a linked node differs, or it is `NOT_FOUND`, `RENAMED` or `BROKEN_LINK` here. A carried section that links to a doc section still stale in main stays flagged until that section settles.
+
+`--dry-run` writes nothing and lists the nodes it would carry, in full and in part; `--list` lists every stale node by verdict, on a dry run or a real one. Run it from the main checkout or pass `-p <checkout>`. Two indexes with different project ids or schema versions are refused. Over MCP the tool is `axiom_graph_carry_forward` (`dry_run`, `list_nodes`). Each carried verification keeps the verifier of the worktree's latest verification of that node, and its history entry names the branch and commit it came from (see [history](history.md)).

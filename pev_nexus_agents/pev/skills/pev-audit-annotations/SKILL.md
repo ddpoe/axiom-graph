@@ -6,14 +6,11 @@ user-invocable: true
 
 # PEV Audit — Annotations
 
-You orchestrate a backlog audit of annotation drift. A single `pev-audit-annotations-fixer` subagent triages findings in three categories — annotation rule violations, prose drift, coverage gaps — and either applies mechanical fixes inline (via `Edit` / `Write`) or drafts spawn-request payloads for risky/judgmental fixes. You (the orchestrator) own all `axiom_graph_write_doc` calls for the spawn requests; the fixer drafts payloads but does not author the actual `docs/pev-requests/*` docs.
+You orchestrate a backlog audit of annotation drift. A single `pev-audit-annotations-fixer` subagent triages findings in three categories — annotation rule violations, prose drift, coverage gaps — and either applies mechanical fixes inline (via `Edit` / `Write`) or drafts spawn-request payloads for risky/judgmental fixes. You (the orchestrator) create every spawn request, cloning it from the seeded request template with `axiom_graph_clone_doc`; the fixer drafts payloads but does not author the actual `docs/pev-requests/*` docs.
 
 `${CLAUDE_PROJECT_DIR}` is the consumer project root. `${CLAUDE_PLUGIN_ROOT}` is the PEV plugin's install directory.
 
-**Reference docs (read before first use):**
-
-- Design spec: `axiom_graph::docs.features.pev-agent-nexus.sub_features.audit-skills.design`
-- Sub-feature PRD: `axiom_graph::docs.features.pev-agent-nexus.sub_features.audit-skills.prd`
+**Reference docs (when the project has them):** the audit-skills design spec and sub-feature PRD, `{project_id}::docs/features/pev-agent-nexus/sub_features/audit-skills/design` and `.../prd`, exist only in the project that develops PEV. Read them before first use when `axiom_graph_read_doc` finds them; otherwise this skill is the whole reference.
 
 **v1 posture (key constraints):**
 
@@ -21,20 +18,26 @@ You orchestrate a backlog audit of annotation drift. A single `pev-audit-annotat
 - **Sequential dispatch (D-20).** A single fixer agent type. If the finding set is large, you may dispatch it in batches — one batch at a time, never two in flight.
 - **No worktree.** Audit work mutates the graph DB and (for inline edits) source files in the main working tree. There is no `--worktree` override.
 - **Zero audit-specific hooks (D-19).** Tool allowlists live in agent frontmatter. The tag-mutex check, resume detection, and spawn-request writes live inline in this skill body.
-- **Inline code edits are in scope — but only mechanical, low-risk ones (D-7, D-22).** The fixer agent has `Edit` / `Write`. Risky fixes spawn `docs/pev-requests/{slug}.json` docs that the user invokes via `/pev-cycle` or `/pev-instance`.
+- **Inline code edits are in scope — but only mechanical, low-risk ones (D-7, D-22).** The fixer agent has `Edit` / `Write`. Risky fixes spawn `docs/pev-requests/{slug}.docjson` docs that the user invokes via `/pev-cycle` or `/pev-instance`.
 - **HUMAN GATE before any inline edit lands.** The fixer drafts both inline-edit proposals and spawn-request payloads; you present them as a batch, the user approves/rejects, then you direct the fixer to apply approved inline edits and you write the approved spawn requests. No edit is applied without that gate.
 
 ## Phases
 
 ### 1. Intake
 
+**Project facts: call `axiom_graph_info(project_root)` first, before any other axiom-graph call.** This session already has `axiom_graph_guide`'s text as the server's instructions; `info` adds the project's facts. Take the project id (`{project_id}` in every id below), the docs roots (`docs_dirs`) and the doc file extensions (`docs_extensions`) from its answer, and every other doc id and path from tool results; never hard-code a project id, a docs folder or a doc extension.
+
 Parse the user's `/pev-audit-annotations` request. The request may include:
 
-- A path to an audit-request doc in `docs/pev/audit-requests/{slug}.json` (optional) — narrows scope, sets goal, supplies user-authored constraints.
+- A path to an audit-request doc in `docs/pev/audit-requests/{slug}.docjson` (optional) — narrows scope, sets goal, supplies user-authored constraints.
 - Free-text scope hints (e.g., "focus on the scanners feature", "only B-class violations, skip prose drift"). The hints scope discovery — they do NOT change the fixer's classification rules.
 - No argument — defaults to a full-tree audit across all three finding categories.
 
-Read `axiom-graph.toml` in the project root to get the `project_id` value. The audit manifest doc ID is `{project_id}::docs.pev.audits.pev-audit-annotations-YYYY-MM-DD-{slug}` — do NOT hardcode the prefix; it varies per project.
+Each audit run is a directory, `docs/pev/audits/{audit-id}/`, with the audit id `pev-audit-annotations-YYYY-MM-DD-{slug}`. Its manifest is the `audit` doc in it, `{project_id}::docs/pev/audits/{audit-id}/audit`. Once the manifest is cloned, take the exact id from the `axiom_graph_clone_doc` result rather than building it by hand.
+
+**Id collision check.** Refuse an audit id, and pick another slug, when the file `docs/pev/audits/{audit-id}<ext>`, for any `<ext>` in `info`'s `docs_extensions`, or the directory `docs/pev/audits/{audit-id}/` already exists.
+
+**Old runs.** Audits made before plugin 3.0 are single docs, `{project_id}::docs/pev/audits/{audit-id}`. Every lookup below (the tag-mutex check, resume) accepts both shapes, and skips any `efficiency` doc.
 
 **Slug generation.** If the user supplied an audit-request, reuse its slug. Otherwise generate a short descriptive slug from the scope hints (e.g., `scanners-cleanup`, `b-class-sweep`, `full-tree`). Date-prefix `YYYY-MM-DD` is added by manifest naming; the slug itself is just the descriptive tail.
 
@@ -67,7 +70,7 @@ axiom_graph_list_tags(project_root="${CLAUDE_PROJECT_DIR}")
 
   ```
   PEV Audit (annotations): pev-audit-annotations-{date}-{slug}
-  Manifest doc ID: {project_id}::docs.pev.audits.pev-audit-annotations-{date}-{slug}
+  Manifest: docs/pev/audits/pev-audit-annotations-{date}-{slug}/audit
   Audit-request: {linked-request-doc-id-or-none}
   Scope hints: {hints-or-"full-tree"}
   Proceed? (or suggest a different slug)
@@ -77,8 +80,32 @@ axiom_graph_list_tags(project_root="${CLAUDE_PROJECT_DIR}")
 
 Once confirmed:
 
-1. Create the audit manifest via `axiom_graph_write_doc`. The `id` field is path-slug form (`pev/audits/pev-audit-annotations-{date}-{slug}`), NOT the full node-id. Tags: `pev-audit-active`, `pev-audit-annotations`. Initial sections: `meta`, `request` (pointer or copy of audit-request), `orchestrator.discovery` (placeholder), `orchestrator.handoff.recommended-requests` (empty list), `code-edits-applied` (empty), `friction` (empty).
-2. `meta` content includes: `status: active`, `audit-type: annotations`, `started-at: {ISO timestamp}`, `dispatcher: pev-audit-annotations`, `request-link: {audit-request-doc-id or null}`, `scope-hints: {hints or "full-tree"}`.
+1. **Clone the manifest** from the seeded template `{project_id}::.pev/templates/audit-annotations` (the project id is `info`'s project id). The template already holds every section this skill writes: `meta`, `request`, `orchestrator.discovery`, `orchestrator.handoff.recommended-requests`, `code-edits-applied` and `friction`. The template carries no tags; the clone call passes them:
+
+   ```
+   axiom_graph_clone_doc(
+     project_root="${CLAUDE_PROJECT_DIR}",
+     source_doc_id="{project_id}::.pev/templates/audit-annotations",
+     new_id="pev/audits/pev-audit-annotations-{date}-{slug}/audit",
+     title="PEV Audit (annotations): {date} {slug}",
+     tags=["pev-audit-active", "pev-audit-annotations"],
+     set_sections={"meta": "status: active\naudit-type: annotations\nstarted-at: {ISO timestamp}\ndispatcher: pev-audit-annotations\nrequest-link: {audit-request-doc-id or null}\nscope-hints: {hints or \"full-tree\"}",
+                   "request": "{pointer to or copy of the audit-request, or the user's scope hints}"}
+   )
+   ```
+
+2. **Missing template: halt.** If `info`'s `docs_dirs` lacks `.pev`, or `{project_id}::.pev/templates/audit-annotations` is not in the index, stop before creating anything and tell the user:
+
+   ```
+   The PEV audit templates are not seeded in this project (missing: audit-annotations).
+   Run: bash "${CLAUDE_PLUGIN_ROOT}/scripts/pev-seed.sh" --project-root {project root} --axiom-graph "{commands.axiom_graph}"
+   If it prints an axiom-graph.toml edit (.pev missing from docs_dirs), make it and re-run the script.
+   It builds the index when it is done. Then commit axiom-graph.toml and .pev/, and re-run /pev-audit-annotations.
+   ```
+
+   `{commands.axiom_graph}` is the `axiom_graph` key of the `[commands]` table in `.pev/sops.toml`; when the file or key is missing, use the command that runs axiom-graph in this project (`axiom-graph` when it is on PATH).
+
+   There is no fallback: never hand-write the manifest with `axiom_graph_write_doc`, and never copy the template file on disk.
 
 ### 2. Discovery
 
@@ -90,7 +117,7 @@ Build the finding set across all three categories.
 axiom_graph_workflow_list(project_root="${CLAUDE_PROJECT_DIR}", scope="all", max_results=200)
 ```
 
-For each workflow returned, run `axiom_graph_workflow_detail` (when relevant) to surface duplicate `step_num`, sequence gaps, unresolved `AutoStep` targets. Cross-reference with any project-specific annotation linter output if the project surfaces one (e.g., a CI check). On the cortex project at the time of writing, ~10 unresolved B-class findings are known.
+For each workflow returned, run `axiom_graph_workflow_detail` (when relevant) to surface duplicate `step_num`, sequence gaps, unresolved `AutoStep` targets. Cross-reference with any project-specific annotation linter output if the project surfaces one (e.g., a CI check).
 
 **Category 2 — Prose drift.** Walk own-stale events:
 
@@ -166,12 +193,20 @@ Handle returns per dispatch:
 
 Walk every finding with disposition `request-spawned`. For each `spawn-request-draft`:
 
-1. Generate a descriptive slug from the draft's `slug` field (collision-check against existing `docs/pev-requests/*.json` — append `-2`, `-3`, etc. if needed).
-2. Compose the request DocJSON:
-   - `title` — short human-readable
-   - `tags` — `["pev", "request", "audit-spawned"]`
-   - `meta.source-audit` — the audit manifest doc ID (provenance)
-   - `sections` — `problem`, `proposed-approach`, `scope`, `notes` (populated from the draft's `summary` / `scope` / `source-finding-ids` fields). Keep proposed-approach generic ("apply mechanical fix per linked finding"); the actual implementation is the `/pev-cycle` or `/pev-instance` runner's job.
+1. Generate a descriptive slug from the draft's `slug` field (collision-check against existing `docs/pev-requests/` docs (any extension in `info`'s `docs_extensions`) — append `-2`, `-3`, etc. if needed).
+2. Clone it from the seeded template `{project_id}::.pev/templates/request` (a request stays a single doc), filling `problem`, `proposed-approach`, `scope` and `notes` from the draft's `summary` / `scope` / `source-finding-ids` fields. Keep proposed-approach generic ("apply mechanical fix per linked finding"); the actual implementation is the `/pev-cycle` or `/pev-instance` runner's job. If the template is missing, halt with the seed-step message from Intake, naming `request`.
+
+   ```
+   axiom_graph_clone_doc(
+     project_root="${CLAUDE_PROJECT_DIR}",
+     source_doc_id="{project_id}::.pev/templates/request",
+     new_id="pev-requests/{slug}",
+     title="{short human-readable title}",
+     tags=["pev-request", "not-started", "audit-spawned"],
+     set_sections={"meta": "source-audit: {the audit manifest doc ID}", "problem": "...",
+                   "proposed-approach": "...", "scope": "...", "notes": "..."}
+   )
+   ```
 
 You may write these speculatively now (so the user sees the spawned-request slugs at the gate) OR wait until after the gate. Pick the timing that produces a cleaner gate UX — typically: write speculatively, then DELETE any rejected at the gate via `axiom_graph_delete_doc` (rare path).
 
@@ -255,6 +290,14 @@ Update the manifest:
 - `meta.completed-at` with timestamp.
 - Remove the `pev-audit-active` tag via `axiom_graph_update_doc_meta` on the manifest doc.
 
+**Efficiency report.** Run the analysis for this audit:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/analyze_pev_session.py" --find-run {audit-id} --docjson --summary
+```
+
+`--find-run` reports only the sessions that worked this audit (dispatched its agents or wrote its docs), and only their calls for it. The script stages the report in the system temp folder; it never writes into `docs/` itself. For each `Staged DocJSON:` line it prints, write the report with the call it prints, `axiom_graph_write_doc(project_root="${CLAUDE_PROJECT_DIR}", doc_file="<staged path>")`. The report lands in the audit's directory as `docs/pev/audits/{audit-id}/efficiency` (`efficiency-s2`, `-s3`… when the audit spanned several sessions), indexed and verified. Its only tag is `pev-efficiency`, so the audit-type tag searches never find it. Present its summary with yours. The script reads Claude Code's private session-log format; if it warns that a session came from a newer Claude Code version than it was checked against, mention it: empty per-agent tool lists then mean the log format changed, not that the agents did nothing.
+
 Run a final `axiom_graph_check` to confirm post-state. Re-run `axiom_graph_workflow_list` to confirm B-class findings cleared as expected for applied inline edits.
 
 Present a one-screen summary to the user:
@@ -279,20 +322,23 @@ Spawn-requests created:
 
 Status: completed | partial
 Manifest: {audit-manifest-doc-id}
+Efficiency: {efficiency doc id(s)}
 ```
 
 If spawn-requests were created, end with: "Run `/pev-cycle <doc-id>` or `/pev-instance <doc-id>` to address each spawned request."
 
 ## Friction log
 
-Capture friction as you work — discovery missed a category, the fixer's classifications skewed too aggressive/too conservative, the gate UX was unclear, the apply-mode pre-edit verification fired too often (suggests draft drafts go stale fast), etc. Append to `{audit-manifest-doc-id}::friction` as you notice it. Read the existing section first so you don't overwrite prior entries, then `axiom_graph_update_section` with existing + new.
+Capture friction as you work — discovery missed a category, the fixer's classifications skewed too aggressive/too conservative, the gate UX was unclear, the apply-mode pre-edit verification fired too often (suggests draft drafts go stale fast), etc. Add each entry under `{audit-manifest-doc-id}::friction` as you notice it, as its own subsection: `axiom_graph_add_section(doc_id="{audit-manifest-doc-id}", parent_id="friction", section_id="<short-tag-slug>", heading="<short tag>", content=...)`. Entry ids are slugs with no dots. Omit `content` rather than passing `""`. After two identical failures, change approach instead of retrying. Never rewrite the section with `update_section` or `patch_section`: a new subsection can't clobber entries other agents wrote meanwhile.
 
-Entry format:
+**Log every script read.** If you read a document or index data with a script (Python, Node, `jq`, `grep` … over DocJSON files, or raw SQL) instead of an axiom-graph tool, add a friction entry tagged `script-read`. Name the tool you would have used and why it fell short: output too large, no way to select part of a section, search missed it, not in the index, output hard to reuse. Reading this way is allowed. Writing a document this way is not. These entries are how gaps in the tools get found and fixed.
+
+Entry format (the subsection's heading is the short tag; its content is):
 
 ```
-- **{short tag}** — {one line: what felt off}
-  Context: {raw paste — tool call, output, error, user exchange}
-  Wish: {optional — what would've made this easier}
+{one line: what felt off}
+Context: {raw paste — tool call, output, error, user exchange}
+Wish: {optional — what would've made this easier}
 ```
 
 Empty is fine. Honest emptiness beats invented friction.

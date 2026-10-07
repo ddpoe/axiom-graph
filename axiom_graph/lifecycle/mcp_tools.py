@@ -33,12 +33,16 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def axiom_graph_build(project_root: str, verbose: bool = False, _embedder_thread=None) -> str:
-    """Run axiom-graph build (discovery-only) for a project.
+def axiom_graph_build(project_root: str, verbose: bool = False) -> str:
+    """Re-index the project: add new nodes and refresh edges after code changes.
 
     Only nodes that have never been indexed are inserted, preserving
     ``CONTENT_UPDATED`` / ``NOT_FOUND`` signals.  Edges are updated
     in all cases.
+
+    The project id resolves from ``axiom-graph.toml``, then the id the
+    index stores, then the directory name.  When it differs from the stored
+    id the build is refused and the tool returns ``ERROR: ...`` naming both.
 
     A full rebuild (which resets baselines and clears staleness) is
     intentionally not available through this tool -- use the CLI
@@ -47,7 +51,7 @@ def axiom_graph_build(project_root: str, verbose: bool = False, _embedder_thread
 
     To purge individual NOT_FOUND nodes, use ``axiom_graph_purge_node``.
     For bulk purge of all NOT_FOUND nodes, use the CLI
-    ``axiom-graph build --purge``.
+    ``axiom-graph purge --all-not-found``.
 
     Args:
         project_root: Absolute path to the project to index.
@@ -55,23 +59,27 @@ def axiom_graph_build(project_root: str, verbose: bool = False, _embedder_thread
             violations, scanner errors, etc.) in the output.  Default
             ``False`` shows only the warning count.
     """
+    from axiom_graph.config import ProjectIdMismatchError  # noqa: PLC0415
+
     root = Path(project_root).resolve()
     db_path = _require_db(project_root)
-    summary = _api.build_index(
-        db_path,
-        root,
-        discovery_only=True,
-        verbose=verbose,
-        embedder_thread=_embedder_thread,
-    )
+    try:
+        summary = _api.build_index(
+            db_path,
+            root,
+            discovery_only=True,
+            verbose=verbose,
+        )
+    except ProjectIdMismatchError as exc:
+        return f"ERROR: {exc}"
 
     lines: list[str] = []
     num_warnings = len(summary.warnings)
     lines.append(
         f"axiom-graph build complete (discovery-only)\n"
         f"  files scanned   : {summary.files_scanned} (Python)\n"
-        f"  files skipped   : {summary.files_skipped_mtime} (Python, mtime unchanged)\n"
-        f"  docs skipped    : {summary.docs_skipped_mtime} (markdown + DocJSON, mtime unchanged)\n"
+        f"  files skipped   : {summary.files_skipped_mtime} (Python, content and mtime unchanged)\n"
+        f"  docs skipped    : {summary.docs_skipped_mtime} (markdown + DocJSON, content and mtime unchanged)\n"
         f"  nodes added     : {summary.nodes_written}\n"
         f"  nodes unchanged : {summary.nodes_skipped}\n"
         f"  nodes renamed   : {summary.nodes_renamed}\n"
@@ -80,12 +88,14 @@ def axiom_graph_build(project_root: str, verbose: bool = False, _embedder_thread
         f"  broken links    : {summary.broken_links_flagged}\n"
         f"  warnings        : {num_warnings}"
     )
-    if num_warnings > 0 and verbose:
+    # The unresolved-import line names its own fix, so it shows without verbose.
+    shown = summary.warnings if verbose else [w for w in summary.warnings if "source_roots" in w]
+    if shown:
         lines.append("")
-        for w in summary.warnings:
+        for w in shown:
             lines.append(f"  ! {w}")
-    if summary.staleness_total:
-        lines.append(f"  staleness      : {summary.staleness_total} nodes updated ({summary.staleness_stale} stale)")
+    if summary.check is not None:
+        lines.append(f"  staleness       : {summary.check.summary_line()}")
     return "\n".join(lines)
 
 
@@ -95,7 +105,7 @@ def axiom_graph_build(project_root: str, verbose: bool = False, _embedder_thread
 
 
 def axiom_graph_checkout(project_root: str, worktree_path: str) -> str:
-    """Copy the axiom-graph DB into a worktree via VACUUM INTO.
+    """Copy the index into a git worktree as a consistent snapshot.
 
     Produces an atomic, consistent snapshot of the source index --
     safe regardless of WAL state or concurrent writes. The target
@@ -121,12 +131,77 @@ def axiom_graph_checkout(project_root: str, worktree_path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# carry_forward
+# ---------------------------------------------------------------------------
+
+
+def axiom_graph_carry_forward(
+    project_root: str,
+    worktree_path: str,
+    dry_run: bool = False,
+    list_nodes: bool = False,
+) -> str:
+    """Copy a merged worktree's verifications into this index.
+
+    The return trip of ``axiom_graph_checkout``.  Run on the checkout the
+    worktree was merged into, after its build (and after a build and check
+    in the worktree, or fewer nodes carry).  The worktree index is opened
+    read-only.  A node stale here takes the worktree's verification in full,
+    with the versions of the linked nodes it was checked against, when the
+    worktree verified exactly what this checkout holds: VERIFIED there with
+    a verification record, the same content in both indexes, and every link
+    a verification settles present there with each linked node at the
+    verified version (for an envelope, every annotated function and
+    delegated task too).  Code, test and doc nodes alike.  A node two
+    branches changed matches neither, so it stays stale.
+
+    A node the worktree verified at the same content that is still flagged
+    there, or here, for something else is carried one dimension at a time:
+    its own-text verification, and the worktree's receipt for each link
+    holding it stale here whose linked node is at the version the receipt
+    names.  Every other link keeps its state here.
+
+    Each carried node gets one history row with op ``carry_forward`` whose
+    reason names the branch, the SHA and the worktree's latest verification
+    of the node (a doc tool's write included); the worktree's history is
+    not imported.  One recompute then settles the links.  The report gives
+    the counts carried in full and in part, the stale count before and
+    after, how many carried nodes stay stale while a node they depend on is
+    itself stale here (a doc-to-doc link, or an envelope's annotated
+    function or delegated task), and why each other stale node was not
+    carried (not verified in the worktree, content differs, a link is absent
+    in the worktree, a linked node differs, or NOT_FOUND / RENAMED /
+    BROKEN_LINK).
+
+    Refused with ``ERROR: ...``, writing nothing, when the worktree index is
+    missing or the two indexes differ in schema version or project id.
+
+    Args:
+        project_root: Absolute path to the checkout the worktree was merged into.
+        worktree_path: Absolute path to the worktree directory, or to its
+            ``.axiom_graph/graph.db``.
+        dry_run: Judge every stale node and write nothing; the report lists
+            the nodes it would carry, in full and in part.  Reads the
+            statuses as this checkout's last build or check stored them, so
+            run it after the build.
+        list_nodes: List every stale node by verdict.
+    """
+    db_path = _require_db(project_root)
+    root = Path(project_root).resolve()
+    try:
+        result = _api.carry_forward_verifications(db_path, root, Path(worktree_path), dry_run=dry_run)
+    except _api.CarryForwardRefusedError as exc:
+        return f"ERROR: carry-forward refused: {exc}"
+    return _api.render_carry_forward_report(result, list_nodes=list_nodes)
+
+
+# ---------------------------------------------------------------------------
 # check
 # ---------------------------------------------------------------------------
 
 
-def axiom_graph_check(project_root: str, include_frozen: bool = False) -> str:
-    """Report per-node staleness / confidence status (one-line summary).
+def axiom_graph_check(project_root: str, include_frozen: bool = False, full: bool = False) -> str:
+    """Summarise staleness in one line: counts per status, no node list.
 
     Returns a single summary line covering both dimensions of node
     health, with optional ``(all nodes VERIFIED)`` / ``(no doc-quality
@@ -134,6 +209,11 @@ def axiom_graph_check(project_root: str, include_frozen: bool = False) -> str:
 
         ``own: 3 CONTENT_UPDATED / 1 DESC_UPDATED / 0 NOT_FOUND ·
          link: 5 LINKED_STALE / 0 BROKEN_LINK · 42 VERIFIED · 1 DOC_SECTION_LONG``
+
+    Files that hold functions or sections the index lacks, or that lost
+    ones the index holds, add one line each, e.g. ``utils.py has 2 new
+    functions — run build`` or ``utils.py has 1 indexed function no
+    longer found — run build``.
 
     For per-node detail, paginated lists, filtered slices, or grouped
     aggregates use ``axiom_graph_drift_query``.
@@ -144,6 +224,9 @@ def axiom_graph_check(project_root: str, include_frozen: bool = False) -> str:
             docs tagged in ``config.staleness.frozen_tags`` are
             excluded from the summary counts.  When ``True`` they are
             included.  No-op when ``frozen_tags`` is empty.
+        full: When ``False`` (the default), only what changed since the
+            last check is recomputed.  When ``True`` every node is
+            recomputed from a re-hash of every file.
 
     Note:
         ``verbose`` and ``filter`` parameters were removed in the
@@ -153,25 +236,20 @@ def axiom_graph_check(project_root: str, include_frozen: bool = False) -> str:
     """
     root = Path(project_root).resolve()
     db_path = _require_db(project_root)
-    cs = _api.compute_check_summary(db_path, root, include_frozen=include_frozen)
+    cs = _api.compute_check_summary(db_path, root, include_frozen=include_frozen, full=full)
 
     if cs is None:
         return "(no nodes in index)"
 
-    summary = (
-        f"own: {cs.own_counts['CONTENT_UPDATED']} CONTENT_UPDATED / "
-        f"{cs.own_counts['DESC_UPDATED']} DESC_UPDATED / "
-        f"{cs.own_counts.get('RENAMED', 0)} RENAMED / "
-        f"{cs.own_counts['NOT_FOUND']} NOT_FOUND · "
-        f"link: {cs.link_counts['LINKED_STALE']} LINKED_STALE / "
-        f"{cs.link_counts['BROKEN_LINK']} BROKEN_LINK · "
-        f"{cs.clean_count} VERIFIED"
-    )
+    summary = cs.summary_line()
     if cs.doc_quality_count:
         summary += f" · {cs.doc_quality_count} DOC_SECTION_LONG"
 
     if cs.all_clean and not cs.doc_quality_count:
-        return summary + "\n(all nodes VERIFIED)"
+        summary += "\n(all nodes VERIFIED)"
+    lines = _api.structure_lines(cs.structure)
+    if lines:
+        summary += "\n" + "\n".join(lines)
     return summary
 
 
@@ -251,6 +329,8 @@ def _format_history_for_node(
                 except Exception as exc:
                     logger.debug("failed to parse MANUAL_VERIFIED meta: %s", exc)
             desc = f'manually verified — "{reason}"' if reason else "manually verified"
+        elif ct == "RAW_DOCJSON_EDIT":
+            desc = "raw DocJSON edit — edited outside the doc tools; re-apply with a doc tool or accept it"
         elif ct == "LINK_ADDED":
             meta_blob = row.meta
             target = ""
@@ -461,7 +541,7 @@ def axiom_graph_history(
 
 
 def axiom_graph_list_reference_points(project_root: str) -> str:
-    """List available reference points for ``axiom_graph_report(since_sha=...)``.
+    """List the checkpoints and SHAs that report(since_sha=...) can start from.
 
     Call this **before** ``axiom_graph_report`` to discover valid SHA values.
     Returns checkpoints (explicit markers) and build SHAs (from indexed
@@ -495,10 +575,13 @@ def axiom_graph_report(
     project_root: str,
     since_sha: str | None = None,
     since_timestamp: str | None = None,
-    verbose: bool = False,
+    verbose: bool | None = None,
     change_type_pattern: str | None = None,
     node_pattern: str | None = None,
     node_type: str | None = None,
+    detail: str | None = None,
+    exclude_node_pattern: str | list[str] | None = None,
+    max_chars: int | None = 40_000,
 ) -> str:
     """Impact report: what changed since a checkpoint, SHA, or datetime.
 
@@ -507,106 +590,64 @@ def axiom_graph_report(
 
     **Reference point resolution** (first match wins):
 
-    1. ``since_sha`` -- match a CHECKPOINT by git_sha prefix.
+    1. ``since_sha`` -- match a CHECKPOINT by git_sha prefix (the match is
+       symmetric: a full 40-char SHA matches a 12-char checkpoint).
     2. ``since_sha`` -- match any history row by git_sha prefix.
-    3. ``since_timestamp`` -- ISO-8601 datetime used directly as cutoff.
-    4. Neither given -- most recent CHECKPOINT, then most recent history
-       row with a git_sha.
-    5. No reference found -- report over entire history.
+    3. ``since_sha`` -- not in the index but a commit git knows: its git
+       commit time is the cutoff (the header says so).
+    4. ``since_timestamp`` -- ISO-8601 datetime used directly as cutoff.
+    5. Neither given -- most recent CHECKPOINT, then most recent history
+       row with a git_sha; with neither, the whole history.
 
-    Always starts with a one-line summary.
+    An explicit ``since_sha`` that neither the index nor git can resolve
+    (unknown, ambiguous, or shorter than 4 characters) returns an
+    ``ERROR: ...`` string -- never a report over a different window.
+
+    Every response starts with a ``reference:`` line naming the SHA,
+    cutoff time and how it was resolved, then the one-line headline.
 
     Args:
         project_root: Absolute path to the indexed project.
-        since_sha: Git SHA prefix. Matched against history rows
-            (CHECKPOINTs checked first, then any row).
+        since_sha: Git SHA prefix (4+ characters).
         since_timestamp: ISO-8601 datetime cutoff (e.g.
             ``2026-03-18T00:00:00``).
-        verbose: When False (default), return only the summary line.  When
-            True, include the full categorised breakdown.
+        verbose: Deprecated -- use ``detail``.  ``True`` maps to
+            ``detail="full"``; ignored when ``detail`` is given.
         change_type_pattern: Glob pattern to filter change types (e.g.
             ``*STALE*``, ``LINK_*``, ``AGENT_*``, ``INITIAL``).
         node_pattern: Glob pattern to filter node IDs (e.g.
             ``axiom_graph::axiom_graph.viz.*``).
         node_type: Filter to nodes of this type. One of
             ``atomic_process``, ``composite_process``, or ``entity``.
+        detail: ``"summary"`` (default: reference + headline),
+            ``"condensed"`` (aggregated by container, hand-made changes
+            verbatim) or ``"full"`` (one line per history row).
+        exclude_node_pattern: Glob (or list of globs) for node IDs to leave
+            out of every section and the headline counts -- e.g. the cycle
+            manifest written during the window: ``"{doc_id}*"``.
+        max_chars: Maximum characters in the response (default 40 000).
+            Longer output is cut at a line boundary with a footer saying
+            how many lines were dropped.  Pass ``None`` for no cap.
     """
+    if detail is None:
+        detail = "full" if verbose else "summary"
+    if detail not in _api.REPORT_DETAILS:
+        return f"ERROR: detail must be one of {', '.join(_api.REPORT_DETAILS)}; got {detail!r}"
     db_path = _require_db(project_root)
-    data = _api.compute_report(
-        db_path,
-        since_sha=since_sha,
-        since_timestamp=since_timestamp,
-        change_type_pattern=change_type_pattern,
-        node_pattern=node_pattern,
-        node_type=node_type,
-    )
-
-    if data.no_rows:
-        return "No history events found after the reference point."
-    if data.no_matches:
-        return "No history events match the given filters."
-
-    summary_text = (
-        f"{data.summary['nodes_changed']} nodes changed, "
-        f"{data.summary['became_stale']} became stale, "
-        f"{data.summary['verified']} verified ({data.summary['agent_only']} agent-only), "
-        f"{data.summary['links_modified']} links modified"
-    )
-
-    if not verbose:
-        return summary_text
-
-    lines = [summary_text, "=" * len(summary_text)]
-
-    if data.content_changes:
-        lines.append("\nCONTENT CHANGES")
-        lines.append("-" * 40)
-        for nid in sorted(data.content_changes):
-            types = ", ".join(sorted({e["change_type"] for e in data.content_changes[nid]}))
-            lines.append(f"  {nid}  [{types}]")
-
-    if data.staleness_transitions:
-        lines.append("\nSTALENESS TRANSITIONS")
-        lines.append("-" * 40)
-        for r in data.staleness_transitions:
-            ct = r["change_type"]
-            meta_parts: list[str] = []
-            if r.get("meta"):
-                try:
-                    m = json.loads(r["meta"])
-                    if m.get("from"):
-                        meta_parts.append(f"was {m['from']}")
-                    if m.get("linked_node"):
-                        meta_parts.append(f"via {m['linked_node']}")
-                except Exception as exc:
-                    logger.debug("failed to parse staleness meta: %s", exc)
-            suffix = f"  ({', '.join(meta_parts)})" if meta_parts else ""
-            lines.append(f"  {r['node_id']}  {ct}{suffix}")
-
-    if data.link_changes:
-        lines.append("\nLINK CHANGES")
-        lines.append("-" * 40)
-        for r in data.link_changes:
-            target = ""
-            if r.get("meta"):
-                try:
-                    target = json.loads(r["meta"]).get("target", "")
-                except Exception as exc:
-                    logger.debug("failed to parse link meta: %s", exc)
-            arrow = "→" if r["change_type"] == "LINK_ADDED" else "✕"
-            lines.append(f"  {r['node_id']}  {arrow} {target}")
-
-    if data.verifications:
-        lines.append("\nVERIFICATION ACTIVITY")
-        lines.append("-" * 40)
-        for r in data.verifications:
-            ct = r["change_type"]
-            flag = ""
-            if ct == "AGENT_VERIFIED" and r["node_id"] not in data.human_verified_ids:
-                flag = " ⚠ agent-only"
-            lines.append(f"  {r['node_id']}  {ct}{flag}")
-
-    return "\n".join(lines)
+    try:
+        data = _api.compute_report(
+            db_path,
+            since_sha=since_sha,
+            since_timestamp=since_timestamp,
+            change_type_pattern=change_type_pattern,
+            node_pattern=node_pattern,
+            node_type=node_type,
+            exclude_node_pattern=exclude_node_pattern,
+            project_root=Path(project_root).resolve(),
+        )
+    except _api.UnresolvedReferenceError as exc:
+        return f"ERROR: {exc}"
+    return _api.cap_report_text(_api.render_report_text(data, detail), max_chars, detail)
 
 
 # ---------------------------------------------------------------------------
@@ -625,16 +666,41 @@ def axiom_graph_diff(
 
     **Baseline resolution** (when *baseline_sha* is omitted):
 
-    1. Most recent ``AGENT_VERIFIED``, ``MANUAL_VERIFIED``, or ``CHECKPOINT``
-       history row with a non-NULL ``git_sha``.
-    2. Fallback: oldest history row with a ``git_sha`` (typically the
-       ``INITIAL`` scan -- gives "diff since first indexed").
+    1. A node that went stale (CONTENT_UPDATED, DESC_UPDATED or
+       LINKED_STALE) and has not been verified since: the newest history
+       row with a ``git_sha`` from *before* it went stale.  A checkpoint
+       taken while it was already stale is skipped, since that commit
+       already holds the change.  No such row is a ``no_baseline`` error.
+    2. Any other node: the most recent ``AGENT_VERIFIED``,
+       ``MANUAL_VERIFIED``, or ``CHECKPOINT`` history row with a non-NULL
+       ``git_sha``; else the oldest history row with a ``git_sha``
+       (typically the ``INITIAL`` scan -- gives "diff since first indexed").
 
-    Pass *baseline_sha* explicitly to diff against a specific commit.
+    ``baseline_reason`` in the response says which rule picked the
+    baseline.  Pass *baseline_sha* explicitly to diff against a specific
+    commit (``baseline_reason`` is then ``"given"``).
+
+    Renames are followed: a file renamed or moved since the baseline
+    (committed, or staged with ``git mv`` / ``git add``) diffs against its
+    old path, reported as ``baseline_path`` beside the current ``path``.
+    ``baseline_path`` is ``null`` when the file is new since the baseline.
+    When the file is missing at the baseline and git cannot tell whether it
+    was renamed, the response is an error
+    (``"error": "baseline_path_unresolved"``), never an all-new diff.
+
+    The node is found by identity in each side's file, never cut at its
+    indexed line range: code is re-scanned with the indexer's scanner (the
+    baseline falls back to the node's prior ids from rename history), and a
+    DocJSON section diffs as its own heading and content.  A node new since
+    the baseline has an empty ``old_content``.  When the node's position in
+    either side cannot be determined (e.g. the baseline file does not parse)
+    the response is ``{"error": "node_position_unresolved", "reason": ...}``,
+    never a diff cut from the wrong lines.
 
     When ``summary_only`` is ``False`` (default), the response is
     JSON-formatted text with keys: ``node_id``, ``baseline_sha``,
-    ``baseline_date``, ``old_content``, ``new_content``, ``summary``.
+    ``baseline_date``, ``baseline_reason``, ``path``, ``baseline_path``,
+    ``old_content``, ``new_content``, ``summary``.
 
     When ``summary_only`` is ``True``, ``old_content`` and ``new_content``
     are omitted and ``lines_added`` / ``lines_removed`` integers are
@@ -668,40 +734,12 @@ def axiom_graph_diff(
             except Exception as exc:
                 result = f"ERROR ({nid}): {exc}"
             parts.append(result)
-        return "\n\n---\n\n".join(parts)
+        return _api.NODE_DIFF_BATCH_DELIMITER.join(parts)
 
     db_path = _require_db(project_root)
     root = Path(project_root).resolve()
-    result = _api.get_node_diff(db_path, root, node_id, baseline_sha=baseline_sha)
-
-    if "error" in result:
-        return json.dumps(result)
-
-    old_lines = result["old_content"].splitlines()
-    new_lines = result["new_content"].splitlines()
-    added = sum(1 for ln in new_lines if ln not in old_lines)
-    removed = sum(1 for ln in old_lines if ln not in new_lines)
-    summary = f"+{added} / -{removed} lines in body"
-
-    if summary_only:
-        output = {
-            "node_id": node_id,
-            "baseline_sha": result["baseline_sha"],
-            "baseline_date": result["baseline_date"],
-            "summary": summary,
-            "lines_added": added,
-            "lines_removed": removed,
-        }
-    else:
-        output = {
-            "node_id": node_id,
-            "baseline_sha": result["baseline_sha"],
-            "baseline_date": result["baseline_date"],
-            "old_content": result["old_content"],
-            "new_content": result["new_content"],
-            "summary": summary,
-        }
-    return json.dumps(output, indent=2)
+    report = _api.node_diff_report(db_path, root, node_id, baseline_sha=baseline_sha, summary_only=summary_only)
+    return _api.format_node_diff_report(report)
 
 
 # ---------------------------------------------------------------------------
@@ -716,7 +754,7 @@ def axiom_graph_mark_clean(
     verified_by: str = "agent",
     node_ids: list[str] | None = None,
 ) -> str:
-    """Mark one or more CONTENT_UPDATED nodes as agent-verified.
+    """Mark nodes verified after reviewing them, clearing their drift.
 
     Records an AGENT_VERIFIED history row per node. Nodes appear in
     ``axiom-graph history agent-verified`` for pre-push human review. Use only
@@ -724,7 +762,11 @@ def axiom_graph_mark_clean(
     they are consistent.
 
     It records a verification for the node it names: LINKED_STALE on that node
-    clears when the verification is newer than the linked code's last change.
+    clears when each linked node is at the version the verification recorded.
+    A link it recorded no version for (an older verification from before
+    versions were recorded, or a link added since) falls back to the time
+    rule: it clears when the verification is newer than the linked node's
+    last change.
 
     Args:
         project_root: Absolute path to the indexed project.
@@ -795,11 +837,29 @@ def axiom_graph_mark_clean(
     return f"Marked '{node_id}' as AGENT_VERIFIED.\nReason: {reason}"
 
 
+#: How many skipped dependents the default reverify report lists before a
+#: ``+N more`` line; ``verbose=True`` lists every one.
+REVERIFY_SKIPPED_CAP = 20
+
+#: How many outstanding offenders the default report names per skipped
+#: dependent, and in the combined marked-clean note, before ``+N more``.
+REVERIFY_OFFENDERS_CAP = 3
+
+#: How many unknown batch ids the default report lists under ``Not found``
+#: before a ``+N more`` line.
+REVERIFY_NOT_FOUND_CAP = 10
+
+#: The phrase naming the scope of reverify's before/after counts.
+REVERIFY_COUNT_SCOPE = "as check counts it, frozen docs excluded"
+
+
 def axiom_graph_reverify(
     project_root: str,
     node_id: str,
     reason: str,
     verified_by: str = "agent",
+    node_ids: list[str] | None = None,
+    verbose: bool = False,
 ) -> str:
     """Verify a node and clear the LINKED_STALE it caused, in one operation.
 
@@ -809,15 +869,28 @@ def axiom_graph_reverify(
     subtree; transitive doc-to-doc chains are resolved back to their
     root offender before clearing.
 
-    Skip rule: a dependent that is also stale via *other* root offenders
-    is conservatively left LINKED_STALE and reported as skipped — clear
-    it by reverifying the other offenders (or an explicit mark_clean).
+    The call starts with the refresh ``check`` runs, so edits on disk that
+    no build has recorded count.  Skip rule: a dependent that is also stale
+    via *other* root offenders (an unbuilt edit included) is conservatively
+    left LINKED_STALE and reported as skipped — clear it by reverifying the
+    other offenders (or an explicit mark_clean).
 
-    The operation finishes with a full staleness recompute, so
-    aggregates that clear by inheritance (e.g. a doc envelope whose
-    sections were cascade-cleared) read VERIFIED in this call's own
-    report.  Cascade-cleared nodes carry ``[reverify:<source>]``
-    provenance in their history rows.
+    A cleared dependent whose own content or docstring changed and was not
+    reviewed gets a link-only verification: its LINKED_STALE clears, its
+    own status stays CONTENT_UPDATED / DESC_UPDATED, and the report counts
+    it under "own changes kept".  Other dependents are verified in full and
+    carry ``[reverify:<source>]`` provenance in their history rows.
+
+    The operation finishes with a staleness recompute.  The before and
+    after LINKED_STALE counts are the ones ``check`` shows (frozen docs
+    excluded, their doc nodes too).  The default report is compact: it
+    leads with how many LINKED_STALE nodes the call cleared, gives counts,
+    and lists only the skipped dependents with what still holds them, each
+    list capped with a ``+N more`` line (skipped dependents, the offenders
+    per dependent, unknown batch ids); marked-clean notes cover only the
+    offenders shown.  ``verbose=True`` lists everything and adds the source,
+    cleared and own-change-kept lists and how many aggregates settled by
+    inheritance; "cleared" lists only nodes this call verified.
 
     Args:
         project_root: Absolute path to the indexed project.
@@ -825,34 +898,142 @@ def axiom_graph_reverify(
         reason: Brief explanation of why dependents remain accurate.
         verified_by: Identifier for the verifier.  Defaults to
             ``'agent'``; pass the model name for traceability.
+        node_ids: Optional list of sources for batch operation.  When
+            provided, ``node_id`` is ignored: the union of every source's
+            subtree is treated as one source set, the staleness recompute
+            runs once, and one report covers the batch (unknown IDs are
+            listed under ``Not found``, not fatal).
+        verbose: List every source, cleared node, own-change-kept node and
+            skipped dependent.
     """
-    logger.debug("axiom_graph_reverify: node_id=%s", node_id)
+    logger.debug(
+        "axiom_graph_reverify: node_id=%s, batch=%s",
+        node_id,
+        len(node_ids) if node_ids else "no",
+    )
 
     db_path = _require_db(project_root)
     root = Path(project_root).resolve()
 
+    if node_ids is not None:
+        batch = _api.reverify_nodes(db_path, root, node_ids, reason, verified_by=verified_by)
+        return _format_reverify(batch, reason, verbose=verbose)
+
     result = _api.reverify_node(db_path, root, node_id, reason, verified_by=verified_by)
     if result.not_found:
         return f"ERROR: Node '{node_id}' not found."
+    return _format_reverify(result, reason, verbose=verbose, single=node_id)
 
-    cascade_count = len(result.verified) - 1
-    parts = [
-        f"Reverified '{node_id}' — source verified"
-        + (f", {cascade_count} dependent(s) cascade-verified." if cascade_count else "."),
-        f"LINKED_STALE before: {result.before_linked_stale} -> after: {result.after_linked_stale}",
-    ]
-    if result.cleared:
-        parts.append(f"\nCleared ({len(result.cleared)}):\n" + "\n".join(f"- {nid}" for nid in result.cleared))
+
+def _id_block(title: str, ids: list[str]) -> str:
+    return f"\n{title} ({len(ids)}):\n" + "\n".join(f"- {nid}" for nid in ids)
+
+
+def _format_reverify(result, reason: str, *, verbose: bool, single: str | None = None) -> str:
+    """Render a reverify report, single source or batch.
+
+    Args:
+        result: A :class:`~axiom_graph.lifecycle.api.ReverifyResult` (with
+            *single*) or :class:`~axiom_graph.lifecycle.api.ReverifyBatchResult`.
+        reason: The shared reason, echoed on the last line.
+        verbose: Add the source, cleared and own-change-kept lists, the
+            settled count, and every skipped dependent.
+        single: The source id of a single-source call.
+
+    Returns:
+        Plain-text report whose first line leads with the cleared count.
+    """
+    sources = [single] if single is not None else list(result.sources)
+    cascade_count = len(result.verified) - len(sources)
+    cleared, kept, skipped = list(result.cleared), list(result.own_change_kept), dict(result.skipped)
+    if single is not None:
+        what = f"Reverified '{single}' — source verified"
+        nothing = (_api.REVERIFY_NOTHING_CLEARED_SKIPPED, _api.REVERIFY_NOTHING_TO_CLEAR)
+        skip_title = "Skipped — also stale via other offenders"
     else:
-        parts.append("\nNothing to clear — no LINKED_STALE rooted at this node.")
-    if result.skipped:
+        what = f"Reverified {len(sources)} source(s)"
+        nothing = (_api.REVERIFY_BATCH_NOTHING_CLEARED_SKIPPED, _api.REVERIFY_BATCH_NOTHING_TO_CLEAR)
+        skip_title = "Skipped — also stale via offenders outside the batch"
+    parts = [
+        f"Cleared {len(cleared)} LINKED_STALE node(s). "
+        + what
+        + (f", {cascade_count} dependent(s) cascade-verified." if cascade_count else "."),
+    ]
+    if sources:
         parts.append(
-            f"\nSkipped — also stale via other offenders ({len(result.skipped)}):\n"
-            + "\n".join(f"- {nid} (other offenders: {', '.join(offs)})" for nid, offs in sorted(result.skipped.items()))
-            + f"\n{_api.REVERIFY_SKIP_HINT}"
+            f"Sources: {len(sources)} · cleared: {len(cleared)} · skipped: {len(skipped)} · "
+            f"own changes kept: {len(kept)}"
         )
+        parts.append(
+            f"LINKED_STALE before: {result.before_linked_stale} -> after: {result.after_linked_stale} "
+            f"({REVERIFY_COUNT_SCOPE})"
+        )
+        if not cleared:
+            parts.append(f"\n{nothing[0] if skipped else nothing[1]}")
+        if kept and not verbose:
+            parts.append(
+                f"{len(kept)} cleared dependent(s) kept their own change: review them (verbose=true lists them)."
+            )
+        if verbose:
+            parts.append(_id_block("Sources", sources))
+            if cleared:
+                parts.append(_id_block("Cleared", cleared))
+            if kept:
+                parts.append(_id_block("Own change kept — links verified, own change still to review", kept))
+            if result.settled:
+                parts.append(f"Settled by inheritance (not listed as cleared): {len(result.settled)}")
+    if skipped:
+        rows = sorted(skipped.items())
+        shown = rows if verbose else rows[:REVERIFY_SKIPPED_CAP]
+        named: set[str] = set()
+        lines = []
+        for nid, offs in shown:
+            offs_shown = offs if verbose else offs[:REVERIFY_OFFENDERS_CAP]
+            named.update(offs_shown)
+            lines.append(f"- {nid} (other offenders: {_capped_ids(offs_shown, len(offs))})")
+        if len(rows) > len(shown):
+            lines.append(f"(+{len(rows) - len(shown)} more; pass verbose=true for all)")
+        parts.append(f"\n{skip_title} ({len(rows)}):\n" + "\n".join(lines) + f"\n{_api.REVERIFY_SKIP_HINT}")
+        parts.extend(_marked_clean_notes(result.marked_clean_offenders, named, verbose=verbose))
+    not_found = list(getattr(result, "not_found", []) or []) if single is None else []
+    if not_found:
+        nf_shown = not_found if verbose else not_found[:REVERIFY_NOT_FOUND_CAP]
+        block = f"\nNot found ({len(not_found)}):\n" + "\n".join(f"- {nid}" for nid in nf_shown)
+        if len(not_found) > len(nf_shown):
+            block += f"\n(+{len(not_found) - len(nf_shown)} more; pass verbose=true for all)"
+        parts.append(block)
     parts.append(f"Reason: {reason}")
     return "\n".join(parts)
+
+
+def _capped_ids(shown: list[str], total: int) -> str:
+    """Join *shown* ids, adding ``+N more`` when *total* exceeds them."""
+    more = total - len(shown)
+    return ", ".join(shown) + (f" +{more} more" if more > 0 else "")
+
+
+def _marked_clean_notes(marked: list[str], named: set[str], *, verbose: bool) -> list[str]:
+    """Notes for skipped dependents' offenders that were marked clean, not reverified.
+
+    Verbose mode prints one note per offender.  The compact report covers
+    only the offenders its shown rows name, so the notes never grow with
+    the hidden rows, and several collapse into one line.
+
+    Args:
+        marked: Every marked-clean offender behind a skipped dependent.
+        named: The offenders the report's shown skip rows name.
+        verbose: Print one note per offender in *marked*.
+
+    Returns:
+        The note lines, possibly empty.
+    """
+    if verbose:
+        return [_api.REVERIFY_MARKED_CLEAN_NOTE.format(offender=o) for o in marked]
+    shown = [o for o in marked if o in named]
+    if len(shown) <= 1:
+        return [_api.REVERIFY_MARKED_CLEAN_NOTE.format(offender=o) for o in shown]
+    listed = _capped_ids(shown[:REVERIFY_OFFENDERS_CAP], len(shown))
+    return [_api.REVERIFY_MARKED_CLEAN_COMBINED_NOTE.format(count=len(shown), offenders=listed)]
 
 
 # ---------------------------------------------------------------------------
@@ -866,12 +1047,20 @@ def axiom_graph_purge_node(
     reason: str,
     node_ids: list[str] | None = None,
 ) -> str:
-    """Purge one or more NOT_FOUND nodes from the index.
+    """Remove NOT_FOUND nodes (deleted code or docs) from the index.
 
-    Only nodes with ``own_status = 'NOT_FOUND'`` can be purged.  Doc nodes
-    are cascade-deleted via ``delete_doc_by_id`` (removing sections too);
+    Only nodes with ``own_status = 'NOT_FOUND'`` can be purged.  A module,
+    DocJSON doc or config node whose file is still on disk is refused: its
+    NOT_FOUND is inherited from the NOT_FOUND nodes in that file, which the
+    error lists to purge if they were really removed.  Any node of a Python,
+    DocJSON or JS/TS file that is on disk but does not parse (for JS/TS, a
+    file tree-sitter parses with errors), a function or section
+    as well as the module or doc, is refused with an error saying the file
+    does not parse; it lists nothing (fix the file and re-run check, do not
+    purge its nodes).  Doc nodes are
+    cascade-deleted via ``delete_doc_by_id`` (removing sections too);
     code/other nodes use ``delete_node_by_id``.  A preserved DELETED history
-    row is written with the supplied reason.
+    row is written with actor ``agent`` and the supplied reason.
 
     Args:
         project_root: Absolute path to the indexed project.
@@ -895,12 +1084,17 @@ def axiom_graph_purge_node(
         return "\n\n---\n\n".join(results)
 
     db_path = _require_db(project_root)
-    purge_results = _api.purge_nodes(db_path, [node_id], reason)
+    purge_results = _api.purge_nodes(db_path, Path(project_root).resolve(), [node_id], reason, actor="agent")
     pr = purge_results[0]
     if pr.purged:
         return f"Purged node: {node_id} (reason: {reason})"
     if pr.reason == "not_found_in_index":
         return f"ERROR: node not found in index: {node_id}"
+    if pr.reason == _api.PURGE_REFUSED_INHERITED:
+        children = "".join(f"\n- {c}" for c in pr.deleted_children)
+        return f"ERROR: Not purged: {node_id} -- {_api.PURGE_INHERITED_HINT}.{children}"
+    if pr.reason == _api.PURGE_REFUSED_UNPARSEABLE:
+        return f"ERROR: Not purged: {node_id} -- {_api.PURGE_UNPARSEABLE_HINT}."
     if pr.reason and pr.reason.startswith("status_"):
         status = pr.reason.removeprefix("status_")
         return f"ERROR: Node {node_id} has status {status}, not NOT_FOUND. Only NOT_FOUND nodes can be purged."
@@ -917,7 +1111,7 @@ def axiom_graph_apply_rename(
     old_id: str,
     new_id: str,
 ) -> str:
-    """Manually weld a rename the automatic matcher missed.
+    """Record a rename the automatic matcher missed, keeping the node's history.
 
     Escape hatch for a real rename that fell below the similarity threshold:
     the old node became ``NOT_FOUND`` and the renamed node was indexed as a
@@ -936,7 +1130,9 @@ def axiom_graph_apply_rename(
     root = Path(project_root).resolve()
     result = _api.apply_rename(db_path, root, old_id, new_id)
     if result.applied:
-        return f"Applied rename: {old_id} -> {new_id} (new node marked RENAMED)"
+        return f"Applied rename: {old_id} -> {new_id} (new node marked RENAMED)" + _unpatched_links_note(
+            result, old_id, new_id
+        )
     return (
         f"ERROR: refused to apply rename {old_id} -> {new_id} "
         f"({result.reason}). Contract requires a NOT_FOUND old node and a "
@@ -944,11 +1140,17 @@ def axiom_graph_apply_rename(
     )
 
 
+def _unpatched_links_note(result: _api.RenameApplyResult | _api.RenameRevertResult, old_id: str, new_id: str) -> str:
+    """The lines naming DocJSON files a rename could not re-point or could not check, or ``""``."""
+    lines = _api.link_rewrite_note(result.links_unreadable, result.links_not_patched, old_id, new_id)
+    return "".join(f"\nWARNING: {line}" for line in lines)
+
+
 def axiom_graph_revert_rename(
     project_root: str,
     new_id: str,
 ) -> str:
-    """Un-weld a previously applied rename, restoring the prior identity.
+    """Undo an applied rename, restoring the node's prior identity.
 
     Re-runs the recorded migration in reverse: the renamed node's history,
     verification, and edges move back to the original ID, which is restored as
@@ -962,7 +1164,9 @@ def axiom_graph_revert_rename(
     root = Path(project_root).resolve()
     result = _api.revert_rename(db_path, root, new_id)
     if result.reverted:
-        return f"Reverted rename: restored {result.old_id} (detached {new_id})"
+        return f"Reverted rename: restored {result.old_id} (detached {new_id})" + _unpatched_links_note(
+            result, new_id, result.old_id or ""
+        )
     return f"ERROR: cannot revert {new_id} ({result.reason}). No recorded rename for this node."
 
 
@@ -978,7 +1182,7 @@ def axiom_graph_render_site(
     output_dir: str | None = None,
     targets: list[str] | None = None,
 ) -> str:
-    """Render consumer documentation site from DocJSON sources.
+    """Render the configured consumer doc targets (Sphinx pages, README) from docs.
 
     Runs the same core pipeline as the ``axiom-graph render-site`` CLI command.
     With no ``nav_path``/``output_dir``, renders every configured render target

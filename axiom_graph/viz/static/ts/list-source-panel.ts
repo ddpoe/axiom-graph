@@ -352,7 +352,7 @@ async function _probeDiff(nodeId: string): Promise<void> {
       _diffData = diff;
       diffBtn.classList.remove('hidden');
       diffBtn.disabled = false;
-      diffBtn.title = `Diff against ${(diff.baseline_sha || '').slice(0, 8)} (${(diff.baseline_date || '').slice(0, 10)})`;
+      diffBtn.title = `Diff against ${(diff.baseline_sha || '').slice(0, 8)} (${(diff.baseline_date || '').slice(0, 10)})${_baselinePathNote(diff)}`;
     }
   } catch (err) { console.warn('[list] _probeDiff failed:', err); }
 }
@@ -375,9 +375,17 @@ async function _probeDocDiff(docId: string): Promise<void> {
       _docDiffData = diff;
       diffBtn.classList.remove('hidden');
       diffBtn.disabled = false;
-      diffBtn.title = `Doc diff: ${(diff.baseline_sha || '').slice(0, 8)} \u2194 ${(diff.submodule_sha || 'current').slice(0, 8)}`;
+      diffBtn.title = `Doc diff: ${(diff.baseline_sha || '').slice(0, 8)} \u2194 current${_baselinePathNote(diff)}`;
     }
   } catch (err) { console.warn('[list] _probeDocDiff failed:', err); }
+}
+
+/** Describe where a diff's old side was read from: renamed from another path, or new since the baseline. */
+function _baselinePathNote(diff: any): string {
+  if (!diff.path) return '';
+  if (diff.baseline_path === null) return ' \u2014 new since baseline';
+  if (diff.baseline_path && diff.baseline_path !== diff.path) return ` \u2014 renamed from ${diff.baseline_path}`;
+  return '';
 }
 
 // ── Doc diff rendering ───────────────────────────────────────────────────────
@@ -450,8 +458,7 @@ function _renderDocDiff(): void {
   const titleEl = document.getElementById('list-source-title');
   if (titleEl) {
     const baseSha = (diff.baseline_sha || '').slice(0, 8);
-    const subSha = (diff.submodule_sha || 'current').slice(0, 8);
-    titleEl.textContent = `Doc Diff: ${baseSha} \u2194 ${subSha}`;
+    titleEl.textContent = `Doc Diff: ${baseSha} \u2194 current${_baselinePathNote(diff)}`;
   }
 }
 

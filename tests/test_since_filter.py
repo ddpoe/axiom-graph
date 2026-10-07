@@ -69,7 +69,8 @@ def test_resolve_cutoff_by_sha(db_path: Path):
     db.upsert_node(db_path, n, discovery_only=False)
     _seed_history(db_path, n.id, "CHECKPOINT", git_sha="deadbeef1234", preserved=True)
 
-    cutoff_ts, sha = db.resolve_since_cutoff(db_path, since_sha="deadbeef")
+    _res = db.resolve_since_cutoff(db_path, since_sha="deadbeef")
+    cutoff_ts, sha = _res.cutoff, _res.sha
     assert sha == "deadbeef1234"
     assert cutoff_ts is not None
 
@@ -79,7 +80,8 @@ def test_resolve_cutoff_by_timestamp(db_path: Path):
     n = _node("proj::mod::fn")
     db.upsert_node(db_path, n, discovery_only=False)
 
-    cutoff_ts, sha = db.resolve_since_cutoff(db_path, since_timestamp="2026-03-01T00:00:00")
+    _res = db.resolve_since_cutoff(db_path, since_timestamp="2026-03-01T00:00:00")
+    cutoff_ts, sha = _res.cutoff, _res.sha
     assert cutoff_ts == "2026-03-01T00:00:00"
     assert sha is None
 
@@ -92,7 +94,8 @@ def test_resolve_cutoff_fallback_to_latest_checkpoint(db_path: Path):
     _seed_history(db_path, n.id, "CONTENT_ONLY")
     _seed_history(db_path, n.id, "CHECKPOINT", git_sha="newer_sha", preserved=True)
 
-    cutoff_ts, sha = db.resolve_since_cutoff(db_path)
+    _res = db.resolve_since_cutoff(db_path)
+    cutoff_ts, sha = _res.cutoff, _res.sha
     assert sha == "newer_sha"
     assert cutoff_ts is not None
 
@@ -103,7 +106,8 @@ def test_resolve_cutoff_no_checkpoint(db_path: Path):
     db.upsert_node(db_path, n, discovery_only=False)
     _seed_history(db_path, n.id, "CONTENT_ONLY")
 
-    cutoff_ts, sha = db.resolve_since_cutoff(db_path)
+    _res = db.resolve_since_cutoff(db_path)
+    cutoff_ts, sha = _res.cutoff, _res.sha
     assert cutoff_ts is None
     assert sha is None
 
@@ -114,7 +118,8 @@ def test_resolve_cutoff_sha_takes_priority(db_path: Path):
     db.upsert_node(db_path, n, discovery_only=False)
     _seed_history(db_path, n.id, "CHECKPOINT", git_sha="sha_abc", preserved=True)
 
-    cutoff_ts, sha = db.resolve_since_cutoff(db_path, since_sha="sha_abc", since_timestamp="2020-01-01T00:00:00")
+    _res = db.resolve_since_cutoff(db_path, since_sha="sha_abc", since_timestamp="2020-01-01T00:00:00")
+    cutoff_ts, sha = _res.cutoff, _res.sha
     assert sha == "sha_abc"
     # The timestamp should come from the checkpoint, not the provided value
     assert cutoff_ts != "2020-01-01T00:00:00"
@@ -270,7 +275,7 @@ def test_since_diff_workflow_existing_file(db_path: Path, mini_project: Path):
     src.mkdir(parents=True, exist_ok=True)
     (src / "mod.py").write_text("def fn():\n    return 42\n")
 
-    n = _node("proj::mod::fn", location="src/mod.py", level_3_location="src/mod.py#L1-L2")
+    n = _node("proj::src.mod::fn", location="src/mod.py", level_3_location="src/mod.py#L1-L2")
     db.upsert_node(db_path, n, discovery_only=False)
     _seed_history(db_path, n.id, "CHECKPOINT", git_sha="cp_sha_1", preserved=True)
     _seed_history(db_path, n.id, "CONTENT_ONLY", git_sha="later_sha")
@@ -310,7 +315,7 @@ def test_since_diff_workflow_new_file(db_path: Path, mini_project: Path):
     src.mkdir(parents=True, exist_ok=True)
     (src / "new_mod.py").write_text("def new_fn():\n    return 99\n")
 
-    n = _node("proj::new_mod::new_fn", location="src/new_mod.py", level_3_location="src/new_mod.py#L1-L2")
+    n = _node("proj::src.new_mod::new_fn", location="src/new_mod.py", level_3_location="src/new_mod.py#L1-L2")
     db.upsert_node(db_path, n, discovery_only=False)
     _seed_history(db_path, n.id, "INITIAL", git_sha="some_sha")
 
@@ -388,7 +393,8 @@ def test_get_history_since_with_until_timestamp(db_path: Path):
 
     _seed_history(db_path, n.id, "CHECKPOINT", git_sha="cp_sha", preserved=True)
     # Record the checkpoint timestamp for the since cutoff
-    cutoff_ts, _ = db.resolve_since_cutoff(db_path, since_sha="cp_sha")
+    _res = db.resolve_since_cutoff(db_path, since_sha="cp_sha")
+    cutoff_ts, _ = _res.cutoff, _res.sha
 
     _seed_history(db_path, n.id, "CONTENT_ONLY", git_sha="mid_sha")
     _seed_history(db_path, n.id, "CONTENT_ONLY", git_sha="later_sha")
@@ -459,7 +465,7 @@ def test_since_endpoint_with_until(db_path: Path, mini_project: Path):
 
 
 def test_resolve_cutoff_explicit_sha_miss_returns_none(db_path: Path):
-    """An explicit since_sha absent from history resolves to (None, None).
+    """An explicit since_sha absent from history (and no git to ask) is unresolved.
 
     The no-arg checkpoint/any-SHA fallback must not fire for an explicit SHA —
     borrowing a different baseline would answer "changed since X" against the
@@ -470,9 +476,11 @@ def test_resolve_cutoff_explicit_sha_miss_returns_none(db_path: Path):
     # A checkpoint exists, but the caller asks for a different, un-indexed SHA.
     _seed_history(db_path, n.id, "CHECKPOINT", git_sha="indexed_sha", preserved=True)
 
-    cutoff_ts, sha = db.resolve_since_cutoff(db_path, since_sha="ffff0000")
-    assert cutoff_ts is None
-    assert sha is None
+    _res = db.resolve_since_cutoff(db_path, since_sha="ffff0000")
+    assert _res.cutoff is None
+    assert _res.sha is None
+    assert _res.source == db.SOURCE_UNRESOLVED
+    assert not _res.resolved
 
 
 def test_index_head_sha_and_indexed_shas(db_path: Path):
@@ -516,7 +524,7 @@ def test_since_endpoint_unindexed_sha_fails_loud(db_path: Path, mini_project: Pa
 
     assert result["resolved"] is False
     assert result["requested_sha"] == "deadbeefcafe"
-    assert result["reason"] == "not in index"
+    assert "not in node_history" in result["reason"]
     assert "node_ids" not in result  # never a count against the wrong baseline
     assert "index_head_sha" in result
     assert "commits_behind_head" in result

@@ -13,6 +13,8 @@ render_graph(node, edges, direction) — ASCII tree of connected edges
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from axiom_graph.models import AxiomEdge, AxiomNode
 
 
@@ -33,8 +35,18 @@ def render_level_0(nodes: list[AxiomNode]) -> str:
 _DOC_SUBTYPES = frozenset({"docjson", "docjson_doc", "docjson_section"})
 
 
-def render_level_1(nodes: list[AxiomNode]) -> str:
-    """One line per node: ``{id}  {level_1}  @ {location}`` (functions and docs)."""
+def render_level_1(nodes: list[AxiomNode], badges: Mapping[str, str] | None = None) -> str:
+    """One line per node: ``{id}  {level_1}  @ {location}`` (functions and docs).
+
+    Args:
+        nodes: The nodes to list.
+        badges: Optional ``{node_id: suffix}``: a node's suffix (a read's
+            ``"  [STATUS]"`` tag) ends its line.  Nodes absent from it, and
+            every node when it is ``None``, render unchanged.
+
+    Returns:
+        The listing, or ``"(no nodes)"``.
+    """
     if not nodes:
         return "(no nodes)"
     # Align level_1 by padding id to the longest id length
@@ -43,9 +55,8 @@ def render_level_1(nodes: list[AxiomNode]) -> str:
     for n in nodes:
         line = f"{n.id:<{max_id}}  {n.level_1}"
         if n.subtype in _DOC_SUBTYPES:
-            # Doc ids flatten every configured docs_dirs root into the same
-            # ``docs.`` namespace, so the path is the only signal of which
-            # root a doc actually lives under.
+            # Doc ids carry their docs root, but the file path also gives
+            # the extension and the exact file to open.
             loc = n.level_3_location or n.location
         elif n.level_3_location and "#L" in n.level_3_location:
             # Function-level nodes carry a line range, e.g. #L10-L45
@@ -54,6 +65,8 @@ def render_level_1(nodes: list[AxiomNode]) -> str:
             loc = None
         if loc:
             line += f"  @ {loc}"
+        if badges:
+            line += badges.get(n.id, "")
         lines.append(line)
     return "\n".join(lines)
 
@@ -108,6 +121,7 @@ def render_graph(
     edges: list[AxiomEdge],
     direction: str = "out",
     node_lookup: dict[str, AxiomNode] | None = None,
+    badges: Mapping[str, str] | None = None,
 ) -> str:
     """ASCII tree showing edge_type and connected node ids.
 
@@ -126,20 +140,25 @@ def render_graph(
         Optional mapping of node_id → AxiomNode.  When provided, function-
         level nodes (those with ``#L`` in their location) get a
         ``@ path#L10-L45`` suffix on every tree line.
+    badges:
+        Optional mapping of node_id → suffix (a read's ``"  [STATUS]"``
+        tag), appended to the root line and to every tree line naming
+        that node.
     """
+    badges = badges or {}
 
     def _fmt(nid: str) -> str:
-        """Return ``nid  @ location`` for function nodes when lookup is set."""
+        """Return ``nid  @ location`` for function nodes when lookup is set, then the node's badge."""
         if node_lookup and nid in node_lookup:
             loc = node_lookup[nid].level_3_location
             if loc and "#L" in loc:
-                return f"{nid}  @ {loc}"
-        return nid
+                return f"{nid}  @ {loc}{badges.get(nid, '')}"
+        return f"{nid}{badges.get(nid, '')}"
 
     root_loc = ""
     if node.level_3_location and "#L" in node.level_3_location:
         root_loc = f"  @ {node.level_3_location}"
-    lines = [f"[{node.node_type}] {node.id}{root_loc}"]
+    lines = [f"[{node.node_type}] {node.id}{root_loc}{badges.get(node.id, '')}"]
 
     if not edges:
         lines.append("  (no edges)")

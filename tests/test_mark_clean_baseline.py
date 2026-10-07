@@ -193,7 +193,7 @@ class TestMarkCleanDocJsonSection:
 
         # Insert node with OLD hashes (stale baseline)
         section_node = _node(
-            "proj::docs.test-doc::overview",
+            "proj::docs/test-doc::overview",
             node_type="atomic_process",
             subtype="docjson",
             code_hash="stale_section_hash",
@@ -204,17 +204,17 @@ class TestMarkCleanDocJsonSection:
 
         # Before fix: compute_staleness should see CONTENT_UPDATED
         statuses_before = compute_staleness(db_path, mini_project, [section_node])
-        assert statuses_before["proj::docs.test-doc::overview"][0] == "CONTENT_UPDATED"
+        assert statuses_before["proj::docs/test-doc::overview"][0] == "CONTENT_UPDATED"
 
         # Call mark_clean via the MCP entry point
         from axiom_graph.mcp_server import axiom_graph_mark_clean
 
-        axiom_graph_mark_clean(str(mini_project), node_id="proj::docs.test-doc::overview", reason="docs ok")
+        axiom_graph_mark_clean(str(mini_project), node_id="proj::docs/test-doc::overview", reason="docs ok")
 
         # Re-read node and check staleness
-        updated = db.get_node(db_path, "proj::docs.test-doc::overview")
+        updated = db.get_node(db_path, "proj::docs/test-doc::overview")
         statuses_after = compute_staleness(db_path, mini_project, [updated])
-        assert statuses_after["proj::docs.test-doc::overview"][0] in ("VERIFIED", "VERIFIED")
+        assert statuses_after["proj::docs/test-doc::overview"][0] in ("VERIFIED", "VERIFIED")
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +247,7 @@ class TestMarkCleanDocJsonComposite:
 
         # Insert composite node with OLD hash
         comp_node = _node(
-            "proj::docs.my-doc",
+            "proj::docs/my-doc",
             node_type="composite_process",
             subtype="docjson",
             code_hash="stale_file_hash",
@@ -258,17 +258,17 @@ class TestMarkCleanDocJsonComposite:
 
         # Before: CONTENT_UPDATED
         statuses_before = compute_staleness(db_path, mini_project, [comp_node])
-        assert statuses_before["proj::docs.my-doc"][0] == "CONTENT_UPDATED"
+        assert statuses_before["proj::docs/my-doc"][0] == "CONTENT_UPDATED"
 
         # mark_clean
         from axiom_graph.mcp_server import axiom_graph_mark_clean
 
-        axiom_graph_mark_clean(str(mini_project), node_id="proj::docs.my-doc", reason="file ok")
+        axiom_graph_mark_clean(str(mini_project), node_id="proj::docs/my-doc", reason="file ok")
 
         # After: CLEAN
-        updated = db.get_node(db_path, "proj::docs.my-doc")
+        updated = db.get_node(db_path, "proj::docs/my-doc")
         statuses_after = compute_staleness(db_path, mini_project, [updated])
-        assert statuses_after["proj::docs.my-doc"][0] in ("VERIFIED", "VERIFIED")
+        assert statuses_after["proj::docs/my-doc"][0] in ("VERIFIED", "VERIFIED")
 
 
 # ---------------------------------------------------------------------------

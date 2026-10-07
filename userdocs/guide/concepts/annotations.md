@@ -1,84 +1,212 @@
-<!-- generated from axiom_graph::docs.consumer.concepts.annotations @ 19bc2fd4c752; do not edit -->
+<!-- generated from axiom_graph::docs/consumer/concepts/annotations @ 9a0b7435b94a; do not edit -->
 
-# The Semantic Layer: Annotated Highways
+# Workflow annotations
 
-## Why not a full call graph?
+## What annotations are
 
-A full call graph answers "what calls what." That is mechanically complete and almost useless to an agent: every helper, every logging shim, every getter is a node, and the path that actually *matters* (the orchestration spine of a command) is buried in thousands of edges with no labels on them. To understand a workflow you would still have to read all the code.
+Annotations are markers you add to the functions that carry out a process, such as a CLI command, a pipeline or a request handler. `@workflow` and `@task` say what a function is for. `Step` and `AutoStep` number the phases inside it. When axiom-graph builds the index, it reads the markers from your source and records each marked function as a workflow or task with ordered steps. You or your agent can then read a process as a numbered outline, with links to the functions its steps hand off to, instead of reading all of its code.
 
-axiom-graph is deliberately **not** a full call graph. Instead it indexes a small, intentional set of *highways* — the orchestration paths a human marked as worth narrating — and annotates each one with step names, purposes, and the intent of every hop. The result: when an agent reads a workflow function, it gets a narrated path ("step 1 loads the index, step 2 hashes, step 10 delegates to the purge task") instead of a raw AST. That is the context-reduction payoff in its purest form — you load the spine, not the whole skeleton.
+Only the functions you mark get steps and hand-off links, so the outline covers the processes you chose to describe, not every call.
 
-This semantic layer is the first of axiom-graph's three pillars. It lives alongside the AST index and DocJSON, and it is what turns "a graph of symbols" into "a graph that explains itself." Everything below is about the model behind it, not just the marker syntax — for the field-by-field syntax, see the axiom-annotations markers reference linked at the end.
+The markers come from the `axiom-annotations` package, which exists for Python and for TypeScript and JavaScript. At run time they only check their own arguments: a `Step` with an empty `purpose`, for example, raises `StepValidationError`.
 
-## The markers: @workflow, @task, Step, AutoStep
+## Add markers in Python
 
-You annotate highways with four markers from the `axiom-annotations` package. They are deliberately lightweight — decorators and call-site markers, no framework, no runtime behavior change.
+Install the package in the project you are annotating, since your code imports it at run time:
+
+```
+pip install axiom-annotations
+```
 
 ```python
 from axiom_annotations import workflow, task, Step, AutoStep
 
-@workflow(purpose="Verify docs still match code", inputs="index", outputs="report")
-def cmd_check(...):
-    s = Step(step_num=1, name="Load index", purpose="Read the current graph.db")
+@task(purpose="Load and validate the raw records", inputs="CSV path", outputs="records")
+def load_records(path):
     ...
-    s = AutoStep(step_num=10, name="Purge stale entries")
-    nodes_purged = _purge_stale_entries(...)
+
+@workflow(purpose="Build the weekly sales report", outputs="report.html")
+def build_report(path):
+    s = AutoStep(step_num=1, name="Load records")
+    records = load_records(path)
+
+    s = Step(step_num=2, name="Total by region", purpose="Sum sales for each region")
+    totals = {}
+    for region in REGIONS:
+        s = Step(step_num=2.1, name="Total one region", purpose="Sum one region's rows")
+        totals[region] = sum_region(records, region)
+
+    s = Step(step_num=3, name="Render", purpose="Write the HTML report")
+    return render(totals)
 ```
 
-| Marker | Marks | Captures |
+| Marker | Where it goes | Arguments |
 |---|---|---|
-| `@workflow` | An orchestration function — the top of a highway | `purpose`, `inputs`, `outputs`, `critical` |
-| `@task` | A leaf unit of work a workflow delegates to | same decorator contract as `@workflow` |
-| `Step(...)` | An internal phase inside a decorated function | `step_num`, `name`, `purpose` |
-| `AutoStep(...)` | A `Step` whose *next call* is the work it delegates | `step_num`, `name` only — no `purpose`/`inputs`/`outputs`/`critical`; the delegate's own envelope supplies those when the step is expanded |
+| `@workflow(...)` | A function that runs a process by calling other functions | `purpose` (required), `inputs`, `outputs`, `critical` |
+| `@task(...)` | A unit of work that workflows call | Same as `@workflow` |
+| `Step(...)` | Inside a `@workflow` or `@task` function, at the start of a phase | `step_num`, `name`, `purpose` (required); `inputs`, `outputs`, `critical` |
+| `AutoStep(...)` | Inside a `@workflow` or `@task` function, on the line before a call to another `@task` or `@workflow` | `step_num` (required), `name` |
 
-The split between `@workflow` and `@task` is the intent distinction: a workflow sequences, a task does. `Step` markers narrate the phases of either; `AutoStep` is the one that also records *where execution goes next*, which is how the graph captures cross-function delegation without a full call graph.
+Every argument except `step_num` is free text; `critical` is a warning such as `"Takes 30+ minutes"`. An `AutoStep` has no `purpose` of its own: it is described by the `purpose`, `inputs` and `outputs` of the function it calls.
 
-The markers are polyglot. The same shapes ship as a Python package (`pip install axiom-annotations`) and an npm package (`npm install axiom-annotations`), and the Python and JS/TS scanners read the identical marker shapes and emit identical graph nodes. You write the same intent surface in either language. For the complete field rules — the minor-step-inside-loops constraint, validation behavior, and the strict-annotations gate — see the axiom-annotations markers reference rather than reaching for the syntax here.
+- Import the markers by name and pass their arguments by keyword. axiom-graph reads your source without running it and looks for the names `workflow`, `task`, `Step` and `AutoStep`, so it skips `@ax.workflow(...)` and ignores arguments passed by position.
+- Methods can carry markers too.
+- Put one call directly under each `AutoStep`: `f(...)` or `x = f(...)`, so a reader sees at a glance what the step runs. The function can be defined in the same file, imported from another module in the project, or a method called on `self` or `cls`. Otherwise the build reports a B4 finding.
+  - To return the result, assign it first (`x = f(...)`), then return `x`.
+  - Split a nested call such as `g(f(...))` so that `x = f(...)` stands on its own line.
+  - When the call is inside a `try`, an `if` or a loop, put the marker inside the block, directly above the call. Guard clauses and other lines go above the marker.
+  - Turn a conditional expression such as `x = f(...) if ready else None` into an `if` block with the marker inside it.
+  - An awaited call (`x = await f(...)`) is not recognized.
+- When the function a phase calls has no `@task` or `@workflow`, mark the phase with a plain `Step` and give it a `purpose`.
 
-## The node model: envelopes and steps
+## Add markers in TypeScript or JavaScript
 
-Markers do not replace your function node — they sit beside it. When the scanner finds a decorated function it produces an **envelope** node as a *peer* of the function node, plus one **step** node per `Step` / `AutoStep` call site.
+```
+npm install axiom-annotations
+```
 
-| Node | Kind | Produced from |
+JavaScript has no function decorators, so `workflow` and `task` wrap the function instead. Each marker takes one object, with camelCase keys (`stepNum`):
+
+```typescript
+import { workflow, task, Step, AutoStep } from 'axiom-annotations';
+
+export const parseRecords = task({
+  purpose: 'Parse and validate the raw records',
+  outputs: 'records',
+})((text: string) => JSON.parse(text).filter(isValid));
+
+export const buildReport = workflow({
+  purpose: 'Build the weekly sales report',
+  outputs: 'report HTML',
+})(async (path: string) => {
+  const s1 = Step({ stepNum: 1, name: 'Read export', purpose: 'Load the raw file' });
+  const text = await readFile(path, 'utf8');
+
+  const s2 = AutoStep({ stepNum: 2, name: 'Parse records' });
+  const records = parseRecords(text);
+
+  const s3 = Step({ stepNum: 3, name: 'Render', purpose: 'Write the HTML report' });
+  return render(records);
+});
+```
+
+The arguments mean the same as in Python. The differences:
+
+- Pass each marker an inline object literal. A variable (`Step(opts)`) works at run time, but axiom-graph can't read it: the workflow or step is left out of the index and the build reports a `JS-LIT-ENV` or `JS-LIT-STEP` finding.
+- Wrap functions assigned to a top-level `const`, exported or not. Class methods can't be wrapped.
+- As in Python, the statement after an `AutoStep` must call the function directly, not through `await`.
+
+axiom-graph scans JS and TS files only when they match `js_paths` under `[axiom_graph.scan]`, and it needs the `js` extra: `pip install "axiom-graph[js]"`. See [Configuration](../get-started/configuration.md).
+
+## Step numbering rules and findings
+
+Number a function's major steps 1, 2, 3 with no gaps. Use minor numbers (2.1, 2.2) only for steps inside a loop. `build` and `check` test every marker against the rules below and print the findings:
+
+```
+Annotation findings: 1 (1 new, 0 resolved)
+  ! [B2] app/report.py:12 build_report — major step sequence has gaps in 'build_report': missing [2], have [1, 3]
+```
+
+| Rule | Checks that |
+|---|---|
+| A1 | `step_num` is a positive number |
+| A2 | each `Step` has a non-empty `name` and `purpose` |
+| A3 | an `AutoStep` `name`, if given, is a non-empty string |
+| B1 | no two steps in one function share a `step_num` |
+| B2 | major step numbers run 1, 2, 3 with no gaps |
+| B3 | minor step numbers (2.1) sit inside a loop |
+| B4 | the statement after an `AutoStep` calls a `@task` or `@workflow` function in the project |
+| C1 | every `@workflow` and `@task` has a non-empty `purpose` |
+| JS-LIT-ENV, JS-LIT-STEP | JS/TS marker arguments are inline object literals |
+| X1 | xstate machine configs are inline literals |
+
+After the count line, `build` and `check` list the new findings; `check --all` lists every one. `axiom-graph check --strict-annotations` exits 1 while any finding remains, for use in CI. You can turn the whole check, or single rules A1 to C1, off under `[axiom_graph.validation]`; see [Configuration](../get-started/configuration.md).
+
+## What axiom-graph builds
+
+For each `@workflow` or `@task` function, the build adds a workflow (or task) node beside the function's own node, and one node per `Step` and `AutoStep`. Their ids extend the function's id:
+
+| Node | Example id | Holds |
 |---|---|---|
-| Function | `atomic_process` / `function` | the function itself — the code truth |
-| Workflow envelope | `composite_process` / `workflow` | a `@workflow`-decorated function |
-| Task envelope | `composite_process` / `task` | a `@task`-decorated function |
-| Step node | `atomic_process` / `step` | a `Step(...)` call site |
-| AutoStep node | `atomic_process` / `autostep` | an `AutoStep(...)` call site |
+| The function | `myapp::app.report::build_report` | The code, as for any function |
+| Its workflow or task | `myapp::app.report::build_report@workflow` (also for a `@task`) | `purpose`, `inputs`, `outputs`, `critical` |
+| A step | `myapp::app.report::build_report::step-2.1` | The step number, `name` and `purpose` |
 
-The key idea: **the function is the code truth; the envelope is the annotation contract.** They are separate rows. The function's hash tracks the body; the envelope's hash tracks the decorator kwargs (`purpose`, `inputs`, `outputs`). That separation is what lets the intent contract drift independently of the implementation — if you change *what* a workflow promises without changing *how* it works, the envelope goes stale while the function does not, and vice versa. Drift is a read on the [mesh](staleness.md), and the envelope/function split gives that read two independent dimensions.
+These edges connect them:
 
-Step and AutoStep nodes are real, addressable nodes — they get stable IDs (`...::step-3`, `...::step-3.1`, preserving the authored number for display fidelity) — but they carry **no staleness of their own**. A step's content already changes when its enclosing function body changes, so giving each step its own staleness dimension would only produce noise and force per-step verification ceremony with no review value. Steps exist purely for addressability: they are the targets of delegation edges and the rows the step-by-step renderer walks. The right review gate is the function and the envelope, not every marker.
+- `annotates` links the workflow or task node to its function.
+- `composes` links the workflow or task node to each of its steps.
+- `delegates_to` links an `AutoStep` to the function called on the next line. Following `delegates_to` from step to step walks a process across files.
 
-## The edges: annotates and delegates_to
+For every node and edge type, see [the ontology](ontology.md).
 
-Two intent-typed edges wire the semantic layer into the rest of the [mesh](the-mesh.md). Like every edge in axiom-graph, they are typed by *intent*, not by mechanism — which is what lets you traverse straight to the meaning instead of reconstructing it from a wall of call sites.
+## See the result
 
-| Edge | From | To | Reads as |
-|---|---|---|---|
-| `annotates` | workflow / task envelope | the function it wraps | "this contract annotates that function" |
-| `delegates_to` | an AutoStep node (or an envelope) | the called function or task | "at this step, execution hands off there" |
+After a build, read workflows through the MCP tools:
 
-`annotates` is the bridge between the contract and the code: one per envelope, pointing from the envelope to the function that is the real implementation. `delegates_to` is the edge that makes the highway a *path* — it originates from the **AutoStep node**, not the envelope, because the AutoStep has a concrete position in the function body. The edge `autostep --delegates_to--> task` therefore says "*at this step position* in this workflow, execution delegates to that task," preserving the step ordering that an envelope-level edge would flatten away.
+- `axiom_graph_workflow_list` lists workflows, tasks and state machines with their purpose and file. Filter by `role` (`workflow`, `task` or `state_machine`), `module` (a path substring), `has_steps`, or `scope` (`production`, `tests` or `all`; the default, `production`, leaves out files under `test_paths`).
+- `axiom_graph_workflow_detail` takes a function name or node id and lists its steps in order. An `AutoStep` shows the function it calls, and that function's own steps follow under it. `verbose=true` adds each step's purpose, inputs and outputs; for an `AutoStep` they come from the function it calls. `format="json"` returns the same data as JSON.
 
-This is the whole reason the semantic layer beats a call graph for comprehension. Follow one workflow envelope's `annotates` edge to its code, then walk its AutoStep nodes' `delegates_to` edges, and you traverse exactly the spine of the operation — narrated, ordered, and intent-labeled — without grepping. These two edge types take their place in the broader [ontology](ontology.md) alongside `documents` (a doc section describing code) and `validates` (a test covering code); the semantic layer adds the *orchestration* dimension to that same shared mesh.
+With the Python example above saved as `app/report.py` in a project whose id is `myapp`, `axiom_graph_workflow_detail` for `build_report` prints:
 
-## Reading the highways back
+```
+=== build_report (@workflow) ===
+file: app/report.py#L7
+axiom_graph_node: myapp::app.report::build_report
 
-Annotation only pays off if the narrated path is easy to pull back out. Three reads against the mesh surface it — two MCP tools your agent calls, plus a render:
+Steps (4):
+  1. Load records → myapp::app.report::load_records
+  2. Total by region
+  2.1. Total one region
+  3. Render
+```
 
-- `axiom_graph_workflow_list` — every workflow, task, and state-machine envelope, with role, purpose summary, and file location. Filter to one role to scope it.
-- `axiom_graph_workflow_detail` — for a `@workflow` / `@task`, the ordered steps and their delegation targets; for a state machine, the state list and transitions. It dispatches automatically on the envelope's subtype.
-- `axiom_graph_render(level=3)` — renders a workflow-annotated function with its step markers inline, next to the code summary.
+From the CLI, `axiom-graph render . --level steps --id <function id>` prints a Python function's steps with their purposes; `axiom_graph_render` with `level=3` does the same:
 
-The same data appears graphically in the Workflows tab of the [viz dashboard](../viz.md), with delegation edges drawn beside each function's step breakdown. Either way, the consumer reads one narrated highway instead of loading the file and reconstructing the sequence by hand — the agent-native MCP path is the primary surface, the viz a secondary lens on the identical mesh.
+```
+=== myapp::app.report::build_report ===
+  [1] Load records
+       purpose : 
+  [2] Total by region
+       purpose : Sum sales for each region
+  [2.1] Total one region
+       purpose : Sum one region's rows
+  [3] Render
+       purpose : Write the HTML report
+```
 
-## Beyond annotations: framework-aware extraction
+The Workflows tab of the [dashboard](../viz.md) shows the steps and their hand-offs. To send a workflow and its code to someone, export it as one HTML page: from that tab, with `axiom-graph workflows export`, or with the `axiom_graph_workflow_export` MCP tool. See [Share a workflow and its code](../examples/share-a-workflow.md).
 
-Annotations are how *you* narrate a highway. But some frameworks already encode the highway structurally — their own syntax names the states and transitions. For those, asking an author to re-annotate by hand would be redundant. So the semantic layer extends a second way: **framework-aware extraction**, where a dedicated scanner reads a framework's native structure directly and emits the same envelope + edge model.
+## How markers affect drift
 
-The proven example is **xstate v5**. The `xstate_scanner` reads `createMachine({...})` (and the `setup(...).createMachine(...)` form) and produces a `state_machine` envelope, one `state` node per state, `composes` edges from machine to states and parents to substates, and `delegates_to` edges that carry transition metadata — `{event}` for `on`, `{via: "always"}`, `{delay}` for `after`. `invoke` and `spawn` resolve through the same import-resolution machinery the JS/TS marker scanner uses. The result lands in the *same* graph as your hand-annotated Python workflows and surfaces through the *same* `workflow_list` / `workflow_detail` tools — a state machine is just another kind of narrated highway.
+Annotated functions take part in [drift detection](staleness.md):
 
-The important part is the discipline, not the toggle count. A framework earns its own scanner only when the trade is clearly worth it: its native structure is richer than annotations could express, it is load-bearing in the codebase long-term, and there are enough instances to amortize the scanner's maintenance cost. When a framework fails that bar, the cheaper extension is usually a new field on the `axiom-annotations` envelope — linear value, sub-linear maintenance, and it works across every language the annotations support. xstate v5 clears the bar; most things don't, and that's by design. The point of showing xstate here is not the framework itself but the evidence that the model extends: the same node-and-edge mesh absorbs hand-written intent and machine-extracted structure without forking.
+- Editing a decorator's `purpose`, `inputs`, `outputs` or `critical` marks the workflow or task node `CONTENT_UPDATED`.
+- When a function's code or docstring changes, its workflow or task node becomes `LINKED_STALE`, so you check that its `purpose` still holds. A workflow also becomes `LINKED_STALE` when code changes in a function that one of its `AutoStep`s calls, directly or further down the chain.
+- Step nodes have no drift status. In Python, editing a `Step` or `AutoStep` marker counts as a change to the function's description, like a docstring edit (`DESC_UPDATED`), so docs and tests linked to the function are not flagged.
+- In TypeScript and JavaScript, the wrapper options and the markers are part of the function's code, so editing them also marks the function `CONTENT_UPDATED`.
+
+## xstate state machines
+
+axiom-graph also reads xstate v5 state machines in the JS and TS files that `js_paths` covers, with no markers needed. It recognizes `createMachine({...})` and `setup({...}).createMachine({...})` and adds:
+
+- a state machine node for each machine, and a node for each state, nested under its parent state;
+- a `delegates_to` link for each transition, recorded with its event (`on`), `always`, or delay (`after`);
+- a `delegates_to` link from a state that `invoke`s an actor to that actor, and to its `onDone` and `onError` states;
+- a link from the machine to each actor it `spawn`s.
+
+```typescript
+export const doorMachine = createMachine({
+  id: 'door',
+  initial: 'closed',
+  states: {
+    closed: { on: { OPEN: 'open' } },
+    open: { on: { CLOSE: 'closed' }, after: { 5000: 'alarm' } },
+    alarm: { type: 'final' },
+  },
+});
+```
+
+This gives a `door` machine node, three state nodes, and three `delegates_to` links: `closed` to `open` on `OPEN`, `open` to `closed` on `CLOSE`, and `open` to `alarm` after 5000 ms.
+
+Write the machine config as inline literals. A part that is a variable, a spread or a function call is skipped with an `X1` finding. State machines appear in `axiom_graph_workflow_list`, and `axiom_graph_workflow_detail` lists their states, each with its transitions, and marks final states.

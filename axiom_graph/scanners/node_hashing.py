@@ -11,7 +11,12 @@ Disagreements between those implementations caused chronic
 names and ``@workflow`` / ``@task`` envelopes (titles like
 ``"get_stale_tests @task"`` that no AST walker could match).
 
-This primitive provides two entry points:
+It also owns :func:`scan_blob_at_location`, which scans arbitrary content
+(a baseline blob, or the file on disk) as if it were the file at a given
+repo-relative path, for callers that need each node's position in that
+content rather than its hash.
+
+This primitive provides two hashing entry points:
 
 * :func:`current_node_hash` — single-node lookup; parses the file each
   call.  Used by ``mark_clean``.
@@ -46,21 +51,34 @@ Design notes
 from __future__ import annotations
 
 import ast
+import copy
+import functools
 import logging
+import os
 import shutil
 import tempfile
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from axiom_graph.models import hash16
 from axiom_graph.scanners._step_helpers import envelope_code_hash
-from axiom_graph.scanners.module_scanner import _extract_dflow_meta, _split_function
+from axiom_graph.scanners.module_scanner import _extract_dflow_meta, _function_desc_text, _split_function
 
 if TYPE_CHECKING:
     from axiom_graph.models import AxiomNode
 
 logger = logging.getLogger(__name__)
+
+#: Version of the hashing scheme: what :func:`current_node_hashes_for_file`
+#: returns for given bytes.  Bump it with any change to that output; the
+#: staleness scheme stamp then makes the next ``check`` re-hash every file
+#: once, so no file keeps a hash taken under the old scheme.  A golden-hash
+#: test pins the output to this value.
+HASHING_SCHEME = "3"
 
 
 # ---------------------------------------------------------------------------
@@ -190,9 +208,10 @@ def _walk_python_functions(
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 qualified = f"{prefix}{child.name}" if prefix else child.name
                 code_text, docstring = _split_function(child)
+                desc_text = _function_desc_text(child, docstring)
                 out[qualified] = (
                     hash16(code_text),
-                    hash16(docstring) if docstring else None,
+                    hash16(desc_text) if desc_text else None,
                 )
                 # Recurse into nested defs (closures still hashable by
                 # qualified name, though rarely targeted directly).
@@ -227,26 +246,140 @@ def _walk_python_envelope_hashes(tree: ast.AST) -> dict[str, str]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# One parse per file per operation
+# ---------------------------------------------------------------------------
+
+#: The open operation's DocJSON scans, ``{key: {node_id: node snapshot}}``;
+#: ``None`` outside :func:`parse_cache`.  A context variable, so it never
+#: outlives the operation and is never shared between threads.
+_PARSE_CACHE: ContextVar[dict | None] = ContextVar("axiom_graph_parse_cache", default=None)
+
+_F = TypeVar("_F", bound=Callable)
+
+
+@contextmanager
+def parse_cache() -> Iterator[None]:
+    """Share DocJSON scans among everything one operation runs; dropped when it ends.
+
+    Inside the block a DocJSON file whose text is unchanged is scanned once:
+    the re-index's scan (:func:`scan_docjson_file`) and every later hash
+    lookup of the file (:func:`current_node_hashes_for_file`) read the same
+    scan.  An entry is keyed on the file's path, project root, project id,
+    docs dir and the fingerprint of its text, read again at each lookup, so a
+    file whose text changed is scanned afresh.  A block opened inside another
+    shares the outer one's cache.
+    """
+    if _PARSE_CACHE.get() is not None:
+        yield
+        return
+    token = _PARSE_CACHE.set({})
+    try:
+        yield
+    finally:
+        _PARSE_CACHE.reset(token)
+
+
+def one_parse_per_file(fn: _F) -> _F:
+    """Decorator: run each call of *fn* inside :func:`parse_cache`.
+
+    Args:
+        fn: The operation.
+
+    Returns:
+        The wrapped operation.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with parse_cache():
+            return fn(*args, **kwargs)
+
+    return wrapper  # type: ignore[return-value]
+
+
+def _text_fingerprint(abs_path: Path) -> str | None:
+    """``hash16`` of the file's text, read as the DocJSON scanner reads it; ``None`` when unreadable."""
+    try:
+        return hash16(abs_path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return None
+
+
+def _scan_key(abs_path: Path, project_root: Path, project_id: str, docs_dir) -> tuple | None:
+    """The open cache's key for a scan of *abs_path* as it is now; ``None`` when no cache is open."""
+    if _PARSE_CACHE.get() is None:
+        return None
+    fp = _text_fingerprint(abs_path)
+    if fp is None:
+        return None
+    return (
+        os.path.normcase(str(abs_path.resolve())),
+        os.path.normcase(str(project_root.resolve())),
+        project_id,
+        None if docs_dir is None else str(docs_dir),
+        fp,
+    )
+
+
+def scan_docjson_file(abs_path: Path, project_root: Path, project_id: str, docs_dir=None) -> tuple:
+    """Scan a DocJSON file (``scan_single_json_doc``), and keep the scan for the open operation's later lookups.
+
+    The caller gets the scan's own objects.  The cache keeps a copy of each
+    node, so a caller that changes a node cannot change what a later lookup
+    reads.  The scan is kept only when the file's text is the same after the
+    scan as before it.
+
+    Args:
+        abs_path: The DocJSON file.
+        project_root: Project root.
+        project_id: Project id.
+        docs_dir: The docs dir the file matched (``_matched_docs_dir``).
+
+    Returns:
+        ``(nodes, edges, doc_records, section_records)``.
+    """
+    from axiom_graph.docjson.parse import scan_single_json_doc  # noqa: PLC0415
+
+    key = _scan_key(abs_path, project_root, project_id, docs_dir)
+    result = scan_single_json_doc(abs_path, project_root, project_id, docs_dir=docs_dir)
+    cache = _PARSE_CACHE.get()
+    if key is not None and cache is not None and _text_fingerprint(abs_path) == key[-1]:
+        cache[key] = {sn.id: copy.copy(sn) for sn in result[0]}
+    return result
+
+
 def _scan_docjson_sections(
     abs_path: Path,
     project_root: Path,
     project_id: str,
 ) -> dict[str, "AxiomNode"]:
-    """Scan a DocJSON file and return ``{section_id: scanned_node}``.
+    """Scan a document file and return ``{node_id: scanned_node}``.
 
-    Returns an empty dict if scanning fails for any reason.
+    A ``.md`` file goes through the Markdown scanner and anything else through
+    the DocJSON scanner: Markdown document and section nodes share the
+    ``docjson`` subtype, so the suffix decides the scanner.  Inside
+    :func:`parse_cache` a scan of the file's current text that the operation
+    already made is reused.  Returns an empty dict if scanning fails for any
+    reason.
     """
     try:
-        from axiom_graph.docjson.parse import scan_single_json_doc  # noqa: PLC0415
         from axiom_graph.index.builder import _matched_docs_dir  # noqa: PLC0415
 
         matched = _matched_docs_dir(abs_path, project_root)
-        scanned_nodes, _, _, _ = scan_single_json_doc(
-            abs_path,
-            project_root,
-            project_id,
-            docs_dir=matched,
-        )
+        key = _scan_key(abs_path, project_root, project_id, matched)
+        cache = _PARSE_CACHE.get()
+        if key is not None and cache is not None and key in cache:
+            return cache[key]
+        if abs_path.suffix.lower() == ".md":
+            from axiom_graph.scanners.doc_scanner import scan_markdown_file  # noqa: PLC0415
+
+            md_nodes, _ = scan_markdown_file(abs_path, project_root, project_id, docs_dir=matched)
+            scanned = {sn.id: sn for sn in md_nodes}
+            if key is not None and cache is not None and _text_fingerprint(abs_path) == key[-1]:
+                cache[key] = {sid: copy.copy(sn) for sid, sn in scanned.items()}
+            return scanned
+        scanned_nodes, _, _, _ = scan_docjson_file(abs_path, project_root, project_id, docs_dir=matched)
         return {sn.id: sn for sn in scanned_nodes}
     except Exception as exc:
         logger.debug("Failed to scan docjson at %s: %s", abs_path, exc)
@@ -407,6 +540,9 @@ def current_node_hashes_for_file(
     abs_path: Path,
     nodes: list["AxiomNode"],
     project_root: Path,
+    *,
+    unindexed_out: list[str] | None = None,
+    indexed_ids: set[str] | frozenset[str] | None = None,
 ) -> dict[str, tuple[str | None, str | None]]:
     """Batch ``current_node_hash`` over every ``node`` for one file.
 
@@ -438,6 +574,13 @@ def current_node_hashes_for_file(
         abs_path: Absolute path to the file on disk.
         nodes: Every node whose location resolves to ``abs_path``.
         project_root: Absolute path to the project root.
+        unindexed_out: When given, receives the names the parse found that
+            none of *nodes* names: functions and tests (qualified name),
+            and DocJSON sections and JS/TS functions (node id).  The
+            staleness refresh reports them as structure only ``build``
+            adds.
+        indexed_ids: Every id the index holds at this file, step views
+            included, for the JS/TS comparison; defaults to *nodes*.
 
     Returns:
         Dict mapping ``node.id`` to ``(code_hash, desc_hash)`` for
@@ -500,9 +643,16 @@ def current_node_hashes_for_file(
             # so caller maps to NOT_FOUND.
 
     # DocJSON sections — single scan, look up each node.
-    if docjson_section_nodes:
-        proj_id = docjson_section_nodes[0].id.split("::")[0]
+    if docjson_section_nodes or (unindexed_out is not None and docjson_composite_nodes):
+        proj_id = (docjson_section_nodes or docjson_composite_nodes)[0].id.split("::")[0]
         scanned_map = _scan_docjson_sections(abs_path, project_root, proj_id)
+        if unindexed_out is not None and scanned_map:
+            indexed = {n.id for n in docjson_section_nodes} | {n.id for n in docjson_composite_nodes}
+            unindexed_out.extend(
+                sid
+                for sid, sn in scanned_map.items()
+                if sid not in indexed and getattr(sn, "subtype", None) in ("docjson", "docjson_section")
+            )
         for n in docjson_section_nodes:
             sn = scanned_map.get(n.id)
             if sn is not None:
@@ -513,7 +663,8 @@ def current_node_hashes_for_file(
             # else: omit -- caller maps to NOT_FOUND.
 
     # Python AST — parse once, walk for both functions and envelopes.
-    if python_nodes or envelope_nodes:
+    is_python = abs_path.suffix == ".py"
+    if python_nodes or envelope_nodes or (unindexed_out is not None and is_python):
         tree: ast.AST | None = None
         try:
             source = abs_path.read_text(encoding="utf-8", errors="replace")
@@ -522,18 +673,24 @@ def current_node_hashes_for_file(
             logger.debug("Python AST parse failed at %s: %s", abs_path, exc)
 
         if tree is not None:
-            func_hashes = _walk_python_functions(tree) if python_nodes else {}
+            want_names = unindexed_out is not None and is_python
+            func_hashes = _walk_python_functions(tree) if (python_nodes or want_names) else {}
             env_hashes = _walk_python_envelope_hashes(tree) if envelope_nodes else {}
 
+            matched: set[str] = set()
             for n in python_nodes:
                 qualified = _qualified_name_from_node_id(n.id)
                 if qualified in func_hashes:
                     result[n.id] = func_hashes[qualified]
+                    matched.add(qualified)
                     continue
                 short = qualified.split(".")[-1]
                 if short in func_hashes:
                     result[n.id] = func_hashes[short]
+                    matched.add(short)
                 # else: omit -- caller maps to NOT_FOUND.
+            if want_names:
+                unindexed_out.extend(q for q in func_hashes if q not in matched)
 
             for n in envelope_nodes:
                 func_name = _envelope_func_name(n.id)
@@ -560,6 +717,9 @@ def current_node_hashes_for_file(
                     result[n.id] = hit
                 # else: omit -- a genuinely deleted JS/TS function, caller
                 # maps to NOT_FOUND (parity with the Python branch).
+            if unindexed_out is not None:
+                indexed_js = set(indexed_ids) if indexed_ids is not None else {n.id for n in nodes}
+                unindexed_out.extend(nid for nid in js_map if nid not in indexed_js)
 
     return result
 
@@ -610,36 +770,194 @@ def node_hashes_for_blob(
     if not nodes:
         return {}
 
+    try:
+        with _mirrored_blob(blob_text, project_root, location) as (mirror_path, tmp_root_path):
+            return current_node_hashes_for_file(mirror_path, nodes, tmp_root_path)
+    except OSError as exc:
+        logger.debug("Failed to materialise blob for hashing at %s: %s", location, exc)
+        return {}
+
+
+@contextmanager
+def _mirrored_blob(blob_text: str, project_root: Path, location: str) -> Iterator[tuple[Path, Path]]:
+    """Materialise *blob_text* at ``<tmp>/<location>`` under a private temp root.
+
+    The temp root mirrors the file's repo-relative path so path-derived node
+    ids (Python modules, JS/TS, DocJSON sections) come out exactly as the
+    indexer derives them for the real file.  The project's
+    ``axiom-graph.toml`` is copied in so docs-dir resolution matches.  The
+    real working-tree file is never written; the temp root is removed on exit.
+
+    Args:
+        blob_text: The file content to materialise.
+        project_root: Absolute path to the real project root (config source only).
+        location: Repo-relative path the content is mirrored at.
+
+    Yields:
+        ``(mirror_path, tmp_root_path)``.
+
+    Raises:
+        OSError: When the temp file cannot be written.
+    """
     # Normalise the location to a relative POSIX path so the mirror reproduces
     # the exact relative path the scanners hash against.
     rel = Path(location.replace("\\", "/"))
-
-    tmp_root: str | None = None
+    tmp_root = tempfile.mkdtemp(prefix="axiom_blob_hash_")
     try:
-        tmp_root = tempfile.mkdtemp(prefix="axiom_blob_hash_")
         tmp_root_path = Path(tmp_root)
-
-        # Mirror the file at <tmp>/<location> so relative-path-derived node ids
-        # (JS/TS, DocJSON) match the stored node.id exactly.
         mirror_path = tmp_root_path / rel
         mirror_path.parent.mkdir(parents=True, exist_ok=True)
         mirror_path.write_text(blob_text, encoding="utf-8")
 
-        # Copy the project config into the temp root so DocJSON docs-dir
-        # resolution (custom `docs_dirs`) matches and produces identical
-        # section ids. Absent / unreadable config falls back to defaults —
-        # harmless for the default `docs` layout.
+        # Absent / unreadable config falls back to defaults -- harmless for the
+        # default `docs` layout.
         src_toml = project_root / "axiom-graph.toml"
         if src_toml.exists():
             try:
                 shutil.copyfile(src_toml, tmp_root_path / "axiom-graph.toml")
             except OSError as exc:
-                logger.debug("Failed to mirror config for blob hash: %s", exc)
+                logger.debug("Failed to mirror config for blob scan: %s", exc)
 
-        return current_node_hashes_for_file(mirror_path, nodes, tmp_root_path)
-    except OSError as exc:
-        logger.debug("Failed to materialise blob for hashing at %s: %s", location, exc)
-        return {}
+        yield mirror_path, tmp_root_path
     finally:
-        if tmp_root is not None:
-            shutil.rmtree(tmp_root, ignore_errors=True)
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+@dataclass(frozen=True)
+class BlobScan:
+    """Outcome of scanning file content with the indexer's own scanner.
+
+    Attributes:
+        nodes: ``{node_id: scanned_node}`` -- empty when the scan failed.
+            Where one scan yields the same id twice, the later node wins, the
+            same order the build upserts them in (DocJSON keeps the first,
+            per its scanner).
+        error: ``None`` on a clean or partial scan; otherwise why the content
+            could not be scanned (parse failure, scanner unavailable, file
+            kind with no identity scan).  A failed scan never reads as "no
+            nodes".
+        partial: ``True`` when the scanner parsed the content with errors and
+            extracted what it could (tree-sitter).  A node missing from a
+            partial scan is undetermined, not absent.
+    """
+
+    nodes: dict[str, "AxiomNode"]
+    error: str | None = None
+    partial: bool = False
+
+
+def scan_blob_at_location(
+    blob_text: str,
+    project_root: Path,
+    location: str,
+    project_id: str,
+) -> BlobScan:
+    """Scan *blob_text* as if it were the file at *location*, through the build's dispatch.
+
+    The content is mirrored at its **current** repo-relative path under a
+    private temp root (see :func:`_mirrored_blob`), so scanned ids are
+    directly comparable to indexed ids even when the content came from a
+    commit where the file lived elsewhere.  Dispatch follows the build:
+    ``.py`` through ``module_scanner``; ``.js``/``.jsx``/``.ts``/``.tsx``
+    through ``js_scanner`` then ``xstate_scanner``; DocJSON through the
+    DocJSON scanner; ``.md`` through the Markdown scanner.  Unlike :func:`node_hashes_for_blob`, failure is
+    reported distinctly from absence.
+
+    Args:
+        blob_text: File content (e.g. ``git show`` output or the file on disk).
+        project_root: Absolute path to the real project root; read for config
+            only, never written.
+        location: Repo-relative path of the file at the current index.
+        project_id: Project id prefix for scanned node ids.
+
+    Returns:
+        A :class:`BlobScan` with the scanned nodes, or an ``error`` naming
+        why the content could not be scanned.
+    """
+    suffix = Path(location).suffix
+    try:
+        with _mirrored_blob(blob_text, project_root, location) as (mirror_path, tmp_root):
+            if suffix == ".py":
+                return _scan_python_blob(blob_text, mirror_path, tmp_root, project_id)
+            if suffix in _JS_TS_EXTENSIONS:
+                return _scan_js_blob(blob_text, mirror_path, tmp_root, project_id)
+            if suffix in (".docjson", ".json"):
+                return _scan_docjson_blob(mirror_path, tmp_root, project_id)
+            if suffix.lower() == ".md":
+                return _scan_markdown_blob(mirror_path, tmp_root, project_id)
+            return BlobScan({}, error=f"no identity scan for '{suffix or location}' files")
+    except OSError as exc:
+        return BlobScan({}, error=f"could not materialise the content for scanning: {exc}")
+
+
+def _scan_python_blob(blob_text: str, mirror_path: Path, tmp_root: Path, project_id: str) -> BlobScan:
+    """Scan mirrored Python content; a parse failure is an error, never "no nodes".
+
+    ``scan_module`` turns a ``SyntaxError`` into a lone module stub, which would
+    read as "every function absent", so the content is parsed first.
+    """
+    from axiom_graph.scanners import module_scanner  # noqa: PLC0415
+
+    try:
+        ast.parse(blob_text, filename=str(mirror_path))
+    except (SyntaxError, ValueError) as exc:
+        return BlobScan({}, error=f"Python file does not parse: {exc}")
+    try:
+        scanned, _ = module_scanner.scan_module(mirror_path, tmp_root, project_id)
+    except Exception as exc:  # noqa: BLE001 -- any scanner failure is "unscannable"
+        return BlobScan({}, error=f"Python scanner failed: {exc}")
+    return BlobScan({sn.id: sn for sn in scanned})
+
+
+def _scan_js_blob(blob_text: str, mirror_path: Path, tmp_root: Path, project_id: str) -> BlobScan:
+    """Scan mirrored JS/TS content with ``js_scanner`` then ``xstate_scanner``, as the build does."""
+    from axiom_graph.scanners import js_scanner  # noqa: PLC0415
+
+    if not js_scanner.HAS_TREE_SITTER:
+        return BlobScan({}, error="tree-sitter is not installed, so JS/TS files cannot be scanned")
+    try:
+        parser = js_scanner.Parser(js_scanner._get_language(mirror_path.suffix))
+        partial = bool(parser.parse(blob_text.encode("utf-8")).root_node.has_error)
+        scanned, _ = js_scanner.scan_js_module(mirror_path, tmp_root, project_id)
+    except Exception as exc:  # noqa: BLE001 -- tree-sitter is error-tolerant; a raise is exotic
+        return BlobScan({}, error=f"JS/TS scanner failed: {exc}")
+    nodes = {sn.id: sn for sn in scanned}
+    try:
+        from axiom_graph.scanners import xstate_scanner  # noqa: PLC0415
+
+        xs_nodes, _ = xstate_scanner.scan_xstate_module(mirror_path, tmp_root, project_id)
+    except Exception as exc:  # noqa: BLE001
+        return BlobScan({}, error=f"xstate scanner failed: {exc}")
+    nodes.update({sn.id: sn for sn in xs_nodes})
+    return BlobScan(nodes, partial=partial)
+
+
+def _scan_docjson_blob(mirror_path: Path, tmp_root: Path, project_id: str) -> BlobScan:
+    """Scan mirrored DocJSON content; invalid JSON or a missing key is an error."""
+    from axiom_graph.docjson.parse import scan_single_json_doc  # noqa: PLC0415
+    from axiom_graph.index.builder import _matched_docs_dir  # noqa: PLC0415
+
+    try:
+        scanned, _, _, _ = scan_single_json_doc(
+            mirror_path, tmp_root, project_id, docs_dir=_matched_docs_dir(mirror_path, tmp_root)
+        )
+    except Exception as exc:  # noqa: BLE001 -- JSON errors, missing keys, bad sections
+        return BlobScan({}, error=f"DocJSON file does not parse: {exc}")
+    nodes: dict[str, AxiomNode] = {}
+    for sn in scanned:
+        nodes.setdefault(sn.id, sn)
+    return BlobScan(nodes)
+
+
+def _scan_markdown_blob(mirror_path: Path, tmp_root: Path, project_id: str) -> BlobScan:
+    """Scan mirrored Markdown content into its document and H2 section nodes, as the build does."""
+    from axiom_graph.index.builder import _matched_docs_dir  # noqa: PLC0415
+    from axiom_graph.scanners.doc_scanner import scan_markdown_file  # noqa: PLC0415
+
+    try:
+        scanned, _ = scan_markdown_file(
+            mirror_path, tmp_root, project_id, docs_dir=_matched_docs_dir(mirror_path, tmp_root)
+        )
+    except Exception as exc:  # noqa: BLE001 -- any scanner failure is "unscannable"
+        return BlobScan({}, error=f"Markdown scanner failed: {exc}")
+    return BlobScan({sn.id: sn for sn in scanned})

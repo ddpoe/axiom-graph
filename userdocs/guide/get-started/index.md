@@ -1,4 +1,4 @@
-<!-- generated from axiom_graph::docs.consumer.get-started @ 83fbe087a72d; do not edit -->
+<!-- generated from axiom_graph::docs/consumer/get-started @ 83fbe087a72d; do not edit -->
 
 # Get Started
 

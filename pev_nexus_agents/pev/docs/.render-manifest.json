@@ -1,14 +1,14 @@
 {
   "readme.md": {
-    "doc_id": "axiom_graph::docs.consumer.plugins.pev.readme",
-    "hash": "488a1226fa65"
+    "doc_id": "axiom_graph::docs/consumer/plugins/pev/readme",
+    "hash": "9aad3db255f5"
   },
   "setup.md": {
-    "doc_id": "axiom_graph::docs.consumer.plugins.pev.setup",
-    "hash": "24b87769be94"
+    "doc_id": "axiom_graph::docs/consumer/plugins/pev/setup",
+    "hash": "e4c4fd77565d"
   },
   "user-guide.md": {
-    "doc_id": "axiom_graph::docs.consumer.plugins.pev.user-guide",
-    "hash": "0cc90c955938"
+    "doc_id": "axiom_graph::docs/consumer/plugins/pev/user-guide",
+    "hash": "213b3f1d08ff"
   }
 }

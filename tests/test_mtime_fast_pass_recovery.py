@@ -304,6 +304,37 @@ def test_a_build_whose_per_file_pass_failed_leaves_the_files_unstamped(mini_proj
     assert _total_skipped(builder.build(mini_project, project_id="proj")) > 0
 
 
+@workflow(
+    purpose=(
+        "A module whose stored mtime was cleared (the builder's own remedy for a stale "
+        "scan cache) is re-stamped by the next build and skipped by the build after "
+        "that, without stamping the function rows that never carried an mtime."
+    ),
+)
+def test_a_cleared_stored_mtime_heals_on_the_next_build(mini_project: Path, db_path: Path):
+    src = mini_project / "mod.py"
+    src.write_text('def greet():\n    """Say hello."""\n    return "hello"\n', encoding="utf-8")
+    builder.build(mini_project, project_id="proj")
+
+    with db._connect(db_path) as conn:
+        conn.execute("UPDATE nodes SET file_mtime = NULL WHERE location = ?", ("mod.py",))
+    assert db.get_file_mtime(db_path, "mod.py") is None
+
+    healing = builder.build(mini_project, project_id="proj")
+    assert healing["files_skipped_mtime"] == 0
+    assert db.get_file_mtime(db_path, "mod.py") == pytest.approx(src.stat().st_mtime)
+    with db._connect(db_path) as conn:
+        stamped = {
+            r["id"]
+            for r in conn.execute(
+                "SELECT id FROM nodes WHERE location = ? AND file_mtime IS NOT NULL", ("mod.py",)
+            ).fetchall()
+        }
+    assert stamped == {"proj::mod"}, "only the module node carries the file's mtime"
+
+    assert builder.build(mini_project, project_id="proj")["files_skipped_mtime"] == 1
+
+
 # ---------------------------------------------------------------------------
 # Tier 2 — the point reader and the bulk reader agree
 # ---------------------------------------------------------------------------

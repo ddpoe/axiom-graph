@@ -95,8 +95,24 @@ from the delegate target during the assemble phase. Writing them on the marker w
 the target's own metadata and let the two drift apart. **If you want to describe what the step
 does, put it on the target's `@task`, not on the `AutoStep`.**
 
-- Used when the very next call is to a `@task`-decorated function.
-- axiom-graph links the AutoStep to the task via a `delegates_to` edge in `graph.db`.
+- Use it when the function it calls is `@task`- or `@workflow`-decorated. axiom-graph links the AutoStep to that function with a `delegates_to` edge in `graph.db`.
+
+#### Placing an AutoStep
+
+The statement directly after an `AutoStep` is the call it names, so a reader sees what the step does at a glance. axiom-graph's rule B4 warns when it isn't, or when the called function isn't decorated.
+
+- **One call, directly under the marker:** `f(...)` or `x = f(...)`.
+- **Split nested calls** so the delegated call stands alone on its line:
+  ```python
+  口 = AutoStep(step_num=8, name="Render within budget")
+  text = _pack_read(path, targets, max_chars, offset, shown)
+  return _with_read_notes(text, shown)
+  ```
+- **Returns:** assign the call first, then return the variable.
+- **Blocks:** when the call is inside a `try`, an `if` or a loop, the marker goes inside the block, directly above the call.
+- **Guard clauses and helper lines** go above the marker.
+- **A conditional expression** (`x = f(...) if c else None`) becomes an `if` block with the marker inside it.
+- **The called function has no `@task`/`@workflow`:** use a plain `Step(name, purpose)`.
 
 ### Minor steps inside loops
 
@@ -120,6 +136,9 @@ for edge in all_edges:
 |---------|-------|-----|
 | Minor step number (N.M) outside a loop | Invalid — minor steps are iteration markers | Use a major step number (integer) outside loops, or move the step inside the loop |
 | Calling a `@task` from a `Step` instead of `AutoStep` | Works but the scanner won't auto-resolve the delegation edge | Change to `AutoStep(N)` when the step's sole purpose is delegating to a task |
+| `AutoStep` above a `try`, an `if`, a guard clause or a helper call | B4: "not followed by a direct call statement" | Move the marker directly above the delegated call, inside the block if the call is in one |
+| `AutoStep` on `return f(...)` or on a nested call `g(f(...))` | B4 | Put the delegated call on its own line under the marker (`x = f(...)`), then use `x` |
+| `AutoStep` whose call has no `@task`/`@workflow` | B4: "target … is undecorated" | Use a plain `Step(name, purpose)` |
 
 ## Pattern Summary
 

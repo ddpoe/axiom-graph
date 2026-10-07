@@ -9,8 +9,9 @@ from pathlib import Path
 
 import click
 
+from axiom_graph import __version__
 from axiom_graph.cli._core import _require_db
-from axiom_graph.index import db
+from axiom_graph.index import builder, db
 from axiom_graph.models import AxiomIndex
 from axiom_graph.query import api as query_api
 
@@ -85,28 +86,35 @@ def cmd_viz(project_root: str, port: int, no_browser: bool) -> None:
 @main.command("export")
 @click.argument("project_root", type=click.Path(exists=True, file_okay=False))
 def cmd_export(project_root: str) -> None:
-    """Export the full index to .axiom_graph/index.json."""
+    """Export the whole index (every node and edge) as JSON.
+
+    Writes index.json next to the index database: in .axiom_graph/, or
+    wherever db_path in axiom-graph.toml puts it. To share workflows and
+    their code as a page, use `axiom-graph workflows export`.
+    """
     root = Path(project_root).resolve()
     path = _require_db(root)
 
     nodes = db.all_nodes(path)
     edges = db.all_edges(path)
 
+    project_id = builder.resolve_project_id(root, path)
     index = AxiomIndex(
-        axiom_graph_version="0.1.0",
-        project_id=root.name,
+        axiom_graph_version=__version__,
+        project_id=project_id,
         project_root=str(root),
         built_at=datetime.now(timezone.utc).isoformat(),
         nodes=nodes,
         edges=edges,
     )
 
-    out_path = root / ".axiom_graph" / "index.json"
+    out_path = path.parent / "index.json"
     out_path.write_text(
         json.dumps(dataclasses.asdict(index), indent=2, default=str),
         encoding="utf-8",
     )
-    click.echo(f"Exported {len(nodes)} nodes and {len(edges)} edges to {out_path.relative_to(root)}")
+    shown = out_path.relative_to(root) if out_path.is_relative_to(root) else out_path
+    click.echo(f"Exported {len(nodes)} nodes and {len(edges)} edges to {shown}")
 
 
 @main.command("render-site")

@@ -1,4 +1,4 @@
-<!-- generated from axiom_graph::docs.consumer.concepts @ 23fb03c63e9f; do not edit -->
+<!-- generated from axiom_graph::docs/consumer/concepts @ 23fb03c63e9f; do not edit -->
 
 # Concepts
 

@@ -8,6 +8,727 @@ All notable changes to axiom-graph are recorded here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-10-07
+
+### Upgrading from 2.x
+
+Run these in order. Details are in the entries below.
+
+1. **Before installing 3.0:** commit your work, finish any PEV cycle, and stop the MCP server and the viz. Copy `.axiom_graph/graph.db` somewhere safe; this is your rollback, since 2.x can't open a 3.0 index. Make sure `axiom-graph.toml` has `project_id` under `[axiom_graph]` (the text before `::` in any node id): the `doc-ids` commands take the id from the toml or the folder name, not from the index.
+2. **Upgrade the package, and don't build.** A build before step 3 refuses and names the commands to run.
+3. **Migrate the doc ids:** `axiom-graph doc-ids preview .`, then `axiom-graph doc-ids execute .`. Commit the DocJSON files whose `links[]` it rewrote. Optionally run `axiom-graph doc-ids sweep .` (then `--apply`) for ids written in prose; the next build reports the sections it changed as raw DocJSON edits, which `axiom-graph stamps accept . --all` accepts.
+4. **Optionally rename documents to `.docjson`:** `axiom-graph doc-ids rename-extension .`, then `--execute`.
+5. **Build.** The first build also parses every file once to add the import edges src layouts and `source_roots` need; those edges mark nothing stale. It upgrades the schema to v5 (it keeps a `graph.db.pre-v5.bak` backup), records the version each currently verified doc and test was checked against, and rescans every code file once, which takes minutes on a large repo. The first `check` afterwards re-hashes every file once and may show CONTENT_UPDATED drift that an older index hid; later checks re-hash only the files that change. One kind of CONTENT_UPDATED there is not drift: 3.0 hashes `Step(...)` / `AutoStep(...)` marker text into a function's description hash instead of its code hash, so on an index built before that change every function that contains markers reads CONTENT_UPDATED once even when its source is unchanged, and a doc or test verified against the old hash reads LINKED_STALE through it. Review those functions and `mark_clean` / `reverify` them. Markdown sections that follow a fenced code block also read CONTENT_UPDATED once, because their text is now split correctly (see Fixed): `axiom-graph diff <ids> . --summary` shows which ones are unchanged.
+6. **Restart the MCP server** (`/mcp` in Claude Code).
+7. **Update PEV to 2.0.0** (`claude plugin update pev@axiom-graph`), only after step 3.
+8. **Optionally, block raw edits** with `PEV_DOCJSON_GUARD=block` and `permissions.deny` rules for `Edit(**/*.docjson)` and `Write(**/*.docjson)`.
+
+### Changed (breaking)
+
+- **BREAKING — doc node ids are now derived from a document's path within its configured docs root, and upgrading requires a one-time migration.** A doc id used to flatten every configured docs root into a single `docs.` namespace and rewrite `/` to `.`, so `docs/adrs/013-x.json`, `docs/adrs.013-x.json`, and `.pev/adrs/013-x.json` could all derive one identity and the file scanned last silently won. Ids now carry the root and keep `/` as the joiner — `{project}::docs/adrs/013-x`, `{project}::.pev/adrs/013-x` — and a Markdown document retains its `.md` suffix (`{project}::docs/notes.md`) so that `x.md` and `x.json` in one directory stay two documents. Section ids are unchanged in shape: a document id still holds exactly one `::`, and a section still hangs off it by `::dot.path` (DocJSON) or `#slug` (Markdown).
+
+  **The migration is a mandatory upgrade step, not an optional cleanup.** Run `axiom-graph doc-ids preview <root>` and then `axiom-graph doc-ids execute <root>`. Executing moves every document and section identity and carries its history, verification, graph edges, rename ledger, and on-disk `links[].node_id` references onto the new ids; it backs the database up first and reports where. It is irreversible — rolling back means restoring that backup — and a second run reports that there is nothing to do rather than repeating itself.
+
+  **Order matters, and both wrong orders are destructive.** The safe window is *after* upgrading the package and *before* the next build. Building first re-derives every doc under the new rule while the index still holds the old ids: every document is inserted brand-new with no verification, history, or edges, and every old identity goes `NOT_FOUND`. Migrating and then rolling the package back resurrects the identities just retired. To protect against the first case, a build whose index holds documents under a namespace this version no longer derives now **refuses**, names `axiom-graph doc-ids preview` and `axiom-graph doc-ids execute`, and writes nothing at all — no node row, no `docs` row, no file. The refusal is a comparison between the index and the files on disk, so it clears permanently once the migration has run and never fires on a project with nothing indexed yet. Separately, a structurally unusable doc id in the index (missing or duplicated `::`, wrong project prefix) now produces a build warning and is skipped rather than stopping the build.
+
+  **Prose is not rewritten by the migration.** Doc ids written into DocJSON section content, skills, templates, READMEs, and docstrings are inert text and go stale. `axiom-graph doc-ids sweep <root>` applies the same mapping to them: it is a dry run by default, skips and names any file carrying uncommitted changes so the whole run stays one `git checkout` from undo, leaves references naming no document exactly as written, and emits a review report of what it did to DocJSON prose. In a git repository it reads and writes only tracked files (`git ls-files`), so ignored directories, build output, untracked files and nested worktrees are never touched; `doc-ids preview`'s prose counts cover tracked files the same way. Outside a repository the sweep writes nothing.
+
+- **BREAKING — a doc edit no longer clears LINKED_STALE.** `update_section`, `patch_section`, `add_section`, `write_doc`, `accept_doc_edits`, `update_doc_meta` and `delete_section` mark the text they write as reviewed (own status VERIFIED) and leave every link status as it was: the edited section's, its doc's, and every other node's. To clear a section, name the code it reconciles with the new `addresses=[node ids]` argument on `update_section` / `patch_section` (see Added), or call `mark_clean` / `reverify`. Agents and scripts that relied on an edit clearing LINKED_STALE must do one of those; PEV plugin 2.0.0 does. After a merge, the build no longer verifies a section that was edited while stale and never reconciled.
+
+- **`axiom_graph_write_doc` reports the doc id it wrote.** Its result gains a `doc id` line naming the id the document was indexed under, so a caller that needs the id takes it from there instead of rebuilding it from the project id and path.
+
+- **DocJSON documents may use the `.docjson` extension, and new documents are written as `.docjson`.** A DocJSON document can be `*.docjson` as well as `*.json`, and the build indexes both side by side.
+  - **Ids are unchanged.** The extension never reaches a doc id: `docs/x.docjson` is `{project}::docs/x`, the same id as `docs/x.json`. Renaming a document from `.json` to `.docjson` with `git mv` and rebuilding keeps every document and section id, its history, verification and staleness, with nothing recorded as deleted or renamed.
+  - **`axiom_graph_write_doc` creates new documents as `.docjson`** (breaking for callers that expect a `.json` file to appear). Overwriting a document that already exists as `.json` rewrites that file in place; a write never creates a sibling with the other extension. The viz create and import routes follow the same rule, and a move keeps the file's extension.
+  - **New `[axiom_graph.scan] docs_extensions` key** lists the extensions the scanner reads. The default is `[".docjson", ".json"]`; only `.docjson` and `.json` are accepted, and any other entry is dropped with a build warning. The **first** entry is the extension new documents are written with, so `docs_extensions = [".json"]` keeps writing `.json` and never writes a file the scanner would skip.
+  - **`x.json` beside `x.docjson` is a collision.** Both derive one id. The build warns, naming the id, both paths and the one it indexed, and the `doc-ids` migration gate reports it too. `.docjson` always wins, whatever the order of `docs_extensions`, unless only the `.json` file is a DocJSON document: a `.docjson` data file never hides a `.json` document.
+  - **`render-site` folder landing** accepts `index.docjson` as well as `index.json`.
+
+- **New `axiom-graph doc-ids rename-extension PROJECT_ROOT` converts a docs tree from `.json` to `.docjson`.** It renames only git-tracked files under the configured docs roots that classify as DocJSON documents; ordinary JSON data files are never touched, and untracked documents are listed but not renamed.
+  - **Preview by default.** Without flags it lists the renames and the skipped files and writes nothing.
+  - **`--execute`** renames with `git mv` after a confirmation prompt (`--yes` skips it), then re-indexes so the index's file paths match disk. Every document keeps its id, history and verification.
+  - **Refusals.** `--execute` refuses, naming the cause, when `.docjson` is not in the configured `docs_extensions` (the renamed documents would not be scanned), when the project is not a git repository, when a document it would rename has uncommitted changes, when a `.docjson` target already exists, or when the index still needs `axiom-graph doc-ids execute`. Nothing is renamed in any of these cases.
+  - **Order.** Run it after `doc-ids execute`, in the same upgrade session (see Migration).
+
+- **BREAKING — `axiom_graph_drift_query` output and filters.** Callers that parse its output or pass globs need to adjust:
+  - **Labelled rows.** `format="full"` rows now read `id=<node_id>  <own>/<link>  loc=<location>  via=...  root=...`, and the `#` column header changed to match. `format="ids"` is unchanged: it still prints bare ids you can paste into `mark_clean`.
+  - **Real offenders.** On a LINKED_STALE row, `via` now lists the direct offenders from the computed staleness attribution, not every target whose own status isn't VERIFIED. A doc that is still stale through a function since re-verified now names that function instead of showing nothing. When a transitive chain's root offenders differ from its direct ones, a `root=` field names them; these are the same root offenders `axiom_graph_reverify` resolves. Both lists show up to 10 ids, then `(+N more)`. The old cap was 3.
+  - **Labelled advisory rows.** With `filter="all"`, DOC_SECTION_LONG advisory rows are labelled `[DOC_SECTION_LONG]`. `filter="VERIFIED"` now raises `ValueError`.
+  - **Path-aware `location_glob`.** `*` and `?` now stay within one path segment; use `**` to cross directories. `[abc]`, `[!abc]` and `{a,b}` work, and a malformed glob raises. A glob matches the path part of a `file.py#Lx-Ly` location, so `tests/*.py` now selects function and test nodes as well as modules.
+
+- **BREAKING — `axiom_graph_read_doc` reads within a character budget, returns child sections, and marks its footers.**
+  - **No more section table.** A whole-doc read over 3,000 characters used to return a table of section slugs. It now renders the doc up to `max_chars` (default 40,000; `None` disables the budget), stopping at a section boundary. A trailing hint lists the omitted section ids, ready to pass as `section_ids`.
+  - **Children by default.** Reading a section, by `section` slug or by id, returns the section and every section nested under it. Previously it returned only the parent's own content.
+  - **New `section_ids`.** Pass a list of fully-qualified section ids, from any number of docs, to read them in one call in the order given.
+  - **Paging inside a section.** A single section larger than the budget is cut, and the hint names an `offset` to resume from (`section_ids=["<id>"], offset=N`).
+  - **Marked footers.** The generated linked-nodes list is now wrapped in `<!-- axiom:linked-nodes -->` … `<!-- /axiom:linked-nodes -->`, so a copy pasted back into content is recognised and stripped on write.
+  - **Paged `list`.** `doc_id="list"` takes `max_results`, `offset` and `prefix`, and ends with the next offset when more docs remain.
+  - **Unchanged under the budget.** Output is byte-identical to the previous full render apart from the footer markers.
+
+- **BREAKING — the project id sticks, and a build under a different id is refused.** `init --id <prefix>` used to record the id nowhere, so the next `build` without `--id` fell back to the directory name and silently indexed the whole project a second time, pairing the duplicates as RENAMED and leaving the originals NOT_FOUND.
+  - **`init --id` writes `axiom-graph.toml`.** The id is recorded as `project_id` under `[axiom_graph]`: the file is created when absent, or the key is added with every other line kept. If the toml already holds a different `project_id`, `init` refuses before its prompt and changes nothing; edit the toml to change the id.
+  - **The index stores its project id** (new `index_meta` table). A build resolves the id from `--id`, then the toml, then the stored id, then the directory name, so a project with no toml keeps its id without repeating `--id`. An empty `project_id = ""` or `--id ""` counts as unset.
+  - **`init` without `--id` keeps the existing id.** Re-initialising reads the old index's id before deleting it and records it in the toml, instead of re-namespacing the project to the directory name.
+  - **`init` always records the id.** Without `--id`, `init` records the toml's id, else the old index's id, else the directory name, so a project set up with a plain `init` has `project_id` in its toml from the start.
+  - **`init` offers to reset a customised toml.** When `axiom-graph.toml` holds settings that differ from the defaults, `init` lists each one with its default and, run from a terminal, asks whether to reset the file before it deletes anything. The answer defaults to no; without a terminal nothing is reset. A reset keeps `project_id`.
+  - **Every command uses the stored id.** Doc writes (`write_doc`, `clone_doc`), the doc-id migration and extension-rename plans, the prose sweep, the consumer site render and the viz resolve the id the same way: the toml, then the stored id, then the directory name. A project with no toml, or a worktree whose folder name differs from the project's, no longer gets doc ids under the folder name.
+  - **A mismatch is refused.** When the resolved id differs from the stored one, `build` stops before scanning with `Error: ...` (exit 1) naming both ids and the fix; the `axiom_graph_build` MCP tool returns the same message as `ERROR: ...`. Renaming an existing index's project id is not supported; `init --id <new>` starts over under a new id, discarding the index's history.
+
+### Removed (breaking)
+
+- **Semantic search is gone.** The `[semantic]` and `[semantic-torch]` extras,
+  and the `sqlite-vec`, `fastembed`, `onnxruntime` and `sentence-transformers`
+  dependencies behind them, have been removed. Deprecated in 2.1.0 per ADR-020;
+  the warning ran through 2.2.0, 2.3.0, 2.4.0 and 2.4.1, so anyone pinned to
+  `[semantic]` had the full window. Search is now FTS5 keyword search only,
+  which is what it already defaulted to.
+
+- **The `mode` parameter is gone** from the `axiom_graph_search` MCP tool, from
+  `axiom_graph.query.api.search_nodes`, and from the viz `/api/search` endpoint.
+  This breaks callers that passed `mode` *at all*, including `mode="keyword"` —
+  not just semantic users. Drop the argument; the behaviour you get is the
+  behaviour `mode="keyword"` gave you.
+
+- **The `AXIOM_GRAPH_SKIP_EMBEDDINGS` environment variable is gone.** It has no
+  meaning now and is ignored if set.
+
+### Migration
+
+- **Existing indexes load unchanged.** The `vec_embeddings` and
+  `embedding_hashes` tables become orphans; SQLite ignores them. Run `VACUUM`
+  to reclaim the space if you want it back. No migration ships for them and
+  none is needed.
+- **Schema v3 rescans your test files on the first build.** The upgrade build
+  clears the stored mtimes of Python test files (`test_*.py`, `*_test.py`) so
+  they are scanned again under the new test rules (see Changed), and the old
+  `validates` edges of helpers, fixtures and nested defs are retired. It
+  writes no history or verification rows; a second build is a no-op. An older
+  axiom-graph refuses a v3 index (`SchemaVersionError`).
+- **Schema v4 stores annotation findings and rescans your code once.** Your
+  next `build` or `check` upgrades the index in place, with no `init`: it adds
+  the `annotation_findings` table and clears the stored mtimes of every Python
+  and JS/TS file. History, verification and renames are untouched. The first
+  build afterwards therefore rescans every code file once, which can take
+  several minutes on a large repo (about 7 minutes on this one, mostly rename
+  matching on a full rescan), and it reports every current annotation finding
+  as new that one time. A `check` run before that build rescans everything in
+  memory, so it is slow too and also reports every finding as new. An older
+  axiom-graph refuses a v4 index on `build` (`SchemaVersionError`); restart a
+  running MCP server after upgrading.
+- **Schema v5 records what each verification was checked against.** Your
+  next `build` upgrades the index in place, with no `init`, after taking a
+  `graph.db.pre-v5.bak` backup. It adds the live-hash columns and the
+  verification-targets table, and records the version of its targets each
+  currently verified doc section and test was checked against. History,
+  verification and renames are kept. The first `check` afterwards re-hashes
+  every file once and may show CONTENT_UPDATED drift that an older index
+  hid; later checks re-hash only the files that change. Verifications made
+  before 3.0 whose target changed afterwards keep the time-based rule. An
+  older axiom-graph refuses a v5 index (`SchemaVersionError`); restart a
+  running MCP server after upgrading.
+- **Your index records its project id on the first 3.0 build.** The `index_meta`
+  table is added in place (no `init`, no schema-version bump). An existing
+  index's id is the one prefix all its node ids share, so a project indexed
+  with `--id` keeps that id even with no `project_id` in `axiom-graph.toml`
+  and no `--id` on the upgrade build; a different `--id` or toml value is
+  refused. Only an empty index, or one whose nodes already carry two
+  prefixes, records the id that first build resolves.
+- **Converting documents to `.docjson` is optional and comes after the doc-id migration.** Existing `.json` documents keep working. To convert, run `axiom-graph doc-ids rename-extension <root>` to preview, then again with `--execute`, *after* `axiom-graph doc-ids execute` has run; the command refuses while the index still needs the id migration. Commit or stash document edits first, because it refuses on uncommitted changes.
+- **If you used `mode="semantic"`,** remove the argument. FTS5 keyword search
+  handles the queries the documentation illustrated with semantic mode.
+- **If you genuinely need vector retrieval,** the graph is portable SQLite:
+  read the `nodes` table and apply your own embedding stack.
+
+### Changed
+
+- **`init` resets only the index.** It no longer asks about resetting `axiom-graph.toml`. Its delete confirm says what it keeps and names the reset flags. After its build it writes an editable `agent-policy` doc when the project has none.
+- **`axiom_graph_reverify` returns a short report by default.** It leads with how many `LINKED_STALE` nodes were cleared, gives counts, and lists only the skipped dependents with what still holds them. Pass `verbose=true` for the full source, cleared and kept lists. "Cleared" now lists only nodes the call itself cleared, not parent docs that cleared as a result.
+- **Merged doc edits arrive with their text verified.** When `build` finds a merged section whose tool-write stamp matches its text, it now always verifies the text, and verifies each link the stamp recorded at the version this checkout holds. Links the writer had not re-checked stay flagged as before. Previously a section edited while flagged for something unrelated arrived entirely unverified, and `mark_clean` was the only way out.
+- **`carry-forward` carries each dimension separately.** A node the worktree verified, but which was still flagged there (or here) for another reason, now brings over its own-content verification and each link verification whose linked node matches. Main then shows what the worktree showed wherever the versions agree. The report counts full and partial carries, lists what each partial carry left open and why, and each carried node's history names the worktree's latest verification of it (a doc tool's write included).
+- **`carry-forward --dry-run` prints the summary and the would-carry list.** The full per-verdict list now needs `--list` (MCP: `list_nodes=True`).
+- **LINKED_STALE compares versions as well as times.** A verification now
+  records the hash of every target the node depends on. A doc section or
+  test is flagged when the code it depends on is at a version it was not
+  checked against, so a second edit after a verification, and a revert past
+  a verification, are both caught. A section updated with a doc tool before
+  the build no longer goes LINKED_STALE when the build records the same
+  change. Verifications made before 3.0, and links added after a
+  verification, keep the time rule.
+- **Docs that link a whole module are flagged when a function in it changes,
+  or when a function is added or removed.** A pure rename of a function inside
+  the module does not flag them.
+- **A function marked clean and then reverted to its earlier content reads
+  CONTENT_UPDATED instead of VERIFIED,** and its dependents are flagged. A
+  function added after the first scan and removed again reads NOT_FOUND.
+- **Routine operations cost what changed, not the size of your repo.** On
+  this repo an idle `check` takes about 0.3 s instead of about 4.6 s, and a
+  `build` with nothing changed about 0.6 s instead of about 7 s. The first
+  check after an edit re-checks only what the edit can affect. A `build`
+  records where it left off, so the next `check` is incremental.
+- **Write tools leave the index current.** `mark_clean` (CLI, MCP and viz),
+  `reverify`, the doc tools and `accept_doc_edits` update the statuses of the
+  code they read before they return: a function you edited but haven't built
+  shows CONTENT_UPDATED, and its tests and docs LINKED_STALE, straight away.
+- **`build` re-parses a file when its content changed or its modification
+  time moved.** A file restored from a backup with an old timestamp is now
+  picked up; touching a file still forces a re-scan. The build summary's skip
+  lines now say `content and mtime unchanged` instead of `mtime unchanged`.
+- **Reads answer from a current index.** `drift_query`, `read_doc`, `graph`,
+  `search`, `source` and the viz re-check changed files before answering (see
+  `refresh_before_read` under Added). `read_doc`, `graph`, `search` and `source` tag a non-VERIFIED node
+  with `[STATUS]`, and a batch `graph` or `source` call reports a missing
+  index once.
+- **Two INFO lines on stderr per staleness refresh.** `check`, `build`,
+  `mark-clean`, the doc commands and `drift-query` log the refresh mode and
+  why it was chosen, then what it did and how long it took.
+- **Summary counts include hashless, childless composites** (an empty
+  `__init__.py`, a config file) as VERIFIED.
+- **A node flagged through several vias may list a different first via** than
+  before; the set of vias is unchanged.
+- **An incremental build detects the cross-file moves and in-file renames a
+  full build detects,** including in JS/TS-only and config-only builds. A
+  deletion-only build in a repo without git warns "similarity skipped", as a
+  full build does.
+- **In Python test files, only tests pytest collects own `validates` edges.**
+  A collected test is a `test*` function at module level or a `test*` method
+  of a class (not nested in a function, not a fixture). Nested defs, helpers
+  and fixtures fold their calls into every test that uses them: a call, a
+  helper chain (cycle-guarded), a `self.helper()` in the same class, or a
+  fixture named as a parameter. A helper or fixture no test reaches gives its
+  edges to the test module's node, which never makes anything stale. Helpers
+  and fixtures are no longer reported as tests, so test counts drop. When a
+  production function changes, the collected tests that reach it are flagged
+  LINKED_STALE instead of helpers nobody verifies. Builds now also retire a
+  `validates` edge a rescanned file no longer intends, as they already did
+  for workflow delegate links.
+- The indexer's build workflow no longer runs an embedding-generation step, and
+  the MCP server no longer starts a background model warm-up thread — so first
+  search and first build are no longer gated on loading an ONNX or Torch model.
+- **The dashboard's search-mode control is gone.** The search box is keyword
+  search, which is what the control selected by default. The viz `/api/meta`
+  payload no longer carries its `embeddings` block, and `/api/search` no longer
+  accepts a `mode` query parameter.
+- `axiom-graph report` and `axiom_graph_report` now share one text renderer, so
+  the MCP `full` output also shows the actor tag on link rows. The MCP summary
+  is now two lines: the reference line, then the headline counts.
+- Write tools strip a generated `**Linked nodes:**` footer from incoming
+  content: a block marked `<!-- axiom:linked-nodes -->` …
+  `<!-- /axiom:linked-nodes -->` anywhere, or an unmarked trailing list. Prose
+  after an unmarked block and inline mentions are kept. Pasted `read_doc`
+  output no longer accumulates in stored sections, and the result says when a
+  footer was removed.
+- **The CLI reports the doc-id namespace refusal as an error, not a
+  traceback.** A build against an index that still needs the doc-id migration
+  prints `Error: ...` and exits 1. The message now names both steps, in order,
+  with the project root: `axiom-graph doc-ids preview <root>`, then
+  `axiom-graph doc-ids execute <root>`. Any command that reaches the refusal
+  reports it the same way.
+- **Purge refuses a live module, doc or config node.** When a function or
+  section is removed, its module or doc inherits `NOT_FOUND` while its file is
+  still on disk. `axiom_graph_purge_node` used to purge such a node, deleting
+  its history and verification until the next build re-created it bare. It
+  now refuses it with an `ERROR:` that says the `NOT_FOUND` is inherited and
+  lists the `NOT_FOUND` nodes in that file, to purge if they were really
+  removed; once they are gone the node clears on the next check. When the
+  file does not parse, the `ERROR:` says so, lists nothing, and says to fix
+  the file and re-run check rather than purge its nodes (see the purge entry
+  under [Unreleased] for nodes inside such a file). `axiom-graph purge` refuses the same
+  nodes, and its `--all-not-found` keep rule now uses the same check.
+  Composite inheritance is unchanged.
+- **A purge records who ran it.** The `DELETED` history row of a purged node
+  used to carry `actor: agent:pev-auditor` whoever purged it. It now carries
+  `agent` from `axiom_graph_purge_node` and `human` from `axiom-graph purge`.
+  The Python API `axiom_graph.lifecycle.api.purge_nodes` now takes the project
+  root and a required keyword `actor` (no default):
+  `purge_nodes(db_path, root, node_ids, reason, *, actor=...)`.
+- **Bulk purges point at `axiom-graph purge --all-not-found`.**
+  `axiom_graph_build`'s docstring used to send bulk purges to
+  `axiom-graph build --purge`, which only re-runs the deleted-file pass every
+  build already runs. It now names `axiom-graph purge --all-not-found`, and
+  `build --purge`'s help says what the flag does. `build --purge` still works.
+- **`check` no longer re-parses your whole tree.** The build now stores each
+  file's annotation findings. `check` reads them and rescans in memory only
+  the files edited since the last build; it never writes the store. An idle
+  `check` on this repo went from 68-106 s to about 9 s (in a worktree, 12 s to
+  7 s); what remains is the staleness recompute. `check` also walks exactly
+  the files `build` walks: agent worktrees and configured `exclude_dirs` are
+  skipped, and JS/TS and xstate findings now appear in it. If the findings
+  store can't be read, `check` ends with a one-line
+  `Error: could not read annotation findings: ...` instead of a traceback.
+- **Annotation findings are reported once.** `build` and `check` print one
+  line, `Annotation findings: N (X new, Y resolved)`, and list only the new
+  findings; `check --all` lists every current finding. A finding's identity
+  is its file, rule, function and message, never its line number, so a
+  finding that only moved is not new. Because `check` never stores what it
+  finds, a new finding shows as new on every `check` until the next `build`
+  stores it; that build lists it once more. `check --format json` still
+  returns the full `annotation_findings` list, now sorted by file and line
+  with a `new` flag per entry, and `--strict-annotations` still gates on
+  every current finding, so CI needs no change. A dotted DocJSON filename is
+  advised on once, by the build that first sees it, instead of on every
+  build. (finding-queue cli.d-29 and indexing.d-20, pulled forward from 3.x.)
+
+### Added
+
+- **New MCP tool `axiom_graph_info(project_root)`** reports one project's facts: its id, root, docs roots and extensions (and the one new docs get), frozen and transitive tags, db path with node and doc counts, and what a build scans and skips. It ends with the project's agent policy: the doc tagged `agent-policy`, or axiom-graph's shipped default when there is none. It is read-only and answers before the first build too.
+- **`init --policy`, `init --settings` and `init --all`.** `--policy` restores the default agent-policy doc and `--settings` resets `axiom-graph.toml` to the defaults, keeping the project id. Each asks first (`--yes` answers for scripts) and never touches the index. `--all` resets the index, the settings and the policy behind one confirm.
+- **`axiom-graph carry-forward <worktree>` and `axiom_graph_carry_forward`
+  bring a merged worktree's verifications back.** Run in the main checkout after
+  its build. Nodes stale there that the worktree verified, with the same
+  content and every link at the version verified, take that verification and
+  stop being stale (code, tests and docs alike). The report gives the number
+  carried, the stale count before and after, how many carried nodes stay stale
+  while a node they depend on is still stale (a doc-to-doc link, or a
+  workflow's annotated function or delegated task), and why each other node
+  was not carried. `--dry-run` writes nothing; it reads the statuses as of main's last
+  build or check, so run it after the build. The worktree index is read, never
+  written, and one with a different schema version or project id is refused.
+- **`axiom_graph_clone_doc`** copies an indexed document to a new one,
+  replacing the content of the sections you name (`set_sections`) and
+  dropping others (`omit_sections`). An unknown section id is an error and
+  writes nothing, so a template mismatch can't produce a document. Title,
+  tags and extra top-level keys such as `meta` carry over unless you pass a
+  new `title` or `tags`. The tool will not overwrite an existing doc or the
+  source.
+- **Batch section edits.** `axiom_graph_update_section` and
+  `axiom_graph_patch_section` take `edits=[...]`, a list of edits across any
+  number of docs, each with the single call's keys including `addresses` and
+  `expected_hash`. Every item is checked before anything is written, so one
+  bad item writes nothing; each file is then written and re-indexed once. The
+  reply gives each item's `content_hash`.
+- **`drift_query(group_by="node_kind")`** splits a drift list into `code`,
+  `test` and `doc` in one call. `test` covers everything under the
+  configured `scan.test_paths`, test helpers included.
+- **`expected_hash` on `axiom_graph_write_doc`.** `write_doc` and
+  `clone_doc` replies end with a `doc_hash` line; pass it back as
+  `expected_hash` and `write_doc` refuses, writing nothing, if the file has
+  changed since.
+- **`addresses=[node ids]` on `update_section` and `patch_section`.** It names
+  the offenders an edit reconciles and refreshes the section's record of the
+  version it was checked against for each; the section clears once none is
+  left. It can be passed alone, to reconcile without editing. The reply ends
+  with `still LINKED_STALE via: …` while offenders remain. Naming a node that
+  is not a current offender is an error and nothing is written; on a frozen
+  doc's carried LINKED_STALE the error adds "(LINKED_STALE carried on a frozen
+  doc; mark_clean clears it)".
+- **`axiom-graph check --full` and `axiom_graph_check(full=true)`** force a
+  full recompute. They give the same statuses as a plain check, only slower.
+  The first check after an upgrade that changes how hashes or statuses are
+  computed runs in full once by itself.
+- **`[axiom_graph.staleness] refresh_before_read`** controls what
+  `drift_query`, `read_doc`, `graph`, `search`, `source` and the viz do before
+  answering:
+  `"changed-files"` (the default) re-checks files that changed; `"off"`
+  answers from the last snapshot and says "index is behind for N files — run
+  `check`"; `"check"` runs a full check first. An invalid value is a config
+  error.
+- **Structural hints.** A check or refresh that finds functions or sections
+  the index doesn't have yet says so, for example "`utils.py` has 2 new
+  functions — run `build`" (JSON key `structural_changes`). It never adds them
+  itself.
+- **`axiom-graph diff` diffs a node against a baseline commit from the
+  CLI.** `axiom-graph diff <node_id>... <root> [--baseline SHA] [--summary]`
+  prints the same JSON as the `axiom_graph_diff` MCP tool, from a fresh
+  process. Several nodes are separated by `---`; a node that can't be diffed
+  prints its `{"error", "reason"}` in its slot, the rest still run, and the
+  command exits 1.
+- **`axiom-graph purge` removes NOT_FOUND nodes from the CLI.** It is the
+  terminal counterpart of `axiom_graph_purge_node` and uses the same purge.
+  Name the nodes (`axiom-graph purge <id>... <root>`), or pass
+  `--all-not-found` to take every NOT_FOUND node after a confirmation prompt
+  (`--yes` skips it). Only NOT_FOUND nodes are removed: a named node with any
+  other status, or one not in the index, is refused and kept, and the command
+  exits 1. A module, doc or config node whose file is still on disk is
+  refused when named and kept by `--all-not-found`, because such a node is
+  NOT_FOUND only by inheriting a removed child's status. `--reason` is
+  recorded in each purged node's history, with actor `human`.
+
+- **The MCP server tells agents how to use its tools.** On connect it sends
+  an instructions block: why to prefer the tools over reading files, the tool
+  families, and usage patterns (read a doc's outline before its sections,
+  batch ids into one call, the doc-id grammar, write and staleness rules). It
+  stays under 2,048 characters, the length Claude Code shows without
+  truncating. A consumer's `CLAUDE.md` no longer needs its own tool overview.
+- **New `axiom_graph_guide` tool.** It takes no arguments and returns the
+  instructions block plus one line per tool. Subagents never receive server
+  instructions, so they get the guidance by calling it.
+- **Every tool's first docstring line now says what the tool is for**, in one
+  line, since the guide quotes it. `drift_query`, `search`, `graph`, `check`,
+  `checkout`, `render` and others were reworded.
+
+- **Every report now starts with a reference line.** It says what the report
+  was measured against and how that reference resolved: a checkpoint, a build
+  row, the git commit time, a timestamp, a default fallback, or the whole
+  history when there is no reference. JSON output carries the same information
+  under a `reference` key. The line is printed even when the window is empty.
+- `axiom-graph report --format condensed` and
+  `axiom_graph_report(detail="condensed")` give a page-sized report. Hand-made
+  (actor-authored) rows are printed as they are. Everything else is grouped by
+  container: content changes per container, a staleness table with the top 10
+  `via` containers, system link purges collapsed into one line, and
+  verification split into containers verified directly and containers that
+  appear only through cascade retirement.
+- `axiom-graph report --exclude-node GLOB` (repeatable) and
+  `axiom_graph_report(exclude_node_pattern=...)` (a string or a list) leave
+  matching nodes out of every section and out of the headline counts.
+- `axiom_graph_report(max_chars=40_000)` caps the MCP response. Longer output
+  is cut at a line boundary, and a footer says how many lines were dropped and
+  how to narrow the report. Pass `max_chars=None` to turn the cap off. The CLI
+  is not capped.
+- Tests are baselined at their first scan. A test function indexed for the first time gets a verification covering every code change seen up to and including that build, recorded as an `AGENT_VERIFIED` history event with op `scan_baseline` (it appears in `report`). Later changes to the code it validates still flag it; renamed, moved and re-scanned tests are unaffected. `BuildSummary.tests_baselined` lists them.
+- DocJSON sections written by axiom-graph's doc tools now carry a tool-write stamp (`axiom_stamp`: a hash of the section's heading, content and links, plus the hashes of the code it links to). A tool-written section that arrives by `git merge` or `pull` is verified on the next build when its linked code is unchanged since it was written. A section edited outside the doc tools (a raw DocJSON edit) is indexed but never auto-verified; each edit is reported once, as one summary line naming both fixes, and recorded as a `RAW_DOCJSON_EDIT` history event that appears in `report` and `history`.
+- New `axiom-graph stamps accept <project_root> <section-id>... | --all` (and `--list`) and MCP tool `axiom_graph_accept_doc_edits` (`dry_run=True` lists) accept raw DocJSON edits: they stamp the section and verify it. Re-applying the edit with any doc write tool also settles it, including when the text is identical.
+- New config `[axiom_graph.docjson] raw_docjson_edits = "warn" | "off"` (default `"warn"`). `"off"` silences raw DocJSON edit detection; tool-written sections arriving by merge still verify.
+
+- `update_section(expected_hash=...)` refuses a write based on an outdated read
+  and returns the current content and hash. `update_section`,
+  `patch_section`, `add_section` and `write_doc` results report each written
+  section's `content_hash`.
+- Batch forms: `add_section(sections=[...])` and
+  `add_link(links=[{section_id, node_id}, ...])` (sections of one doc). Each
+  call applies all items or none, with one write and one re-index.
+  `add_section` now rejects an empty heading (single and batch form).
+- `content_file` on `add_section`, `update_section` and `patch_section`, and
+  `doc_file` on `write_doc`, for passing large content from a UTF-8 file under
+  the project root or the system temp directory.
+- `patch_section` results show the edited region: a fenced
+  `edited region (lines A-B of N):` block with the inserted or replaced text
+  plus up to 2 lines of context on each side (a region over 40 lines keeps its
+  first and last 10 around an omitted-lines marker), and a
+  `length: <chars> chars, <lines> lines` line next to `content_hash`. Text
+  copied from the block matches as the next call's `old_string`, so an edit
+  can be confirmed or chained without re-reading the section. What is written
+  is unchanged.
+- `axiom_graph_read_doc(outline=True)` lists a doc's section tree instead of
+  its bodies. It works with any target `read_doc` takes (`doc_id`, `doc_ids`,
+  `section`, `section_ids`) and prints:
+  - a header line per doc: id, title, section count and total rendered size;
+  - one line per section, indented by depth: full id, heading, the rendered
+    size of its subtree (what a read of it spends against `max_chars`), the
+    subsection count when non-zero, and `[STATUS]` when the node isn't
+    VERIFIED.
+
+  `max_chars` cuts the outline at a line boundary and the hint names the ids
+  to outline next. `outline` with `doc_id="list"` or a non-zero `offset` is an
+  `ERROR:`.
+- `axiom_graph_read_doc` shows each doc's id, tags and file. A generated
+  `<!-- doc: {id}  tags: a, b  file: docs/x.json -->` line follows every doc's
+  `# title` (`tags: (none)` when untagged), and an outline's doc header ends
+  with `[tags: …]`. Tags set with `update_doc_meta` can now be read back
+  without opening the file. The line sits above every section, so section
+  content and `offset` resumes are unaffected; the viz render is unchanged.
+- `axiom_graph_reverify(node_ids=[...])` reverifies a batch of sources in one
+  call, mirroring `mark_clean`'s `node_ids` (`node_id` is ignored when given;
+  one shared `reason` and `verified_by`). The sources' subtrees form one source
+  set, so a dependent held only by batch sources clears in this call whatever
+  the order, where single calls would skip it until the last one. Dependents
+  also stale via an offender outside the batch are still skipped, naming only
+  that offender. The staleness recompute runs once, and one report lists the
+  sources, cleared and skipped dependents, LINKED_STALE before and after, and
+  unknown IDs under `Not found` (not fatal). Each cleared dependent's history
+  names the batch source(s) that held it (`[reverify:<id>]` or
+  `[reverify:<a>, <b>]`). The single `node_id` form is unchanged.
+- **Export workflows without the dashboard: `axiom-graph workflows export`
+  and the `axiom_graph_workflow_export` MCP tool.** Both write the page the
+  dashboard's export button opens (the selected workflows' steps beside every
+  source file they reach, in one self-contained HTML file) or, with
+  `--format json` / `format="json"`, its JSON bundle. Select by function name
+  or node id, mixing workflows and tasks, or by source file (`--file` /
+  `files`). An id or file that matches nothing is refused by name and nothing
+  is written. Neither needs the `viz` extra; without Pygments the code on the
+  page is uncoloured. The CLI writes `workflow-export.html` in the current
+  directory unless `-o` says otherwise; the MCP tool writes it in the project
+  unless `output_path` does, and returns the path and counts, not the page.
+
+### Fixed
+
+- **Python `src/` layouts now link tests to the code they call.** Imports of project code resolve through the project's import roots: pytest `pythonpath`, setuptools / poetry / hatch packaging config, or an auto-detected `src/`. Namespace packages (directories without `__init__.py`) resolve too. Editing a function now flags its tests `LINKED_STALE` in a src layout, as the quick start shows. Node ids do not change.
+- **New `[axiom_graph.scan] source_roots` setting** lists the import roots explicitly and always wins over detection.
+- **Imports of your own code that can't be found are reported.** `build` prints one line with the count and points at `source_roots`, instead of silently treating them as third-party packages. Packages your `pyproject.toml` declares as dependencies are never reported, even when a copy of their source sits in your tree.
+- **Purge never removes the nodes of a file that does not parse.** A syntax error in a Python or DocJSON file makes every function or section in it read `NOT_FOUND`; in a JS/TS file, tree-sitter drops the function the error is in, so that function reads `NOT_FOUND`. `axiom-graph purge --all-not-found` used to list them all for purging, deleting the history and verification of live code. It now keeps them and names the file once in its preview, saying to fix the file and re-run `check`. Naming such a node (`axiom-graph purge <id>`, `axiom_graph_purge_node`) is refused as `file_unparseable` with the same advice. Before, only the module or doc node was refused, and only when every node in the file read `NOT_FOUND`. Purge now parses the file instead of guessing from statuses. A file that parses with every function removed is no longer reported as not parsing: its module's refusal lists those functions to purge. A JS/TS file counts as not parsing when tree-sitter parses it with errors, or when tree-sitter is not installed. Purge parses each file once per run, before it deletes anything.
+- **A `links` entry with no usable `node_id` is no longer accepted silently.** `write_doc` used to keep entries such as `{"target": "<id>", "type": "documents"}`, `{}`, `{"id": "<id>"}` or `{"node_id": ""}`. It reported `links registered : 0` and gave no error, so the section never got a link and never went `LINKED_STALE`. `write_doc` and `clone_doc` now refuse those entries. The `ERROR:` names the section's dot-path and the entry, and nothing is written. For an entry with no `node_id` key it also says to use `"node_id"` (every link is a `documents` link). `add_link` and `delete_link` refuse a section that already holds such an entry. Other keys beside a valid `node_id` are still accepted and ignored. A `links` value that is not a list, such as `{}`, is an error too; a missing value, `null` or `[]` still means no links.
+- **One bad `links` entry in a hand-edited DocJSON file no longer drops the whole doc.** An entry such as `{"node_id": 123}` used to make the build skip the file with only a log line, and `check` then read every section `NOT_FOUND`. The build now skips just that entry and keeps the doc and its other links. It prints one warning per skipped entry naming the file, the section and the entry. A `.docjson` file that still can't be read (invalid JSON, a missing `title` or `sections`), or a `.json` file that is not valid JSON, is now named in a build warning. A `.json` data file kept beside the docs stays silent.
+- **`write_doc` explains a malformed `links` entry.** A link given as a bare node-id string (`"links": ["proj::pkg.mod::fn"]`) is now accepted and saved as `{"node_id": ...}`. Any other shape returns `ERROR:` naming the accepted shapes, and nothing is written. It used to fail with a raw Python error. The tool description now shows the shape, and `add_link`, `delete_link` and rename link rewrites also accept a string link already in a file.
+- **`diff` no longer shows an all-new old side for a node indexed before it was committed.** A history entry records the commit checked out at the time, which may not hold the node yet. When a stale node is missing from its default baseline, `diff` now compares against the newest commit that holds the node as it was before it went stale, and `baseline_reason` says so; a commit that already holds the edit is never used. When none of the file's last 20 commits qualifies, `diff` returns `no_baseline` with the reason.
+- **`reverify` no longer verifies a dependent's own unreviewed change.** When a dependent it clears also has its own content or docstring change, built or not yet built, `reverify` now clears only the `LINKED_STALE` the source caused and leaves the dependent's own status as it was. The report counts these dependents as "own change kept".
+- **`reverify`'s LINKED_STALE before and after counts now match `check`.** Statuses are refreshed first, frozen docs are left out the same way, and the report says so. A dependent whose other dependency was edited but not yet built is now skipped and reported, rather than cleared.
+- **Sections an agent wrote on another branch are adopted even when an earlier build had already indexed their text.** Once a build has seen the merged text, the next `build` or `check` adopts the section. A merge no build has seen yet is adopted by the next `build`, or by the second `check` (the first only records the change). Hand-edited sections are still flagged as raw DocJSON edits.
+- **Frozen docs no longer show up in the drift counts.** `check`, `drift_query` and build summaries now leave out a frozen doc's own node (the doc envelope), not just its sections. A change inside a frozen doc no longer makes its parent sections `LINKED_STALE`. `BROKEN_LINK` is still reported.
+- **A frozen doc's section keeps `LINKED_STALE` only while something still causes it.** A section that was `LINKED_STALE` when its doc was frozen stays flagged as long as a linked node has changed since its last verification, and `mark_clean` still clears it. A flag with no cause left, such as one an earlier version raised through a parent's children, used to stay forever and listed no `via`; it now clears, and the doc clears once no section stays stale. Existing indexes heal on their own: the first `check` or `build` after upgrading re-checks every node once.
+- **Markdown docs no longer read NOT_FOUND after a full re-hash.** `init`,
+  `check --full` and the re-hash after an upgrade checked Markdown files with
+  the DocJSON parser, so every Markdown document and section read NOT_FOUND
+  and no `build` cleared it. The hasher now reads `.md` files with the
+  Markdown scanner. The hashing scheme changed with the fix, so the next
+  `build` or `check` re-hashes every file once and an affected index heals on
+  its own.
+- **A Markdown section after a fenced code block holds its own text.** Each
+  H2 section after a fence used to start inside the section before it and
+  lose its own last lines, so an edit to one section could flag the next one
+  CONTENT_UPDATED, and search, `read_doc` and `diff` showed the wrong text.
+  Section ids are unchanged. On an index built before this fix, every such
+  section reads CONTENT_UPDATED once, from the first `check` or `build` after
+  upgrading, even when its text is unchanged:
+  run `axiom-graph diff <ids> . --summary` on them and `mark_clean` the ones
+  that report `+0 / -0 lines in body`.
+- **JS/TS imports of dotted filenames resolve.** An import such as
+  `'./editor.machine'` now finds `editor.machine.ts` instead of looking for
+  `editor.ts`. The missing `depends_on` edges appear, and an xstate actor
+  imported from such a file links to its real function instead of a guessed
+  id that read BROKEN_LINK. A new edge does not mark anything stale.
+- **The first build after an upgrade re-parses every file once** when the
+  scanners' output has changed, as if each file had been touched, so
+  unchanged files pick up fixes like the two above. Baselines and staleness
+  are kept.
+- **`diff` on a stale node shows the change.** With no baseline given, a
+  node that went CONTENT_UPDATED, DESC_UPDATED or LINKED_STALE and has not
+  been verified since diffs against the last commit recorded before it went
+  stale. It used to pick the newest checkpoint, which could already hold the
+  change and show `+0 / -0`. When no such commit is recorded, `diff` returns
+  `no_baseline` with the reason. Every diff now reports `baseline_reason`,
+  naming the rule that picked its baseline.
+- **`diff` works on a Markdown section** (`doc.md#slug`). It shows that
+  section's own heading and body; it used to fail with `no_baseline`
+  ("Source file not found").
+- **Mermaid diagrams render in the dashboard again,** and the page loads
+  without the "anonymous define" and "mermaid is not defined" console errors.
+- **`build` no longer prints a `link resolver:` line per retargeted link.**
+  Those lines moved to DEBUG; the per-build count line stays at INFO.
+- **`axiom_graph_add_section` accepts a child under a depth-1 parent,** so
+  the three nesting levels the docs describe all work.
+- **`drift_query(group_by="location_prefix")` groups test functions by
+  file** instead of giving each one its own `#L...` group. Code and doc
+  groups are unchanged.
+- **Doc files are never left half-written.** Every doc tool save writes a
+  temporary file and swaps it in, so a failed write leaves the previous file
+  intact.
+- **`axiom_graph_accept_doc_edits` is all-or-nothing.** If any listed
+  section can't be accepted (unknown id, unreadable file, doc locked by
+  another write), it returns one error naming each and writes nothing.
+- **Rewriting links in other docs after a rename waits for those docs' write
+  locks.** Renaming a section, `apply_rename` / `revert_rename`, renames
+  found during a build and the doc-id migration no longer race a concurrent
+  doc write. Renaming a section takes the write locks of its doc and of
+  every doc that links it together, so if one of them is busy the rename
+  fails with nothing written. Elsewhere a doc that couldn't be rewritten
+  because it was busy doesn't fail the operation but is named as still
+  linking the old id, and a doc file that couldn't be read is named
+  separately as one whose links couldn't be checked: in the
+  `update_section` reply, in `apply_rename` / `revert_rename` output (the
+  results gain `links_unreadable`), in the build warnings, and on the
+  doc-id migration's "DocJSON files whose links could NOT be rewritten"
+  line.
+- **Renaming a function with `apply_rename` carries the verification of the
+  docs that link it over to the new id,** including their stamp's
+  `verified_against` entry. A doc stays verified only if the renamed code
+  still matches the hashes it was verified against; if the body changed too
+  (often why the build missed the rename), the doc goes `LINKED_STALE` and
+  needs a fresh review. `apply_rename` and `revert_rename` each run in one
+  transaction, so a failure applies nothing.
+- **A code rename no longer re-keys a sibling's workflow steps.** The step
+  lookup matched `do_it` against `doxit`'s steps; it is now exact and
+  case-sensitive.
+- **A removed `delegates_to` target makes its envelope BROKEN_LINK at the next
+  `check`,** not only after `check --full`.
+- **`axiom-graph export` records the real project id and version, and
+  writes beside the configured database.** It wrote the folder name as
+  `project_id`, `0.1.0` as the version, and always `.axiom_graph/index.json`.
+  It now takes the id from `axiom-graph.toml`, then the id the index was
+  built with, then the folder name; records the installed version; and writes
+  `index.json` next to the database `db_path` names. Its help now says it
+  exports the whole index.
+- **The workflow export page says `1 file`, not `1 files`, and
+  `/api/workflow-export` answers 404 for unknown ids.** The 404 names every
+  id that matches no workflow or task, where the route used to serve an empty
+  `0 workflows · 0 files` page.
+- **The live Workflows tab nests minor steps the way the exported page
+  does.** Expanded steps (`/api/workflow/{id}/steps?expand=true`) took
+  `depth` from delegation hops, so a minor step such as `1.1` sat flush with
+  its parent in the dashboard while the export indented it under `1`. `depth`
+  is now the number of dots in the step number on every surface.
+- **B4 no longer flags decorated AutoStep targets.** The "target is
+  undecorated" finding fired for every `@task`/`@workflow` target, because the
+  recorded target id never matched the `@workflow`-suffixed envelope id, and
+  for targets in files an incremental build skipped. B4 is now resolved when
+  findings are read, against the whole index, following package re-exports,
+  so incremental and full builds give the same answer. On this repo only the
+  two genuinely undecorated targets remain flagged.
+- **A node diff finds the node by identity, not by its current line
+  numbers.** `axiom_graph_diff` and the viz node diff re-scan the baseline
+  file with the language's scanner and take the range of the same qualified
+  name (or its earlier name from rename history), instead of cutting the
+  baseline at the node's current line range. A function whose body didn't
+  change now reads `+0 / -0` even when code above it was added or removed or
+  the file was moved. The current side is located the same way.
+- **A DocJSON section diffs as its own heading and content**, found by
+  section id, instead of the whole doc file.
+- **A node whose position can't be determined returns
+  `node_position_unresolved`** (for example when the file didn't parse at the
+  baseline) instead of a diff cut from the wrong lines. A node new since the
+  baseline still shows an empty old side.
+- **A build or check stores the `LINKED_STALE` the code change it detects
+  causes.** A build that found a function newly `CONTENT_UPDATED` used to
+  store the doc sections that document it and the tests that validate it as
+  `VERIFIED`; their `LINKED_STALE` appeared only on the next staleness
+  recompute, so `axiom_graph_drift_query` and the viz hid the reach of a
+  change until something such as a `check` or a `mark_clean` recomputed. A
+  `check` (CLI or `axiom_graph_check`) or the viz's staleness refresh that
+  was first to see an edit had the same lag: it reported 0 `LINKED_STALE`
+  and stored the linked sections and tests as `VERIFIED`, and only a second
+  check reported them. All three now run the staleness engine once more
+  after recording the change (a build first re-stamps the verifications it
+  wrote itself, so a test added together with the code change it covers
+  stays `VERIFIED`), and store what the next `check` would compute; a second
+  check changes nothing. Sticky `LINKED_STALE` and the verification filter
+  are unchanged.
+- **The staleness count a build prints is the count `check` reports.**
+  `axiom-graph build`, `axiom-graph init` and `axiom_graph_build` used to
+  end with `staleness : N nodes updated (M stale)`, where M counted
+  frozen-doc sections that `check` leaves out and missed the `LINKED_STALE`
+  above. The line now reads `staleness : own: … · link: … · N VERIFIED`, the
+  same counts `check` prints for the same files. In the Python API,
+  `BuildSummary.staleness_stale` is counted the same way, the new
+  `BuildSummary.check` carries the full `CheckSummary`, and
+  `CheckSummary.summary_line()` returns the line both commands print.
+- **The doc write tools can address a section whose own id contains a dot.**
+  `update_section`, `patch_section`, `delete_section`, `add_section`
+  (`parent_id`), `add_link`, `delete_link` and `accept_doc_edits` used to
+  split a section id on every `.` and walk one nesting level per part, so a
+  flat section such as `.pev/doc-topology::category.adr` (the PEV SOP
+  templates ship nine of these) was "not found" and could only be changed by
+  rewriting the whole doc. They now match the dot-path against the real ids
+  at each level: `category.adr` reaches a top-level section of that id,
+  `parent.child` still reaches a nested child, and `schema.category.adr`
+  reaches a dotted id under a parent. A dot-path that names two sections, a
+  flat `a.b` and a `b` nested under `a`, is refused with an error naming
+  both, and nothing is written.
+- **A doc can no longer give two sections one dot-path, and a file that
+  does is never merged in the index.** `write_doc` accepted a doc with a flat
+  `a.b` beside a `b` nested under `a` (or two siblings sharing an id),
+  reported both as written, and the index kept one `a.b` node carrying the
+  other section's content, links and history. `write_doc`, `add_section` and
+  a renaming `update_section` now refuse a write that would create such a
+  pair, naming the dot-path and both sections, and write nothing; a
+  collision already in a file does not block an edit that adds none. A build
+  that finds one in a file (from a hand edit) does not fail: it warns once
+  per dot-path, naming the file, indexes the first section in document order
+  and skips each later one with its subsections.
+- **Diffs follow renamed and moved files.** `axiom_graph_diff`, the viz node
+  diff and the viz doc diff read a file's baseline version from its current
+  path, so a file renamed or moved since the baseline diffed as if every line
+  (or every doc section) were new. They now find the file's old path with
+  git rename detection and diff against it. Committed renames and renames
+  staged with `git mv` / `git add` are followed; a file at a path git does not
+  track yet still reads as new. A file that did not exist at the baseline
+  still has an empty old side. When the file is missing at the baseline and
+  git cannot tell whether it was renamed (the lookup failed, or git skipped
+  inexact rename detection past `diff.renameLimit`), the diff returns
+  `{"error": "baseline_path_unresolved"}` instead of an all-new diff.
+  `axiom_graph_diff` and both viz diff endpoints add `path` and
+  `baseline_path` (the file read at the baseline, `null` for a new file).
+- **The viz doc diff no longer claims to need a docs submodule, and drops
+  `submodule_sha`.** It always worked for an inline `docs/` folder; its
+  documentation said otherwise. The doc-diff response's `submodule_sha` key,
+  which held the docs folder's tree id for inline docs, is replaced by
+  `baseline_rev`: the docs submodule's commit at the baseline for submodule
+  docs, else the baseline SHA itself. A doc whose docs folder did not exist
+  at the baseline now diffs as new instead of failing. The panel title reads
+  "baseline ↔ current" and notes a rename or a new doc.
+- **A hash that returns to its baseline is no longer a change.** A node whose
+  hash flips and then comes back to the baseline it was measured against (a
+  stale MCP server, a branch switch and back, an edit then revert) no longer
+  makes its tests and doc sections LINKED_STALE, including on the build where
+  the hash comes back. A change accepted by `mark_clean` at a different hash
+  still counts for its dependents until they are verified or the offender is
+  reverified. Every change-time reader (staleness passes, `reverify`'s
+  offender ordering) now shares one rule.
+- **`mark_clean` clears LINKED_STALE carried on a frozen doc's section.** It
+  was a no-op: the frozen carry-forward re-asserted the status without
+  looking at verification. A section verified after it last became
+  LINKED_STALE now clears on the next `check`, and its doc clears once no
+  section stays stale. Freezing a doc still never clears LINKED_STALE.
+- **A BROKEN_LINK on a frozen doc's section is counted everywhere.** With
+  `include_frozen=False`, `check`'s summary and `drift_query` `counts` /
+  `ids` dropped it while `format='full'` listed it. They now all keep it,
+  counted under BROKEN_LINK only; frozen own-status and LINKED_STALE rows are
+  still dropped.
+- **MCP tool results are plain text again, not JSON-escaped.** Every tool
+  returns a string, but FastMCP also sent each result a second time as
+  `structuredContent: {"result": "..."}`, and clients that display that copy
+  showed quotes as `\"` and newlines as `\n`. Text an agent copied from a
+  result, such as a `read_doc` section pasted into a `patch_section`
+  `old_string`, then failed to match. Tools are now registered with
+  `structured_output=False`, so each result is a single text block.
+- **A `--since-sha` that matches nothing no longer returns the entire
+  history.** This applies to `axiom-graph report --since-sha` and to
+  `axiom_graph_report(since_sha=...)`. A SHA the index never recorded but git
+  knows now resolves to that commit's time, and the reference line says so. An
+  unknown or ambiguous SHA, or one shorter than 4 characters, is an error: the
+  CLI exits non-zero and the MCP tool returns `ERROR: ...`.
+- A full 40-character SHA now matches a checkpoint stored with the legacy
+  12-character SHA. `axiom-graph history checkpoint` now stores the full SHA,
+  and `--list-refs` still prints 12 characters.
+- The viz "changed since" view now resolves commits that aren't in the index by
+  their commit time, for both ends of a range. The commit picker lets you
+  select these faded commits. A SHA that git doesn't know still shows the
+  not-resolved banner, and its text now says why.
+- Doc write tools no longer reset the rest of the document. Removing a link,
+  deleting a section or renaming one now touches only that section. Its
+  siblings keep their verification, history and edges, and links from other
+  docs survive. A renamed section (and its children) carries its
+  verification, history and edges to the new id, and other docs' links to it
+  are rewritten. Deleting a section that another doc links to keeps that
+  doc's link; the next check reports it as BROKEN_LINK instead of the link
+  silently disappearing.
+- Sections created by `add_section`, and every section of a new doc from
+  `write_doc`, are now verified by the write that created them, instead of
+  being born LINKED_STALE.
+- Concurrent writes to the same doc are serialised by a per-file lock, so two
+  appends to one section both land. A lock timeout returns `ERROR:` and writes
+  nothing.
+- **Verified dependents stay settled.** A doc section, test or annotation
+  envelope verified after an offender changed no longer lists that offender
+  again when a *different* linked node changes later. Only the offenders that
+  changed after the verification are reported (in `check`, `drift_query` and
+  `reverify`), and reverifying them clears it. Before, one newer change kept
+  the dependent's whole offender history, so `reverify` skipped it
+  indefinitely (#15). A docstring-only change to an annotated function after
+  the verification still counts.
+- **Reverifying a composite counts for its parts.** `reverify` on a module, doc
+  or parent section now counts as reverifying each of its `composes`
+  descendants, so a later reverify of another offender finishes clearing
+  dependents that were stale via both. Changing a descendant after the
+  reverify re-opens it.
+- **`reverify` names the real blocker.** When a dependent is skipped because
+  another offender was only marked clean (`mark_clean` does not settle an
+  offender for its dependents), the output names that offender and says to
+  reverify it. It no longer prints "Nothing to clear — no LINKED_STALE rooted
+  at this node" when dependents rooted at the node were skipped.
+- **Purging a module no longer launders deleted or drifted functions.** The
+  mtime fast pass now only re-confirms files whose nodes are all already
+  VERIFIED; it never turns a NOT_FOUND or CONTENT_UPDATED row VERIFIED.
+  Purging a file-level anchor (module, DocJSON doc, config) also clears the
+  file's stored mtime, so the next build always rescans it and re-creates the
+  anchor.
+
+  **Upgrade note:** rows already laundered to VERIFIED in an existing index are
+  not repaired automatically. Make a byte change to each affected file (a
+  trailing blank line is enough) and run `axiom-graph build`: the file no
+  longer matches its module node, so the per-node check runs and re-marks
+  dead rows NOT_FOUND and drifted rows CONTENT_UPDATED. You can then revert
+  the change; the rows stay put because the fast pass no longer promotes
+  them. A bare `touch` is not enough — the build re-stamps the mtime before
+  staleness runs, and the unchanged bytes still match the module node.
+- **Unchanged files are skipped again after their stored mtime was cleared.**
+  A module or doc row whose `file_mtime` is NULL is re-stamped by the next
+  build, so the build after that skips the file (#13).
+
+### Deprecated
+
+- `axiom_graph_report(verbose=...)`: use `detail="summary" | "condensed" |
+  "full"` instead. `verbose=True` still works in 3.0.0 and maps to
+  `detail="full"`. When both are given, `detail` wins.
+
 ## [2.4.1] - 2026-09-19
 
 Tag fix release. A document's tags could silently stop reaching the index, and the build summary hid it.

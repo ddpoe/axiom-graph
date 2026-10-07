@@ -30,7 +30,7 @@ def test_json_doc_file_node_has_subtype_file(tmp_path):
 
     nodes, _, _, _ = json_doc_scanner.scan_single_json_doc(f, tmp_path, "proj")
 
-    file_node = next(n for n in nodes if n.id == "proj::docs.mydoc")
+    file_node = next(n for n in nodes if n.id == "proj::docs/mydoc")
     assert file_node.subtype == "docjson_doc"
 
 
@@ -46,7 +46,7 @@ def test_json_doc_section_node_has_subtype_section(tmp_path):
 
     nodes, _, _, _ = json_doc_scanner.scan_single_json_doc(f, tmp_path, "proj")
 
-    section_node = next(n for n in nodes if n.id == "proj::docs.mydoc::intro")
+    section_node = next(n for n in nodes if n.id == "proj::docs/mydoc::intro")
     assert section_node.subtype == "docjson_section"
 
 
@@ -65,8 +65,8 @@ def test_json_doc_section_desc_hash_changes_with_content(tmp_path):
 
     nodes, _, _, _ = json_doc_scanner.scan_single_json_doc(f, tmp_path, "proj")
 
-    sec1 = next(n for n in nodes if n.id == "proj::docs.mydoc::sec1")
-    sec2 = next(n for n in nodes if n.id == "proj::docs.mydoc::sec2")
+    sec1 = next(n for n in nodes if n.id == "proj::docs/mydoc::sec1")
+    sec2 = next(n for n in nodes if n.id == "proj::docs/mydoc::sec2")
     assert sec1.desc_hash != sec2.desc_hash
 
 
@@ -126,7 +126,7 @@ def test_markdown_section_id_uses_hash_separator(tmp_path):
 
     section_nodes = [n for n in nodes if "#" in n.id]
     assert len(section_nodes) == 1
-    assert section_nodes[0].id == "proj::docs.guide#getting-started"
+    assert section_nodes[0].id == "proj::docs/guide.md#getting-started"
 
 
 # ---------------------------------------------------------------------------
@@ -150,8 +150,8 @@ def test_json_doc_emits_composes_edges_from_file_to_sections(tmp_path):
     _, edges, _, _ = json_doc_scanner.scan_single_json_doc(f, tmp_path, "proj")
 
     composes_edges = [(e.from_id, e.to_id) for e in edges if e.edge_type == "composes"]
-    assert ("proj::docs.mydoc", "proj::docs.mydoc::intro") in composes_edges
-    assert ("proj::docs.mydoc", "proj::docs.mydoc::usage") in composes_edges
+    assert ("proj::docs/mydoc", "proj::docs/mydoc::intro") in composes_edges
+    assert ("proj::docs/mydoc", "proj::docs/mydoc::usage") in composes_edges
 
 
 def test_markdown_doc_emits_composes_edges_from_file_to_sections(tmp_path):
@@ -165,5 +165,5 @@ def test_markdown_doc_emits_composes_edges_from_file_to_sections(tmp_path):
     _, edges, _ = doc_scanner.scan_docs(docs_dir, tmp_path, "proj")
 
     composes_edges = [(e.from_id, e.to_id) for e in edges if e.edge_type == "composes"]
-    assert ("proj::docs.guide", "proj::docs.guide#installation") in composes_edges
-    assert ("proj::docs.guide", "proj::docs.guide#usage") in composes_edges
+    assert ("proj::docs/guide.md", "proj::docs/guide.md#installation") in composes_edges
+    assert ("proj::docs/guide.md", "proj::docs/guide.md#usage") in composes_edges

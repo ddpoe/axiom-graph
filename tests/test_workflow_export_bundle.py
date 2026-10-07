@@ -18,7 +18,8 @@ from fastapi.testclient import TestClient
 
 from axiom_graph.index import builder
 from axiom_graph.viz import server
-from axiom_graph.workflows.api import workflow_bundle_to_dict, workflow_export_bundle
+from axiom_graph.workflows.api import select_export_bundle, workflow_bundle_to_dict, workflow_export_bundle
+from axiom_graph.workflows.export import render_export_html
 from axiom_graph.workflows.mcp_tools import axiom_graph_workflow_detail
 
 PLOT_DATA = "proj::pipeline::build_plot_data@workflow"
@@ -176,6 +177,20 @@ def test_html_export_is_self_contained(tmp_path):
     assert "href=" not in html
     assert '<script type="application/json"' in html
     assert "build_plot_data" in html
+
+
+@workflow(purpose="The dashboard export route serves the shared page and refuses ids that match no workflow")
+def test_export_route_serves_the_shared_page_and_refuses_unknown_ids(tmp_path):
+    _build_two_workflows(tmp_path)
+    client = _setup_server(tmp_path)
+
+    served = _export_html(client, f"{PLOT_DATA},{REPORT}")
+    assert served == render_export_html(select_export_bundle(tmp_path, [PLOT_DATA, REPORT]))
+
+    missing = "proj::pipeline::no_such_workflow@workflow"
+    resp = client.get("/api/workflow-export", params={"ids": f"{PLOT_DATA},{missing}", "format": "html"})
+    assert resp.status_code == 404
+    assert missing in resp.json()["detail"]
 
 
 @workflow(purpose="A workflow reads identically through the export bundle and the detail tool's JSON")
@@ -642,7 +657,7 @@ def test_export_spans_tolerate_unparsable_sources(tmp_path):
         name="span a file that is not Python",
         purpose="a span map is a nicety; failing to build one must not fail the export",
     )
-    from axiom_graph.viz.workflows import _block_spans
+    from axiom_graph.workflows.export import _block_spans
 
     assert _block_spans("notes.md", "# not python") == {}
     assert _block_spans("broken.py", "def (:") == {}

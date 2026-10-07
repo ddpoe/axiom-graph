@@ -178,11 +178,22 @@ def test_signals_ignore_data_files_and_keep_document_findings(tmp_path):
 
     doc_trees.write_doc(root, "docs/adrs/013-x.json", title="Nested ADR")
     doc_trees.write_doc(root, "docs/adrs.013-x.json", title="Flat ADR")
-    signals = doc_id_signals("proj", enumerate_doc_files(root, ["docs"]))
+    files = enumerate_doc_files(root, ["docs"])
+    signals = doc_id_signals("proj", files)
 
-    assert [c.doc_id for c in signals.collisions] == ["proj::docs.adrs.013-x"]
-    assert signals.collisions[0].sources == ["docs/adrs.013-x.json", "docs/adrs/013-x.json"]
+    # The live derivation is injective over paths, so the build advisory has no
+    # collision arm left to report for DocJSON.  The document / data-file
+    # distinction is carried by the dotted advisory, which survives.
+    assert signals.collisions == []
     assert signals.dotted == ["docs/adrs.013-x.json"]
+
+    # Classification still decides the *retired*-namespace collision set, which
+    # is what the migration gate refuses on -- so the document pair is a finding
+    # there and the data-file pair still is not.
+    documents = classify_doc_files(files).documents
+    retired = find_collisions(current_doc_id_index("proj", documents))
+    assert [c.doc_id for c in retired] == ["proj::docs.adrs.013-x"]
+    assert retired[0].sources == ["docs/adrs.013-x.json", "docs/adrs/013-x.json"]
 
 
 def test_signals_reclassify_a_group_that_loses_a_data_file(tmp_path):
@@ -198,10 +209,13 @@ def test_signals_reclassify_a_group_that_loses_a_data_file(tmp_path):
     assert len(raw[0].sources) == 3
     assert raw[0].kind == COLLISION_CROSS_ROOT
 
-    signals = doc_id_signals("proj", files)
-    assert [c.doc_id for c in signals.collisions] == ["proj::docs.adrs.013-x"]
-    assert signals.collisions[0].sources == ["docs/adrs.013-x.json", "docs/adrs/013-x.json"]
-    assert signals.collisions[0].kind == COLLISION_WITHIN_ROOT
+    classified = find_collisions(current_doc_id_index("proj", classify_doc_files(files).documents))
+    assert [c.doc_id for c in classified] == ["proj::docs.adrs.013-x"]
+    assert classified[0].sources == ["docs/adrs.013-x.json", "docs/adrs/013-x.json"]
+    assert classified[0].kind == COLLISION_WITHIN_ROOT
+
+    # Under the live derivation the group does not exist at all.
+    assert doc_id_signals("proj", files).collisions == []
 
 
 # ---------------------------------------------------------------------------

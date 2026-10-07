@@ -1,0 +1,16 @@
+{
+  "title": "Template: PEV Cycle Review",
+  "tags": [
+    "pev-cycle"
+  ],
+  "meta": {
+    "template_version": "1.1.0"
+  },
+  "sections": [
+    {
+      "id": "verdict",
+      "heading": "Verdict",
+      "content": "**Filled by:** Reviewer — this whole doc is the Reviewer's. Only the Reviewer writes it, except the consolidated verdict of a sharded review (below).\n\nThe Reviewer writes its final verdict here itself: `status` (PASS / PASS_WITH_CONCERNS / FAIL), `test_coverage` (user story → test mapping), `reverse_mapping`, `deviation_tribunal`, `env_gaps` and `concerns`. It returns only a control envelope to the orchestrator.\n\nBelow this section the Reviewer adds one `pass-N` section per review pass (and `pass-N-cont-M` for a continuation of a pass cut off mid-way), with `axiom_graph_add_section`, so an incarnation cut off mid-review checkpoints at a pass boundary. Section ids starting `review-shard-` are reserved for sharded review.\n\n**Sharded review:** when the pitch lists `**Review shards:**`, the orchestrator clones this template once per shard as `review-shard-{x}`; each shard's Reviewer writes its passes and verdict in its own doc, and the orchestrator writes the consolidated verdict (the worst shard status, the coverage tables merged, the cross-shard sweep) here.\n\n(Empty until the Reviewer writes its verdict.)"
+    }
+  ]
+}

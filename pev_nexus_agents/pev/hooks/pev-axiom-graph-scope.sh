@@ -8,11 +8,21 @@
 
 INPUT=$(cat)
 
+# Fail closed for PEV agents when jq is missing (see lib/pev-hook-common.sh).
+. "$(dirname "${BASH_SOURCE[0]}")/lib/pev-hook-common.sh"
+pev_require_jq pretool
+
 # Gate: PEV subagents only
-AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // empty' 2>/dev/null)
+AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // empty')
 case "$AGENT_TYPE" in
   pev:*) ;;
   *) exit 0 ;;
+esac
+
+# axiom_graph_guide takes no arguments and reads no project, so it has no
+# project_root to scope. Every PEV agent calls it first.
+case "$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null)" in
+  mcp__axiom-graph__axiom_graph_guide) exit 0 ;;
 esac
 
 # Claude Code passes cwd as a Windows path on Windows (C:\...\foo); normalize

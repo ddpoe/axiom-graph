@@ -84,15 +84,15 @@ def test_delete_section_flat(mini_project: Path, db_path: Path):
     _build_full(mini_project)
 
     # Verify section exists before delete
-    node = db.get_node(db_path, "proj::docs.arch::api-layer")
+    node = db.get_node(db_path, "proj::docs/arch::api-layer")
     assert node is not None
 
-    result = axiom_graph_delete_section(str(mini_project), "proj::docs.arch::api-layer")
+    result = axiom_graph_delete_section(str(mini_project), "proj::docs/arch::api-layer")
     assert "Deleted" in result
     assert "api-layer" in result
 
     # Section node should be gone from DB
-    node = db.get_node(db_path, "proj::docs.arch::api-layer")
+    node = db.get_node(db_path, "proj::docs/arch::api-layer")
     assert node is None
 
     # Section should be gone from JSON file
@@ -115,17 +115,17 @@ def test_delete_section_nested_with_children(mini_project: Path, db_path: Path):
     _build_full(mini_project)
 
     # Verify children exist
-    assert db.get_node(db_path, "proj::docs.arch::database-layer") is not None
-    assert db.get_node(db_path, "proj::docs.arch::database-layer.tables") is not None
-    assert db.get_node(db_path, "proj::docs.arch::database-layer.migrations") is not None
+    assert db.get_node(db_path, "proj::docs/arch::database-layer") is not None
+    assert db.get_node(db_path, "proj::docs/arch::database-layer.tables") is not None
+    assert db.get_node(db_path, "proj::docs/arch::database-layer.migrations") is not None
 
-    result = axiom_graph_delete_section(str(mini_project), "proj::docs.arch::database-layer")
+    result = axiom_graph_delete_section(str(mini_project), "proj::docs/arch::database-layer")
     assert "Deleted" in result
 
     # Parent and children should all be gone
-    assert db.get_node(db_path, "proj::docs.arch::database-layer") is None
-    assert db.get_node(db_path, "proj::docs.arch::database-layer.tables") is None
-    assert db.get_node(db_path, "proj::docs.arch::database-layer.migrations") is None
+    assert db.get_node(db_path, "proj::docs/arch::database-layer") is None
+    assert db.get_node(db_path, "proj::docs/arch::database-layer.tables") is None
+    assert db.get_node(db_path, "proj::docs/arch::database-layer.migrations") is None
 
     # JSON should not have the section
     data = json.loads((docs_dir / "arch.json").read_text(encoding="utf-8"))
@@ -147,17 +147,17 @@ def test_delete_doc(mini_project: Path, db_path: Path):
     _build_full(mini_project)
 
     assert json_file.exists()
-    assert db.get_node(db_path, "proj::docs.arch") is not None
+    assert db.get_node(db_path, "proj::docs/arch") is not None
 
-    result = axiom_graph_delete_doc(str(mini_project), "proj::docs.arch")
+    result = axiom_graph_delete_doc(str(mini_project), "proj::docs/arch")
     assert "Deleted" in result
 
     # File should be gone
     assert not json_file.exists()
 
     # DB should be clean
-    assert db.get_node(db_path, "proj::docs.arch") is None
-    assert db.get_node(db_path, "proj::docs.arch::database-layer") is None
+    assert db.get_node(db_path, "proj::docs/arch") is None
+    assert db.get_node(db_path, "proj::docs/arch::database-layer") is None
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +180,7 @@ def test_delete_link_valid(mini_project: Path, db_path: Path):
     _write_doc(docs_dir, "guide.json", "Guide", sections)
     _build_full(mini_project)
 
-    result = axiom_graph_delete_link(str(mini_project), "proj::docs.guide::overview", "proj::some.module")
+    result = axiom_graph_delete_link(str(mini_project), "proj::docs/guide::overview", "proj::some.module")
     assert "Removed" in result
 
     # Link should be gone from JSON
@@ -196,7 +196,7 @@ def test_delete_link_not_found(mini_project: Path, db_path: Path):
     _write_doc(docs_dir, "guide.json", "Guide", sections)
     _build_full(mini_project)
 
-    result = axiom_graph_delete_link(str(mini_project), "proj::docs.guide::overview", "proj::nonexistent")
+    result = axiom_graph_delete_link(str(mini_project), "proj::docs/guide::overview", "proj::nonexistent")
     assert "no matching links" in result.lower()
 
 
@@ -266,11 +266,11 @@ def test_build_no_purge_param():
 
 
 # ---------------------------------------------------------------------------
-# Test: _cleanup_old_section_rows leaves no orphans (Issue #4 regression)
+# Test: retiring a deleted section's rows leaves no orphans
 # ---------------------------------------------------------------------------
 
 
-def test_cleanup_old_section_rows_no_orphans(mini_project: Path, db_path: Path):
+def test_delete_section_retires_rows_without_orphans(mini_project: Path, db_path: Path):
     """Deleting a section cleans functional index tables but preserves node_history audit trail."""
     docs_dir = mini_project / "docs"
     sections = [
@@ -280,7 +280,7 @@ def test_cleanup_old_section_rows_no_orphans(mini_project: Path, db_path: Path):
     _write_doc(docs_dir, "cleanup.json", "Cleanup", sections)
     _build_full(mini_project)
 
-    sec_id = "proj::docs.cleanup::sec-remove"
+    sec_id = "proj::docs/cleanup::sec-remove"
 
     # Verify section node exists and has rows in auxiliary tables
     assert db.get_node(db_path, sec_id) is not None

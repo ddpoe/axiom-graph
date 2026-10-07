@@ -15,15 +15,18 @@ blanket-verifying.  These tests prove:
 
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 
-from axiom_annotations import workflow
+from axiom_annotations import Step, workflow
 
 from axiom_graph.index import builder, db
 from axiom_graph.index.staleness import (
     _file_content_matches_anchor,
     compute_staleness,
 )
+from axiom_graph.lifecycle.api import build_index, compute_check_summary, purge_nodes
 from axiom_graph.models import AxiomNode, hash16
 from axiom_graph.scanners.module_scanner import scan_module
 
@@ -211,3 +214,157 @@ def test_scan_module_emits_module_subtype_and_wholefile_hash(tmp_path: Path):
     stub = bad_nodes[0]
     assert stub.subtype == "module"
     assert stub.code_hash == hash16(bad_source)
+
+
+# ---------------------------------------------------------------------------
+# The fast pass confirms, never promotes
+# ---------------------------------------------------------------------------
+
+_MODULE = "proj::pkg.m"
+_KEEP = "proj::pkg.m::keep"
+_EDITED = "proj::pkg.m::edited"
+_GONE = "proj::pkg.m::gone"
+
+
+def _write_module(project_root: Path, *, edited_returns: int = 1, with_gone: bool = True) -> Path:
+    pkg = project_root / "pkg"
+    pkg.mkdir(exist_ok=True)
+    py = pkg / "m.py"
+    source = f"def keep():\n    return 1\n\n\ndef edited():\n    return {edited_returns}\n"
+    if with_gone:
+        source += "\n\ndef gone():\n    return 1\n"
+    py.write_text(source, encoding="utf-8")
+    return py
+
+
+def _own_status(db_path: Path, project_root: Path, node_id: str) -> str:
+    return compute_check_summary(db_path, project_root).statuses[node_id][0]
+
+
+def _spy_on_per_node_ladder(monkeypatch) -> dict[str, int]:
+    """Count calls to the per-node hashing ladder that step 2 falls back to."""
+    import axiom_graph.scanners.node_hashing as node_hashing
+
+    calls = {"n": 0}
+    real = node_hashing.current_node_hashes_for_file
+
+    def _spy(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(node_hashing, "current_node_hashes_for_file", _spy)
+    return calls
+
+
+@workflow(
+    purpose=(
+        "A developer cleaning up a module whose functions were deleted and edited "
+        "tries to purge the module node, which purge refuses while its file is on disk, "
+        "and rebuilds: the deleted function stays NOT_FOUND and the edited one "
+        "CONTENT_UPDATED on every later build, with or without touching the file, so "
+        "the deleted row can then be purged normally"
+    ),
+)
+def test_rebuilds_after_a_refused_module_purge_never_launder_its_functions(mini_project: Path, db_path: Path):
+    口 = Step(
+        step_num=1,
+        name="Index a module with three functions",
+        purpose="keep, edited and gone all start VERIFIED against their baselines",
+    )
+    _write_module(mini_project)
+    build_index(db_path, mini_project, project_id="proj", discovery_only=False)
+
+    口 = Step(
+        step_num=2,
+        name="Delete gone, edit edited, rebuild",
+        purpose="The real drift is recorded and the module reads NOT_FOUND from its removed child",
+    )
+    time.sleep(0.05)
+    _write_module(mini_project, edited_returns=2, with_gone=False)
+    build_index(db_path, mini_project, project_id="proj")
+    assert _own_status(db_path, mini_project, _GONE) == "NOT_FOUND"
+    assert _own_status(db_path, mini_project, _EDITED) == "CONTENT_UPDATED"
+
+    口 = Step(
+        step_num=3,
+        name="Try to purge the module node",
+        purpose="Its file is on disk, so its NOT_FOUND is inherited: purge refuses it and the module stays",
+    )
+    refused = purge_nodes(db_path, mini_project, [_MODULE], "ghost module", actor="agent")[0]
+    assert not refused.purged
+    assert db.get_node(db_path, _MODULE) is not None
+
+    口 = Step(
+        step_num=4,
+        name="Rebuild twice without touching the file",
+        purpose="The file's hash matches the module's by construction — the fast pass must still not promote the drifted rows",
+    )
+    for _ in range(2):
+        build_index(db_path, mini_project, project_id="proj")
+        assert db.get_node(db_path, _MODULE) is not None
+        assert _own_status(db_path, mini_project, _GONE) == "NOT_FOUND"
+        assert _own_status(db_path, mini_project, _EDITED) == "CONTENT_UPDATED"
+        assert _own_status(db_path, mini_project, _KEEP) == "VERIFIED"
+
+    口 = Step(
+        step_num=5,
+        name="Purge the deleted function",
+        purpose="It is still NOT_FOUND, so purge accepts it",
+    )
+    assert purge_nodes(db_path, mini_project, [_GONE], "function deleted", actor="agent")[0].purged
+    assert db.get_node(db_path, _GONE) is None
+
+
+@workflow(
+    purpose=(
+        "An unchanged file whose nodes are all already VERIFIED still takes the "
+        "mtime fast pass: staleness confirms it without re-hashing any node"
+    ),
+)
+def test_unchanged_fully_verified_file_takes_the_fast_pass(mini_project: Path, db_path: Path, monkeypatch):
+    _write_module(mini_project)
+    build_index(db_path, mini_project, project_id="proj", discovery_only=False)
+    build_index(db_path, mini_project, project_id="proj")
+
+    calls = _spy_on_per_node_ladder(monkeypatch)
+    result = compute_staleness(db_path, mini_project, db.all_nodes(db_path))
+
+    assert result[_KEEP][0] == "VERIFIED"
+    assert result[_GONE][0] == "VERIFIED"
+    assert calls["n"] == 0, "an unchanged, fully VERIFIED file must not run the per-node ladder"
+
+
+@workflow(
+    purpose=(
+        "Purging the module node of a deleted file whose function rows still carry a "
+        "stored file mtime (written by an older version) makes the next build rescan "
+        "the file once it is restored with that same mtime, so the module node is "
+        "re-created instead of staying missing"
+    ),
+)
+def test_purged_anchor_is_recreated_when_function_rows_carry_a_stored_mtime(mini_project: Path, db_path: Path):
+    py = _write_module(mini_project)
+    build_index(db_path, mini_project, project_id="proj", discovery_only=False)
+
+    # Index state left by an older version: every row at the location
+    # carries the file's mtime, not just the module node.
+    with db._connect(db_path) as conn:
+        conn.execute(
+            "UPDATE nodes SET file_mtime = (SELECT file_mtime FROM nodes WHERE id = ?) WHERE location = ?",
+            (_MODULE, "pkg/m.py"),
+        )
+    stored = py.stat()
+    source = py.read_bytes()
+    assert db.get_file_mtime(db_path, "pkg/m.py") == stored.st_mtime
+
+    # The file is deleted, its module node purged, then the file comes back
+    # unchanged with its old mtime (as a restore from backup would leave it).
+    py.unlink()
+    compute_check_summary(db_path, mini_project)
+    assert purge_nodes(db_path, mini_project, [_MODULE], "module deleted", actor="agent")[0].purged
+    py.write_bytes(source)
+    os.utime(py, ns=(stored.st_atime_ns, stored.st_mtime_ns))
+
+    build_index(db_path, mini_project, project_id="proj")
+
+    assert db.get_node(db_path, _MODULE) is not None

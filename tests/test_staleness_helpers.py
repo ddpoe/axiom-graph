@@ -183,7 +183,7 @@ def test_get_stale_doc_sections_matches_became_content_updated(db_path: Path):
 
     func = _node("proj::mod::func", code_hash="aaa")
     section = _node(
-        "proj::docs.arch::overview",
+        "proj::docs/arch::overview",
         subtype="docjson",
         code_hash="sec_hash",
         desc_hash="heading_hash",
@@ -196,17 +196,17 @@ def test_get_stale_doc_sections_matches_became_content_updated(db_path: Path):
     with _connect(db_path) as conn:
         section_ts = conn.execute(
             "SELECT updated_at FROM nodes WHERE id = ?",
-            ("proj::docs.arch::overview",),
+            ("proj::docs/arch::overview",),
         ).fetchone()[0]
         conn.execute(
             "INSERT OR REPLACE INTO docs (id, title, file_path, desc_hash, updated_at) VALUES (?, ?, ?, ?, ?)",
-            ("proj::docs.arch", "Architecture", "docs/arch.json", "x", section_ts),
+            ("proj::docs/arch", "Architecture", "docs/arch.json", "x", section_ts),
         )
-        seed_section_tuple(conn, ("proj::docs.arch::overview", "proj::docs.arch", "Overview", 2, 0, section_ts))
+        seed_section_tuple(conn, ("proj::docs/arch::overview", "proj::docs/arch", "Overview", 2, 0, section_ts))
 
     time.sleep(0.02)
     db.upsert_node(db_path, func, discovery_only=False)
-    db.upsert_edge(db_path, _edge("proj::docs.arch::overview", "documents", "proj::mod::func"))
+    db.upsert_edge(db_path, _edge("proj::docs/arch::overview", "documents", "proj::mod::func"))
 
     # Directly seed a BECAME_CONTENT_UPDATED history row
     time.sleep(0.02)
@@ -218,7 +218,7 @@ def test_get_stale_doc_sections_matches_became_content_updated(db_path: Path):
 
     rows = db.get_stale_doc_sections(db_path)
     assert len(rows) == 1
-    assert rows[0]["section_id"] == "proj::docs.arch::overview"
+    assert rows[0]["section_id"] == "proj::docs/arch::overview"
     assert rows[0]["code_node_id"] == "proj::mod::func"
 
 
@@ -522,7 +522,7 @@ def test_composite_content_stale_beats_linked_stale(db_path: Path):
 def test_verification_on_doc_section_promotes_to_verified(mini_project: Path, db_path: Path):
     """Doc sections (atomic_process/subtype=docjson) can be verified and promoted."""
     section = _node(
-        "proj::docs.arch::overview",
+        "proj::docs/arch::overview",
         subtype="docjson",
         code_hash="prose_hash",
         desc_hash="heading_hash",
@@ -533,7 +533,7 @@ def test_verification_on_doc_section_promotes_to_verified(mini_project: Path, db
     # Verify the section — snapshot both hashes
     db.upsert_verification(
         db_path,
-        "proj::docs.arch::overview",
+        "proj::docs/arch::overview",
         "human",
         code_hash_at="prose_hash",
         desc_hash_at="heading_hash",
@@ -559,7 +559,7 @@ def test_verification_on_doc_section_promotes_to_verified(mini_project: Path, db
     from axiom_graph.index.db import _connect
 
     with _connect(db_path) as conn:
-        conn.execute("UPDATE nodes SET file_mtime = ? WHERE id = ?", (mtime, "proj::docs.arch::overview"))
+        conn.execute("UPDATE nodes SET file_mtime = ? WHERE id = ?", (mtime, "proj::docs/arch::overview"))
 
     nodes = db.all_nodes(db_path)
     statuses = compute_staleness(db_path, mini_project, nodes)
@@ -572,7 +572,7 @@ def test_verification_on_doc_section_promotes_to_verified(mini_project: Path, db
 
     # Force a stale mtime so the engine re-checks hashes
     with _connect(db_path) as conn:
-        conn.execute("UPDATE nodes SET file_mtime = 0.0 WHERE id = ?", ("proj::docs.arch::overview",))
+        conn.execute("UPDATE nodes SET file_mtime = 0.0 WHERE id = ?", ("proj::docs/arch::overview",))
 
     nodes = db.all_nodes(db_path)
     statuses = compute_staleness(db_path, mini_project, nodes)
@@ -580,7 +580,7 @@ def test_verification_on_doc_section_promotes_to_verified(mini_project: Path, db
     # but the current file content generates different hashes → CONTENT_UPDATED
     # then verification check fires: if stored hashes == verification hashes → VERIFIED
     v = db.get_all_verifications(db_path)
-    assert "proj::docs.arch::overview" in v
+    assert "proj::docs/arch::overview" in v
 
 
 def test_verification_invalidated_by_subsequent_edit(mini_project: Path, db_path: Path):

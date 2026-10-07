@@ -720,7 +720,10 @@ def test_a_step_no_envelope_composes_keeps_the_broken_link_finding_on_itself(min
         "with no composing envelope the finding must fall back to the step itself"
     )
 
-    compute_check_summary(db_path, mini_project)
+    # The raw DELETE above leaves no journal row (no writer removes a composes
+    # edge that way), and the build recorded the watermark, so the recompute
+    # that re-derives the step is the full one.
+    compute_check_summary(db_path, mini_project, full=True)
 
     assert _persisted_link_status(db_path, step_id) == BROKEN_LINK
     assert _persisted_link_status(db_path, f"{orphan_id}@workflow") != BROKEN_LINK, (

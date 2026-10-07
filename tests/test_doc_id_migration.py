@@ -38,9 +38,15 @@ def _tree_state(root) -> dict[str, tuple[int, str]]:
 
 
 def _build(root):
-    """Build an index for *root* and return the DB path."""
+    """Index *root* as the previous release did and return the DB path.
+
+    Every test in this module has the migration as its subject, and a
+    migration needs an index holding retired identities to move.  See
+    ``doc_trees.retired_derivation``.
+    """
     path = db_path_for(root)
-    lifecycle_api.build_index(path, root, discovery_only=True)
+    with doc_trees.retired_derivation():
+        lifecycle_api.build_index(path, root, discovery_only=True)
     return path
 
 
@@ -258,11 +264,11 @@ def test_batch_failure_aborts_and_restores_from_the_backup(tmp_path, monkeypatch
     real = db.record_doc_rename_conn
     calls = {"n": 0}
 
-    def _boom(conn, old_id, new_id, file_path):
+    def _boom(conn, old_id, new_id, file_path, **kwargs):
         calls["n"] += 1
         if calls["n"] == 3:
             raise RuntimeError("engineered batch failure")
-        return real(conn, old_id, new_id, file_path)
+        return real(conn, old_id, new_id, file_path, **kwargs)
 
     monkeypatch.setattr(db, "record_doc_rename_conn", _boom)
 

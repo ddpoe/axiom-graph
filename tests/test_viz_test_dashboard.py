@@ -1,6 +1,6 @@
 """Subsystem tests for the viz dashboard endpoints (graph.db-sourced).
 
-Tier 2: @workflow(purpose=...) — meaningful subsystem behaviour, not a
+Tier 2/3: @workflow(purpose=...) — meaningful subsystem behaviour, not a
 stakeholder narrative. These verify the rewritten v2.0 viz endpoints source
 their data from axiom-graph envelopes / step nodes (graph.db) and preserve
 the frontend-facing JSON shapes.
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from axiom_annotations import workflow
+from axiom_annotations import Step, workflow
 from fastapi.testclient import TestClient
 
 from axiom_graph.index import builder
@@ -297,3 +297,30 @@ def test_api_source_rejects_path_traversal(tmp_path):
     resp = client.get("/api/source", params={"path": "../../etc/passwd"})
 
     assert resp.status_code == 403
+
+
+@workflow(
+    purpose="GET /api/search returns the nodes whose text matches the query",
+    inputs="a built project index and a query string",
+    outputs="JSON with a nodes list, a stage label and a total count",
+)
+def test_search_endpoint_returns_matching_nodes(mini_project, db_path):
+    _ = Step(step_num=1, name="Index a project", purpose="Give the endpoint a populated graph to search")
+    _write(
+        mini_project / "mymod.py",
+        '''\
+def findable_marker_func():
+    """A uniquely named function."""
+''',
+    )
+    builder.build(mini_project, project_id="proj", discovery_only=False)
+    client = _setup_server(mini_project)
+
+    _ = Step(step_num=2, name="Query the endpoint", purpose="Search by a term present in the indexed node")
+    resp = client.get("/api/search", params={"q": "findable_marker_func"})
+
+    _ = Step(step_num=3, name="Check the payload", purpose="Matching nodes come back with a total count")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] >= 1
+    assert any("findable_marker_func" in n["id"] for n in body["nodes"])

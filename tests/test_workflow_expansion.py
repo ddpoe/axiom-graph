@@ -2,7 +2,7 @@
 
 Mapped to user story US-6: flat, one-level, two-level, loop-inside, cycle,
 non-annotated target.  See
-``axiom_graph::docs.pev.cycles.pev-2026-04-21-phase3-axiom-annotations``.
+``axiom_graph::docs/pev/cycles/pev-2026-04-21-phase3-axiom-annotations``.
 """
 
 from __future__ import annotations
@@ -30,10 +30,7 @@ def _write(path: Path, text: str) -> Path:
 
 
 def _build(project_root: Path) -> None:
-    """Run axiom-graph build with embeddings skipped."""
-    import os
-
-    os.environ["AXIOM_GRAPH_SKIP_EMBEDDINGS"] = "1"
+    """Run axiom-graph build."""
     builder.build(project_root, project_id="proj")
 
 

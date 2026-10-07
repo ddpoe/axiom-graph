@@ -1,0 +1,56 @@
+{
+  "title": "Template: PEV Audit (dev-docs)",
+  "tags": [],
+  "meta": {
+    "template_version": "1.0.0"
+  },
+  "sections": [
+    {
+      "id": "meta",
+      "heading": "Meta",
+      "content": "status: active\naudit-type: dev-docs\nstarted-at: {ISO timestamp}\ndispatcher: pev-audit-dev-docs\nrequest-link: {audit-request-doc-id or null}"
+    },
+    {
+      "id": "request",
+      "heading": "Request",
+      "content": "(pointer to, or copy of, the audit-request doc)"
+    },
+    {
+      "id": "orchestrator",
+      "heading": "Orchestrator",
+      "content": "**Filled by:** the `/pev-audit-dev-docs` orchestrator.",
+      "sections": [
+        {
+          "id": "discovery",
+          "heading": "Discovery",
+          "content": "(placeholder — the drift inventory)"
+        },
+        {
+          "id": "partition",
+          "heading": "Partition",
+          "content": "(placeholder — the shard partition)"
+        },
+        {
+          "id": "plans-review",
+          "heading": "Plans Review",
+          "content": "(placeholder — shard plans and the plan gate)"
+        },
+        {
+          "id": "executions",
+          "heading": "Executions",
+          "content": "(placeholder — per-shard execute records; a Summary sub-heading at close)"
+        },
+        {
+          "id": "handoff",
+          "heading": "Handoff",
+          "content": "(placeholder — recommended pev-requests live as a bullet list under a \"Recommended pev-requests\" sub-heading)"
+        }
+      ]
+    },
+    {
+      "id": "friction",
+      "heading": "Friction",
+      "content": "(empty — friction observations; empty is fine)"
+    }
+  ]
+}

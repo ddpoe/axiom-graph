@@ -205,7 +205,7 @@ def test_e1_full_staleness_cascade(git_project: Path, git_db_path: Path):
     _init(git_project)
 
     greet_node = _find_node(git_db_path, "greet")
-    doc_section_id = "proj::docs.spec::greet-section"
+    doc_section_id = "proj::docs/spec::greet-section"
     test_node = _find_node(git_db_path, "test_greet")
 
     口 = Step(
@@ -551,7 +551,7 @@ def test_e4_multicommit_branch_report(git_project: Path, git_db_path: Path):
     assert "CONTENT_ONLY" in content_changes[func_a.id]
     assert "CONTENT_ONLY" in content_changes[func_b.id]
 
-    api_section_id = "proj::docs.api::api-section"
+    api_section_id = "proj::docs/api::api-section"
     assert api_section_id in content_changes, f"doc section not in report: {list(content_changes.keys())}"
 
 
@@ -594,7 +594,7 @@ def test_e6_spec_code_alignment(git_project: Path, git_db_path: Path):
     _init(git_project)
 
     process_node = _find_node(git_db_path, "process")
-    spec_section_id = "proj::docs.spec::process-section"
+    spec_section_id = "proj::docs/spec::process-section"
     nodes = db.all_nodes(git_db_path)
     record_staleness(git_db_path, git_project, nodes)
 
@@ -703,7 +703,7 @@ def test_e7_consumer_doc_transitive_staleness(git_project: Path, git_db_path: Pa
                 "id": "api-section",
                 "heading": "API",
                 "content": "User-facing guide referencing the handler spec.",
-                "links": [{"node_id": "proj::docs.dev-spec::handler-section"}],
+                "links": [{"node_id": "proj::docs/dev-spec::handler-section"}],
             }
         ],
         tags=["consumer"],
@@ -717,8 +717,8 @@ def test_e7_consumer_doc_transitive_staleness(git_project: Path, git_db_path: Pa
         purpose="Establish a clean staleness baseline; the dev-spec→handle and consumer→dev-spec documents edges are derived from the DocJSON links arrays",
         outputs="dev-spec→handle (documents), consumer→dev-spec (documents), all VERIFIED",
     )
-    dev_spec_id = "proj::docs.dev-spec::handler-section"
-    consumer_id = "proj::docs.consumer-guide::api-section"
+    dev_spec_id = "proj::docs/dev-spec::handler-section"
+    consumer_id = "proj::docs/consumer-guide::api-section"
 
     nodes = db.all_nodes(git_db_path)
     record_staleness(git_db_path, git_project, nodes, transitive_tags=["consumer"])
@@ -825,7 +825,7 @@ def test_e8_agent_task_flow(git_project: Path, git_db_path: Path):
     _init(git_project)
 
     handler_node = _find_node(git_db_path, "handler")
-    doc_section_id = "proj::docs.api::handler-ref"
+    doc_section_id = "proj::docs/api::handler-ref"
     nodes = db.all_nodes(git_db_path)
     record_staleness(git_db_path, git_project, nodes)
 

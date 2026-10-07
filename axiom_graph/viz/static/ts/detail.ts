@@ -700,7 +700,9 @@ function renderHistoryTab(): string {
       const sha = (h.git_sha || '').slice(0, 8);
       const subject = h.commit_subject || '';
       const ct = (h.change_type || '').toUpperCase();
-      const badgeClass = ct.includes('VERIFIED') || ct === 'BECAME_VERIFIED' || ct === 'LINK_BECAME_VERIFIED' ? 'history-badge-verified'
+      // RAW_DOCJSON_EDIT: a section edited outside the doc tools (never a verification).
+      const badgeClass = ct === 'RAW_DOCJSON_EDIT' ? 'history-badge-staleness'
+        : ct.includes('VERIFIED') || ct === 'BECAME_VERIFIED' || ct === 'LINK_BECAME_VERIFIED' ? 'history-badge-verified'
         : ct.startsWith('BECAME_LINKED') || ct.startsWith('BECAME_CONTENT') || ct.startsWith('BECAME_NOT') || ct.startsWith('BECAME_BROKEN') || ct.startsWith('BECAME_DESC') ? 'history-badge-staleness'
         : ct === 'CONTENT_ONLY' || ct === 'CONTENT_AND_DESC' ? 'history-badge-content'
         : ct === 'DESC_ONLY' ? 'history-badge-desc'
@@ -712,7 +714,7 @@ function renderHistoryTab(): string {
       return (
         `<tr>` +
           `<td>${esc((h.scanned_at || '').slice(0, 10))}</td>` +
-          `<td><span class="history-badge ${badgeClass}">${esc(h.change_type || '')}</span></td>` +
+          `<td><span class="history-badge ${badgeClass}"${ct === 'RAW_DOCJSON_EDIT' ? ' title="Edited outside the doc tools: re-apply with a doc tool or accept it (axiom_graph_accept_doc_edits)"' : ''}>${esc(ct === 'RAW_DOCJSON_EDIT' ? 'RAW DOCJSON EDIT' : (h.change_type || ''))}</span></td>` +
           shaCell +
         `</tr>`
       );

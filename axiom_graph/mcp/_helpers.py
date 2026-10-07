@@ -2,12 +2,12 @@
 
 After ADR-019 cycle 3 the only inhabitant of this module is the
 ``_timed_tool`` wall-clock-logging decorator applied at registration
-time in ``axiom_graph.mcp.server``.  All DB-path helpers, the semantic
-search handler, and the staleness/mark-clean/file-rescan helpers live in
-their respective bounded contexts:
+time in ``axiom_graph.mcp.server``.  All DB-path helpers and the
+staleness/mark-clean/file-rescan helpers live in their respective
+bounded contexts:
 
 - ``axiom_graph.index.paths.db_path`` / ``require_db`` -- canonical DB path.
-- ``axiom_graph.query.api`` -- search (incl. semantic), render, list,
+- ``axiom_graph.query.api`` -- search, render, list,
   graph, source, sql, drift_query, list_tags, list_undocumented.
 - ``axiom_graph.lifecycle.api`` -- build, check, mark_clean, purge,
   history, report, diff, render_site, checkout.

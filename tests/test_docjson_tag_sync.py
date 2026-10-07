@@ -78,7 +78,7 @@ def _seed(project: Path, slug: str, data: dict) -> str:
     path = project / "docs" / f"{slug}.json"
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     builder.build(project)
-    return f"proj::docs.{slug}"
+    return f"proj::docs/{slug}"
 
 
 def _index_tags(project: Path, doc_id: str) -> set[str]:

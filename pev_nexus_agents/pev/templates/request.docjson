@@ -1,0 +1,36 @@
+{
+  "title": "Template: PEV Request",
+  "tags": [
+    "pev-request"
+  ],
+  "meta": {
+    "template_version": "1.0.0"
+  },
+  "sections": [
+    {
+      "id": "meta",
+      "heading": "Meta",
+      "content": "**Source:** {where this came from — audit, cycle friction, user ask, with date}\n**Priority:** {user call, or 'unset'}\n**Code locations:** {paths and line numbers checked against the current tree}\n**Source audit:** {audit manifest doc id, for audit-spawned requests; otherwise omit}"
+    },
+    {
+      "id": "problem",
+      "heading": "Problem",
+      "content": "(What is wrong or missing, with the evidence. Describe the real defect.)"
+    },
+    {
+      "id": "proposed-approach",
+      "heading": "Proposed Approach",
+      "content": "(The fix, at the level a /pev-cycle Architect can plan from.)"
+    },
+    {
+      "id": "scope",
+      "heading": "Scope",
+      "content": "**In scope:**\n- ...\n\n**Out of scope:**\n- ..."
+    },
+    {
+      "id": "notes",
+      "heading": "Notes",
+      "content": "(Open questions, cross-links to overlapping requests, anything else.)"
+    }
+  ]
+}

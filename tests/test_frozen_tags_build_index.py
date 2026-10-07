@@ -72,7 +72,7 @@ def test_build_index_honors_frozen_tags_for_linked_stale(mini_project: Path, db_
     _write_docjson(doc_file, tags=["adr"], links=[{"node_id": code_id}])
     build_index(db_path, root, project_id="proj")
 
-    section_id = "proj::docs.adr-001::ctx"
+    section_id = "proj::docs/adr-001::ctx"
     documents_edges = [
         e
         for e in db.all_edges(db_path)

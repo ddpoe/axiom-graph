@@ -10,9 +10,11 @@ No imports of the scanned project. Pure stdlib ast + hashlib.
 from __future__ import annotations
 
 import ast
+import copy
 import logging
 import re
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import NamedTuple
 
@@ -49,9 +51,12 @@ def _split_function(
     that editing decorator kwargs does NOT flip the function's code_hash.
     All other decorators (``@lru_cache``, ``@classmethod``,
     ``@staticmethod``, ``@property``, ``@dataclass``, user decorators) are
-    preserved.  Normalised by ``ast.unparse`` — reformatting does not trigger
-    drift.  Includes: name, parameters, annotations, return type, non-
-    annotation decorators.
+    preserved.  ``Step(...)`` / ``AutoStep(...)`` marker statements, at any
+    nesting depth, are stripped too — they are prose about the code and
+    feed the desc_hash instead (see :func:`_function_desc_text`).
+    Normalised by ``ast.unparse`` — reformatting does not trigger drift.
+    Includes: name, parameters, annotations, return type, non-annotation
+    decorators.
     """
     body = list(node.body)
     docstring: str | None = None
@@ -73,6 +78,12 @@ def _split_function(
         if _decorator_name(dec.func if isinstance(dec, ast.Call) else dec) not in _DFLOW_DECORATOR_NAMES
     ]
 
+    # Strip Step/AutoStep markers from hash input.  Step nodes carry no
+    # hash of their own, so the marker text moves to the desc_hash rather
+    # than disappearing (see _function_desc_text).
+    if _marker_statements(node):
+        body = _strip_markers(copy.deepcopy(body))
+
     stripped = ast.FunctionDef(
         name=node.name,
         args=node.args,
@@ -84,6 +95,76 @@ def _split_function(
     )
     ast.fix_missing_locations(stripped)
     return ast.unparse(stripped), docstring
+
+
+def _is_marker_statement(stmt: ast.stmt) -> bool:
+    """Return True iff *stmt* is a ``Step(...)`` / ``AutoStep(...)`` marker.
+
+    Uses the same rule as step-node extraction: the statement's call
+    (bare, assigned, or annotated-assigned) is a direct call to a bare
+    ``Step`` or ``AutoStep`` name.
+    """
+    call = _extract_step_call(stmt)
+    return call is not None and isinstance(call.func, ast.Name) and call.func.id in _STEP_CALLABLES
+
+
+def _marker_statements(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.stmt]:
+    """Return every marker statement inside *node*, in source order."""
+    found = [stmt for body in _iter_statement_lists(node) for stmt in body if _is_marker_statement(stmt)]
+    found.sort(key=lambda s: (s.lineno, s.col_offset))
+    return found
+
+
+def _strip_markers(body: list[ast.stmt]) -> list[ast.stmt]:
+    """Remove marker statements from *body* and every nested statement list.
+
+    Mutates the statements it is given, so callers pass a copy.  Walks the
+    same lists as :func:`_iter_statement_lists` (``body``, ``orelse``,
+    ``finalbody``, handler bodies).  A required ``body`` left empty gets a
+    ``pass`` so the result still unparses.
+    """
+    kept: list[ast.stmt] = []
+    for stmt in body:
+        if _is_marker_statement(stmt):
+            continue
+        for attr in ("body", "orelse", "finalbody"):
+            nested = getattr(stmt, attr, None)
+            if nested:
+                cleaned = _strip_markers(nested)
+                setattr(stmt, attr, cleaned or ([ast.Pass()] if attr == "body" else []))
+        for h in getattr(stmt, "handlers", None) or []:
+            if h.body:
+                h.body = _strip_markers(h.body) or [ast.Pass()]
+        kept.append(stmt)
+    return kept
+
+
+def _function_desc_text(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    docstring: str | None,
+) -> str | None:
+    """Return the desc_hash input for a function: docstring plus marker text.
+
+    Each ``Step(...)`` / ``AutoStep(...)`` marker is ``ast.unparse``-d and
+    appended in source order, so a marker edit reads as DESC_UPDATED on the
+    function rather than CONTENT_UPDATED.  A function without markers
+    returns its docstring unchanged, keeping its desc_hash identical to the
+    docstring-only hash.
+
+    Args:
+        node: The function AST node.
+        docstring: The docstring returned by :func:`_split_function`.
+
+    Returns:
+        The text to hash, or None when there is neither a docstring nor a
+        marker.
+    """
+    markers = _marker_statements(node)
+    if not markers:
+        return docstring
+    parts = [docstring] if docstring else []
+    parts.extend(ast.unparse(m) for m in markers)
+    return "\n".join(parts)
 
 
 def _split_module(tree: ast.Module, module_doc: str | None) -> str:
@@ -98,7 +179,7 @@ def _split_module(tree: ast.Module, module_doc: str | None) -> str:
 
 @task(
     purpose="Parse a single .py file via AST, extract functions/classes/modules with code and desc hashes, detect dFlow decorators, and generate composes/depends_on/validates edges",
-    inputs="file_path, project_root, project_id",
+    inputs="file_path, project_root, project_id, optional source_roots (ordered import roots)",
     outputs="Tuple of (list[AxiomNode], list[AxiomEdge])",
 )
 def scan_module(
@@ -108,12 +189,18 @@ def scan_module(
     findings_out: list | None = None,
     autosteps_out: list | None = None,
     is_rule_enabled=None,
+    source_roots: Sequence[Path] | None = None,
 ) -> tuple[list[AxiomNode], list[AxiomEdge]]:
     """Scan a single .py file and return (nodes, edges).
 
     Produces one composite_process node for the module, one atomic_process
     node per function/method at every nesting level, plus composes and
     depends_on edges.
+
+    ``source_roots`` are the directories an absolute import is looked up
+    under, in order (see :mod:`axiom_graph.scanners.source_roots`); ``None``
+    means the project root only.  They decide which file an import names,
+    never a node id: ids are paths from ``project_root``.
     """
     口 = Step(
         step_num=1,
@@ -210,7 +297,8 @@ def scan_module(
     口 = Step(
         step_num=3,
         name="Module-level import analysis and name_map",
-        purpose="Walk the imports that are direct children of the module to build name_map (bound name → module node ID) and emit module-level depends_on edges",
+        purpose="Walk the imports that are direct children of the module to build name_map (bound name → module node ID) and emit module-level depends_on edges; an absolute import is looked up under each import root in order, a relative one under the project root",
+        inputs="the module AST, source_roots",
         outputs="name_map dict, external_pkg_ids set, depends_on edges appended — an edge to a module this one re-exports from carries a marker (star, and/or bound name → original name) for the build-time resolver",
     )
     # -----------------------------------------------------------------------
@@ -218,9 +306,10 @@ def scan_module(
     # -----------------------------------------------------------------------
     # current_package_parts: used for resolving relative imports.
     # name_map: bound name → intra-project module node_id.
-    #   Only contains names whose import resolves to a file under project_root.
+    #   Only contains names whose import resolves to a project file under
+    #   one of the import roots (source_roots; the project root when None).
     #   stdlib, third-party, and unresolvable imports are excluded because
-    #   _resolve_import returns None for anything outside the project.
+    #   _resolve_import returns None for them.
     # Both module-level depends_on edges and name_map are built in one pass
     # so name_map is available when _collect_functions emits function-level edges.
     # Inside a package's own __init__.py the package IS this module, so a
@@ -243,6 +332,7 @@ def scan_module(
         project_id=project_id,
         module_id=module_id,
         package_parts=current_package_parts,
+        source_roots=source_roots,
     )
     name_map: dict[str, tuple[str, str | None]] = dict(module_scan.bindings)
     binding_spellings: dict[str, str] = dict(module_scan.spellings)
@@ -289,6 +379,7 @@ def scan_module(
             project_id=project_id,
             module_id=module_id,
             package_parts=current_package_parts,
+            source_roots=source_roots,
         )
         for target_id in sorted(deferred_scan.module_targets - module_scan.module_targets):
             edges.append(make_edge("depends_on", module_id, target_id))
@@ -299,7 +390,7 @@ def scan_module(
     口 = Step(
         step_num=5,
         name="Collect functions and edges",
-        purpose="Recursively extract function/method nodes at all nesting levels; emit composes, depends_on, and validates edges via AST call graph",
+        purpose="Recursively extract function/method nodes at all nesting levels; emit composes, depends_on, and validates edges via AST call graph (in test files only collected tests own validates; helper, fixture and nested-def calls fold into the tests that reach them, else the module node)",
         outputs="Function nodes and edges appended, external package stubs created",
     )
     # local_func_ids: bare name → node id for module-level functions, so an
@@ -312,6 +403,9 @@ def scan_module(
         for child in ast.iter_child_nodes(tree)
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
+    # In a test file only collected tests own validates edges; helpers,
+    # fixtures and nested defs fold into the tests that reach them.
+    test_fold = _TestFold() if _is_test_file(rel_path) else None
 
     # -----------------------------------------------------------------------
     # Function nodes (all nesting levels)
@@ -336,7 +430,11 @@ def scan_module(
         project_root=project_root,
         package_parts=current_package_parts,
         binding_spellings=binding_spellings,
+        test_fold=test_fold,
+        source_roots=source_roots,
     )
+    if test_fold is not None:
+        _emit_folded_validates(test_fold, module_id, edges)
 
     # Emit stub nodes for external packages and tag the module
     if external_pkg_ids:
@@ -425,19 +523,25 @@ def _scan_imports(
     project_id: str,
     module_id: str,
     package_parts: list[str],
+    source_roots: Sequence[Path] | None = None,
 ) -> _ImportScan:
     """Resolve a set of import statements into bindings and dependency targets.
 
     Shared by the module-level walk, the deferred-import union, and the
     per-function binding overlay, so all three agree on what an import
-    means.  Names that resolve outside ``project_root`` are excluded from
-    the bindings and reported as external package stubs instead.
+    means.  Names that resolve to no file under any import root are
+    excluded from the bindings and reported as external package stubs
+    instead.  Absolute imports are looked up under each of
+    ``source_roots``; relative imports under the project root only, since
+    ``package_parts`` is the importing file's path from there.
 
     ``from pkg import name`` binds ``name`` to the **submodule** when
     ``pkg/name.py`` (or ``pkg/name/__init__.py``) exists on disk: the
     receiver of a later ``name.f()`` is that module, not the package.  The
     package edge is kept alongside the submodule edge — importing a
-    submodule does execute its package.
+    submodule does execute its package.  When ``pkg`` itself is no module
+    (a namespace package: a directory with no ``__init__.py``), only the
+    submodules bind and no stub is reported, unless none of them resolves.
 
     Args:
         import_nodes: Iterable of ``ast.Import`` / ``ast.ImportFrom``.
@@ -447,10 +551,13 @@ def _scan_imports(
             skipped).
         package_parts: Dotted-path components of the enclosing package,
             used to resolve relative imports.
+        source_roots: Ordered import roots for absolute imports; ``None``
+            means the project root only.
 
     Returns:
         An ``_ImportScan``.
     """
+    root_only = (project_root,)
     bindings: dict[str, tuple[str, str | None]] = {}
     module_targets: set[str] = set()
     external_ids: set[str] = set()
@@ -460,7 +567,7 @@ def _scan_imports(
     for imp_node in import_nodes:
         if isinstance(imp_node, ast.Import):
             for alias in imp_node.names:
-                target_id = _resolve_import(alias.name, project_root, project_id)
+                target_id = _resolve_import(alias.name, project_root, project_id, source_roots)
                 if target_id and target_id != module_id:
                     bound = alias.asname or alias.name.split(".")[0]
                     bindings[bound] = (target_id, None)  # whole-module binding
@@ -485,16 +592,34 @@ def _scan_imports(
         if level > 0:
             base_parts = package_parts[: len(package_parts) - (level - 1)]
             resolved_name = ".".join(base_parts + [mod]) if mod else ".".join(base_parts)
+            roots = root_only
         else:
             resolved_name = mod
+            roots = source_roots
         if not resolved_name:
             continue
 
-        target_id = _resolve_import(resolved_name, project_root, project_id)
+        target_id = _resolve_import(resolved_name, project_root, project_id, roots)
         if target_id is None:
-            ext_id = _external_node_id(resolved_name, project_id)
-            if ext_id:
-                external_ids.add(ext_id)
+            # A namespace package has no module of its own; what binds is
+            # each imported submodule that exists under it.
+            namespace_hit = False
+            for alias in imp_node.names:
+                if alias.name == "*":
+                    continue
+                submodule_id = _resolve_import(f"{resolved_name}.{alias.name}", project_root, project_id, roots)
+                if submodule_id is None:
+                    continue
+                namespace_hit = True
+                if submodule_id != module_id:
+                    bound = alias.asname or alias.name
+                    bindings[bound] = (submodule_id, None)
+                    spellings.pop(bound, None)
+                    module_targets.add(submodule_id)
+            if not namespace_hit:
+                ext_id = _external_node_id(resolved_name, project_id)
+                if ext_id:
+                    external_ids.add(ext_id)
             continue
         if target_id != module_id:
             module_targets.add(target_id)
@@ -504,7 +629,7 @@ def _scan_imports(
                     star_sources.add(target_id)
                 continue
             bound = alias.asname or alias.name
-            submodule_id = _resolve_import(f"{resolved_name}.{alias.name}", project_root, project_id)
+            submodule_id = _resolve_import(f"{resolved_name}.{alias.name}", project_root, project_id, roots)
             if submodule_id and submodule_id != module_id:
                 # The imported name IS a module — bind it as a namespace so
                 # `name.f()` resolves inside the file that defines `f`.
@@ -672,6 +797,148 @@ def _next_call_chain_meta(
 
 
 # ---------------------------------------------------------------------------
+# Test-file validates fold
+# ---------------------------------------------------------------------------
+
+
+class _TestFold:
+    """Per-file accumulator for validates edges in a test file.
+
+    Attributes:
+        direct: ``{func_id: [(target_id, meta), ...]}`` for every def that is
+            not nested in a function (module-level functions and class
+            methods), collected test or not.  Nested defs have no entry: the
+            enclosing def's ``ast.walk`` already owns their calls.
+        calls: ``{func_id: {local_func_id, ...}}`` -- same-file defs this def
+            calls (bare name, or ``self.``/``cls.`` within its class) or, for
+            tests and fixtures, names as a parameter (fixtures).
+        collected: Ids of the defs pytest would collect, in walk order.
+    """
+
+    def __init__(self) -> None:
+        self.direct: dict[str, list[tuple[str, dict | None]]] = {}
+        self.calls: dict[str, set[str]] = {}
+        self.collected: list[str] = []
+
+
+def _direct_validates_targets(
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    scope_name_map: dict[str, tuple[str, str | None]],
+    scope_spellings: dict[str, str],
+) -> list[tuple[str, dict | None]]:
+    """Return the production targets *func_node* calls directly (nested defs included).
+
+    Args:
+        func_node: The function definition to walk.
+        scope_name_map: Import bindings visible in the function's scope.
+        scope_spellings: Dotted spellings for those bindings.
+
+    Returns:
+        ``(target_id, meta)`` pairs in walk order; meta marks unspelled chains.
+    """
+    targets: list[tuple[str, dict | None]] = []
+    for call_node in ast.walk(func_node):
+        if not isinstance(call_node, ast.Call):
+            continue
+        func_ref = call_node.func
+        if isinstance(func_ref, ast.Name) and func_ref.id in scope_name_map:
+            mod_id, orig_name = scope_name_map[func_ref.id]
+            if orig_name is not None:
+                # from mod import func → func(...)
+                targets.append((f"{mod_id}::{orig_name}", None))
+        elif isinstance(func_ref, ast.Attribute):
+            # mod.func(...) — resolve root to its binding, attr is the member
+            root = func_ref.value
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name) and root.id in scope_name_map:
+                target = _attribute_target_id(scope_name_map[root.id], func_ref.attr)
+                targets.append((target, _chain_meta(func_ref, scope_spellings)))
+    return targets
+
+
+def _local_support_refs(
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    *,
+    module_id: str,
+    local_func_ids: dict[str, str],
+    class_name: str | None,
+    include_params: bool,
+) -> set[str]:
+    """Return candidate ids of same-file defs *func_node* reaches.
+
+    Candidates are not checked for existence here; the fold follows only
+    ids that turn out to be recorded defs.
+
+    Args:
+        func_node: The function definition to walk.
+        module_id: The file's module node id.
+        local_func_ids: ``{name: node_id}`` for module-level defs.
+        class_name: Enclosing class name, for ``self.x()`` / ``cls.x()``.
+        include_params: Also treat parameter names as fixture requests.
+
+    Returns:
+        Set of candidate node ids.
+    """
+    refs: set[str] = set()
+    for call_node in ast.walk(func_node):
+        if not isinstance(call_node, ast.Call):
+            continue
+        func_ref = call_node.func
+        if isinstance(func_ref, ast.Name) and func_ref.id in local_func_ids:
+            refs.add(local_func_ids[func_ref.id])
+        elif (
+            class_name
+            and isinstance(func_ref, ast.Attribute)
+            and isinstance(func_ref.value, ast.Name)
+            and func_ref.value.id in ("self", "cls")
+        ):
+            refs.add(f"{module_id}::{class_name}.{func_ref.attr}")
+    if include_params:
+        args = func_node.args
+        for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]:
+            if class_name:
+                refs.add(f"{module_id}::{class_name}.{arg.arg}")
+            if arg.arg in local_func_ids:
+                refs.add(local_func_ids[arg.arg])
+    return refs
+
+
+def _emit_folded_validates(fold: _TestFold, module_id: str, edges: list[AxiomEdge]) -> None:
+    """Emit a test file's validates edges from its collected tests only.
+
+    Each collected test owns its direct targets plus those of every same-file
+    helper or fixture it reaches, transitively through helper chains (cycle
+    guarded).  A def no collected test reaches (an unused helper, an autouse
+    fixture) gives its targets to the module node, which keeps the coverage
+    in the graph without making a non-test a staleness source.
+
+    Args:
+        fold: The file's accumulated targets and references.
+        module_id: The file's module node id.
+        edges: Edge list to append to.
+    """
+    reached: set[str] = set()
+    for test_id in fold.collected:
+        seen = {test_id}
+        stack = [test_id]
+        while stack:
+            current = stack.pop()
+            for target, meta in fold.direct.get(current, ()):
+                edges.append(make_edge("validates", test_id, target, meta=meta))
+            for ref in sorted(fold.calls.get(current, ())):
+                if ref in fold.direct and ref not in seen:
+                    seen.add(ref)
+                    stack.append(ref)
+        reached |= seen
+    for func_id, targets in fold.direct.items():
+        if func_id in reached:
+            continue
+        for target, meta in targets:
+            edges.append(make_edge("validates", module_id, target, meta=meta))
+
+
+# ---------------------------------------------------------------------------
 # Recursive function collector
 # ---------------------------------------------------------------------------
 
@@ -697,6 +964,9 @@ def _collect_functions(
     package_parts: list[str] | None = None,
     class_name: str | None = None,
     binding_spellings: dict[str, str] | None = None,
+    in_function: bool = False,
+    test_fold: _TestFold | None = None,
+    source_roots: Sequence[Path] | None = None,
 ) -> None:
     """Walk direct children of tree for FunctionDef / AsyncFunctionDef.
 
@@ -716,6 +986,11 @@ def _collect_functions(
     deliberately not derived from ``name_prefix``: inside a method that
     prefix names the enclosing *function*, while a closure defined there is
     still a member of the same class.
+
+    ``in_function`` is True while walking a function body (at any depth,
+    including a class defined inside a function); defs found there are
+    nested and never collected as tests.  ``test_fold`` is set when the file
+    is a test file: validates targets are recorded on it rather than emitted.
     """
     if name_map is None:
         name_map = {}
@@ -734,6 +1009,7 @@ def _collect_functions(
                 project_id=project_id,
                 module_id=module_id,
                 package_parts=package_parts or [],
+                source_roots=source_roots,
             )
             if local_scan.bindings:
                 scope_name_map = {**name_map, **local_scan.bindings}
@@ -745,6 +1021,7 @@ def _collect_functions(
 
         code_text, docstring = _split_function(child)
         code_hash = hash16(code_text)
+        desc_text = _function_desc_text(child, docstring)
         sig = _build_signature(child)
 
         level_1 = sig
@@ -757,7 +1034,7 @@ def _collect_functions(
         level_3 = f"{rel_path}#L{start_line}-L{child.end_lineno}"
 
         raises = _extract_raises(child)
-        func_tags = _extract_tags(child, rel_path)
+        func_tags = _extract_tags(child, rel_path, nested=in_function)
         autodoc = _parse_docstring_meta(docstring, raises)
         dflow_dec = _extract_dflow_meta(child)
         if dflow_dec:
@@ -784,7 +1061,7 @@ def _collect_functions(
             level_2=level_2_text or None,
             level_3_location=level_3,
             level_steps=_extract_steps(child),
-            desc_hash=hash16(docstring) if docstring else None,
+            desc_hash=hash16(desc_text) if desc_text else None,
             file_mtime=None,
             tags=func_tags,
             dflow_meta=autodoc,
@@ -848,31 +1125,29 @@ def _collect_functions(
                 edges.append(make_edge("depends_on", func_id, target_id))
 
         # validates edges: test functions → directly called production functions.
-        # Only emitted for test-tagged functions. Walks Call nodes (direct calls
-        # only — no transitive traversal) and resolves each call against name_map.
+        # Walks Call nodes (``ast.walk`` covers nested defs, so a closure's calls
+        # belong to the def that encloses it) and resolves each against name_map.
         # Calls to stdlib/third-party are silently ignored (never in name_map).
-        # Unresolvable targets (e.g. fixture-mediated calls) are silently skipped.
-        if scope_name_map and "test" in func_tags:
-            for call_node in ast.walk(child):
-                if not isinstance(call_node, ast.Call):
-                    continue
-                func_ref = call_node.func
-                if isinstance(func_ref, ast.Name) and func_ref.id in scope_name_map:
-                    mod_id, orig_name = scope_name_map[func_ref.id]
-                    if orig_name is not None:
-                        # from mod import func → func(...)
-                        edges.append(make_edge("validates", func_id, f"{mod_id}::{orig_name}"))
-                elif isinstance(func_ref, ast.Attribute):
-                    # mod.func(...) — resolve root to its binding, attr is the member
-                    attr_name = func_ref.attr
-                    root = func_ref.value
-                    while isinstance(root, ast.Attribute):
-                        root = root.value
-                    if isinstance(root, ast.Name) and root.id in scope_name_map:
-                        target = _attribute_target_id(scope_name_map[root.id], attr_name)
-                        edges.append(
-                            make_edge("validates", func_id, target, meta=_chain_meta(func_ref, scope_spellings))
-                        )
+        # In a test file the targets are recorded on ``test_fold`` instead of
+        # emitted: only collected tests own validates edges, and helpers /
+        # fixtures fold into the tests that reach them (see _emit_folded_validates).
+        if test_fold is not None:
+            if not in_function:
+                test_fold.direct[func_id] = (
+                    _direct_validates_targets(child, scope_name_map, scope_spellings) if scope_name_map else []
+                )
+                test_fold.calls[func_id] = _local_support_refs(
+                    child,
+                    module_id=module_id,
+                    local_func_ids=local_func_ids or {},
+                    class_name=class_name,
+                    include_params="test" in func_tags or "test:fixture" in func_tags,
+                )
+                if "test" in func_tags:
+                    test_fold.collected.append(func_id)
+        elif scope_name_map and "test" in func_tags:
+            for target, meta in _direct_validates_targets(child, scope_name_map, scope_spellings):
+                edges.append(make_edge("validates", func_id, target, meta=meta))
 
         # Recurse into nested functions (classes too, for methods).  The
         # scope map goes down, not the module one: a closure sees the
@@ -897,6 +1172,9 @@ def _collect_functions(
             # A closure defined in a method is still inside the class, so the
             # class qualifier passes through the function boundary unchanged.
             class_name=class_name,
+            in_function=True,
+            test_fold=test_fold,
+            source_roots=source_roots,
         )
 
     # Also descend into class bodies so methods are discovered
@@ -922,6 +1200,9 @@ def _collect_functions(
                 # Matches name_prefix above, so a self/cls target is byte-
                 # identical to the id this same walk mints for the method.
                 class_name=child.name,
+                in_function=in_function,
+                test_fold=test_fold,
+                source_roots=source_roots,
             )
 
 
@@ -1539,19 +1820,37 @@ def _make_external_node(node_id: str, pkg_name: str) -> AxiomNode:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_import(module_name: str, project_root: Path, project_id: str) -> str | None:
-    """Try to resolve a dotted module name to a node id within project_root."""
+def _resolve_import(
+    module_name: str,
+    project_root: Path,
+    project_id: str,
+    source_roots: Sequence[Path] | None = None,
+) -> str | None:
+    """Resolve a dotted module name to the node id of the project file it names.
+
+    Each import root is tried in order, ``<root>/<parts>.py`` before
+    ``<root>/<parts>/__init__.py``; the first file found wins.  The node id
+    is built from the file's path relative to *project_root*, so it does not
+    depend on which root matched.
+
+    Args:
+        module_name: Dotted module name, e.g. ``demo.stats``.
+        project_root: Absolute project root.
+        project_id: Project namespace prefix for node ids.
+        source_roots: Ordered import roots, each under *project_root*.
+            ``None`` means the project root only.
+
+    Returns:
+        The module node id, or ``None`` when no root holds the module.
+    """
     parts = module_name.split(".")
-    # Try longest match first: methods.binary_label.run → methods/binary_label/run.py
-    candidates = [
-        project_root / Path(*parts).with_suffix(".py"),
-        project_root / Path(*parts) / "__init__.py",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            rel = candidate.relative_to(project_root).as_posix()
-            dotpath = _rel_path_to_dotpath(rel)
-            return f"{project_id}::{dotpath}"
+    for root in source_roots or (project_root,):
+        # Try longest match first: methods.binary_label.run → methods/binary_label/run.py
+        for candidate in (root / Path(*parts).with_suffix(".py"), root / Path(*parts) / "__init__.py"):
+            if candidate.exists():
+                rel = candidate.relative_to(project_root).as_posix()
+                dotpath = _rel_path_to_dotpath(rel)
+                return f"{project_id}::{dotpath}"
     return None
 
 
@@ -1738,19 +2037,45 @@ _ENTRYPOINT_HTTP_DECORATORS = {
 _FIXTURE_DECORATORS = {"pytest.fixture", "fixture"}
 
 
-def _extract_tags(func_node: ast.FunctionDef | ast.AsyncFunctionDef, rel_path: str) -> list[str]:
-    """Return tags for a function node based on name, file, and decorators."""
-    tags: list[str] = []
+def _is_test_file(rel_path: str) -> bool:
+    """Return True when *rel_path* names a pytest test module (``test_*.py`` / ``*_test.py``)."""
     basename = rel_path.split("/")[-1]
-    in_test_file = basename.startswith("test_") or basename.endswith("_test.py")
+    return basename.startswith("test_") or basename.endswith("_test.py")
+
+
+def _extract_tags(
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    rel_path: str,
+    nested: bool = False,
+) -> list[str]:
+    """Return tags for a function node based on name, file, and decorators.
+
+    Only a def pytest would collect is tagged ``test``: in a test file, a
+    ``test*`` function at module level or a ``test*`` method of a class,
+    never one nested inside another function and never a fixture.
+    Everything else in a test file (helpers, fixtures, nested defs) is test
+    support: it is indexed but not reported as a test.
+
+    Args:
+        func_node: The function definition.
+        rel_path: Posix path of the file, relative to the project root.
+        nested: True when the def sits inside another function's body.
+
+    Returns:
+        The tag list.
+    """
+    tags: list[str] = []
+    in_test_file = _is_test_file(rel_path)
+    decorator_names = [_decorator_name(dec) for dec in func_node.decorator_list]
+    is_fixture = any(name in _FIXTURE_DECORATORS for name in decorator_names)
 
     if in_test_file:
-        tags.append("test")
-    if func_node.name.startswith("test_") and not in_test_file:
+        if func_node.name.startswith("test") and not nested and not is_fixture:
+            tags.append("test")
+    elif func_node.name.startswith("test_"):
         tags.append("test")  # test func outside a test file (rare but valid)
 
-    for dec in func_node.decorator_list:
-        name = _decorator_name(dec)
+    for name in decorator_names:
         if name in _ENTRYPOINT_CLI_DECORATORS:
             tags.append("entrypoint:cli")
         elif name in _ENTRYPOINT_HTTP_DECORATORS:
@@ -1763,4 +2088,4 @@ def _extract_tags(func_node: ast.FunctionDef | ast.AsyncFunctionDef, rel_path: s
 
 # _read_dflow_edges removed in Phase 3: delegates_to edges are now emitted
 # inline from the AST walk (via _extract_step_nodes) as part of the single
-# in-process scan.  See axiom_graph::docs.pev.cycles.pev-2026-04-21-phase3-axiom-annotations.
+# in-process scan.  See axiom_graph::docs/pev/cycles/pev-2026-04-21-phase3-axiom-annotations.

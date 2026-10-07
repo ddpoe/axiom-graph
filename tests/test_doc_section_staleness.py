@@ -118,8 +118,8 @@ def test_doc_section_prose_change_content_stale(mini_project: Path, db_path: Pat
     nodes = db.all_nodes(db_path)
     statuses = compute_staleness(db_path, mini_project, nodes)
 
-    section_id = "proj::docs.arch::overview"
-    doc_id = "proj::docs.arch"
+    section_id = "proj::docs/arch::overview"
+    doc_id = "proj::docs/arch"
     assert statuses.get(section_id)[0] == "CONTENT_UPDATED", (
         f"Expected section CONTENT_UPDATED, got {statuses.get(section_id)}"
     )
@@ -166,9 +166,9 @@ def test_doc_section_heading_change_no_section_drift(mini_project: Path, db_path
     nodes = db.all_nodes(db_path)
     statuses = compute_staleness(db_path, mini_project, nodes)
 
-    section_status = statuses.get("proj::docs.arch::overview")
+    section_status = statuses.get("proj::docs/arch::overview")
     assert section_status[0] == "VERIFIED", f"Expected section VERIFIED after heading-only edit, got {section_status}"
-    assert statuses.get("proj::docs.arch")[0] == "CONTENT_UPDATED", (
+    assert statuses.get("proj::docs/arch")[0] == "CONTENT_UPDATED", (
         "Expected file composite CONTENT_UPDATED because file bytes changed"
     )
 
@@ -219,13 +219,13 @@ def test_doc_section_heading_edit_does_not_cascade_to_siblings(mini_project: Pat
 
     # Every section (including the heading-edited one) stays VERIFIED at the atomic level.
     for sec_id in ("alpha", "beta", "gamma", "delta"):
-        full_id = f"proj::docs.arch::{sec_id}"
+        full_id = f"proj::docs/arch::{sec_id}"
         assert statuses.get(full_id)[0] == "VERIFIED", (
             f"Section {full_id} expected VERIFIED, got {statuses.get(full_id)}"
         )
 
     # Drift is reported at the file composite level only.
-    assert statuses.get("proj::docs.arch")[0] == "CONTENT_UPDATED"
+    assert statuses.get("proj::docs/arch")[0] == "CONTENT_UPDATED"
 
 
 # ---------------------------------------------------------------------------
@@ -269,9 +269,9 @@ def test_doc_section_body_edit_does_not_cascade_to_siblings(mini_project: Path, 
     nodes = db.all_nodes(db_path)
     statuses = compute_staleness(db_path, mini_project, nodes)
 
-    assert statuses.get("proj::docs.arch::beta")[0] == "CONTENT_UPDATED"
-    assert statuses.get("proj::docs.arch::alpha")[0] == "VERIFIED"
-    assert statuses.get("proj::docs.arch::gamma")[0] == "VERIFIED"
+    assert statuses.get("proj::docs/arch::beta")[0] == "CONTENT_UPDATED"
+    assert statuses.get("proj::docs/arch::alpha")[0] == "VERIFIED"
+    assert statuses.get("proj::docs/arch::gamma")[0] == "VERIFIED"
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +306,7 @@ def test_doc_section_both_changed_content_stale(mini_project: Path, db_path: Pat
     nodes = db.all_nodes(db_path)
     statuses = compute_staleness(db_path, mini_project, nodes)
 
-    assert statuses.get("proj::docs.arch::overview")[0] == "CONTENT_UPDATED"
+    assert statuses.get("proj::docs/arch::overview")[0] == "CONTENT_UPDATED"
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +332,7 @@ def test_doc_section_unchanged_clean(mini_project: Path, db_path: Path):
     nodes = db.all_nodes(db_path)
     statuses = compute_staleness(db_path, mini_project, nodes)
 
-    assert statuses.get("proj::docs.arch::overview") == ("VERIFIED", "VERIFIED", [])
+    assert statuses.get("proj::docs/arch::overview") == ("VERIFIED", "VERIFIED", [])
 
 
 # ---------------------------------------------------------------------------
@@ -353,7 +353,7 @@ def test_doc_section_removed_structural_drift(mini_project: Path, db_path: Path)
         ],
     )
     _build_full(mini_project)
-    assert db.get_node(db_path, "proj::docs.arch::details") is not None
+    assert db.get_node(db_path, "proj::docs/arch::details") is not None
 
     # Remove the 'details' section via a raw file edit (not a doc tool).
     _write_doc(
@@ -368,14 +368,14 @@ def test_doc_section_removed_structural_drift(mini_project: Path, db_path: Path)
 
     # The vanished section is removed from the index (no NOT_FOUND ghost),
     # with a preserved DELETED tombstone in its history.
-    assert db.get_node(db_path, "proj::docs.arch::details") is None
-    history = db.get_history(db_path, "proj::docs.arch::details", limit=50)
+    assert db.get_node(db_path, "proj::docs/arch::details") is None
+    history = db.get_history(db_path, "proj::docs/arch::details", limit=50)
     assert any(row["change_type"] == "DELETED" for row in history)
 
     # The surviving section is unaffected.
     nodes = db.all_nodes(db_path)
     statuses = compute_staleness(db_path, mini_project, nodes)
-    assert statuses.get("proj::docs.arch::overview")[0] == "VERIFIED"
+    assert statuses.get("proj::docs/arch::overview")[0] == "VERIFIED"
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +416,6 @@ def test_update_section_then_check_content_stale(mini_project: Path, db_path: Pa
     nodes = db.all_nodes(db_path)
     statuses = compute_staleness(db_path, mini_project, nodes)
 
-    assert statuses.get("proj::docs.arch::overview")[0] == "CONTENT_UPDATED", (
-        f"Expected CONTENT_UPDATED after section update, got {statuses.get('proj::docs.arch::overview')}"
+    assert statuses.get("proj::docs/arch::overview")[0] == "CONTENT_UPDATED", (
+        f"Expected CONTENT_UPDATED after section update, got {statuses.get('proj::docs/arch::overview')}"
     )

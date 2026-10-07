@@ -1,7 +1,7 @@
 """Public Python API for the query bounded context.
 
 Per ADR-019 (cycle 3), the query domain owns every read-only inventory
-operation against the axiom-graph index: full-text and semantic search,
+operation against the axiom-graph index: full-text search,
 node rendering at multiple detail levels, node listing with filters,
 edge traversal, raw source fetch, SQL passthrough, drift inventory
 projection, tag listing, and undocumented-node listing.
@@ -14,7 +14,7 @@ single orchestration function is the source of truth for each Cat 4
 operation.
 
 Public surface:
-    ``search_nodes``         -- keyword / semantic search over the index
+    ``search_nodes``         -- keyword search over the index
     ``fetch_render_data``    -- nodes + optional staleness for renderers
     ``list_nodes``           -- typed/tagged/filtered node listing
     ``fetch_graph``          -- edge traversal from a node
@@ -33,16 +33,15 @@ Layering invariants (per ADR-019; enforced by ``tools/check_layering.py``):
 
 from __future__ import annotations
 
+import contextlib
 import logging
-import sqlite3
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from axiom_graph.config import AxiomGraphConfig
 from axiom_graph.index import db
 from axiom_graph.index.builder import rescan_file_if_needed
-from axiom_graph.index.status import BROKEN_LINK, VERIFIED
+from axiom_graph.index.status import BROKEN_LINK, LINKED_STALE, VERIFIED
 from axiom_graph.renderers import agent
 
 logger = logging.getLogger(__name__)
@@ -115,103 +114,6 @@ class NodeSource:
 
 
 # ---------------------------------------------------------------------------
-# Semantic search handler (formerly mcp/_helpers._semantic_search_handler)
-# ---------------------------------------------------------------------------
-
-
-def _semantic_search_handler(
-    db_path: Path,
-    query: str,
-    max_results: int = 20,
-    node_type: str | None = None,
-    scope: str = "all",
-    embedder_thread=None,
-) -> str:
-    """Handle semantic search mode for :func:`search_nodes`.
-
-    Embeds the query, performs vector similarity search, and formats results.
-    Falls back to keyword search if embeddings are unavailable.
-
-    Args:
-        db_path: Path to the axiom-graph DB file.
-        query: The natural-language search query.
-        max_results: Maximum results to return.
-        node_type: Optional node type filter.
-        scope: Scope filter ('code', 'docs', 'all').
-        embedder_thread: The embedder warm-up thread to join.
-
-    Returns:
-        Formatted search results string.
-    """
-    try:
-        if embedder_thread is not None:
-            logger.debug("semantic: waiting for embedder warm-up thread")
-            t0 = time.monotonic()
-            embedder_thread.join(timeout=30)
-            join_elapsed = time.monotonic() - t0
-            if join_elapsed > 0.1:
-                logger.info("semantic: embedder warm-up wait %.2fs", join_elapsed)
-
-        from axiom_graph.index.embeddings import get_embedder
-
-        logger.debug("semantic: loading embedder model")
-        embedder = get_embedder()
-        logger.debug("semantic: embedder loaded, embedding query")
-        t1 = time.monotonic()
-        query_vec = embedder([query])[0]
-        logger.debug("semantic: query embedded in %.3fs", time.monotonic() - t1)
-
-        logger.debug("semantic: querying vector index")
-        t2 = time.monotonic()
-        nodes, total = db.semantic_search(
-            db_path,
-            query_vec,
-            max_results=max_results,
-            node_type=node_type,
-            scope=scope if scope != "all" else None,
-        )
-        logger.debug("semantic: vec search in %.3fs (%d results)", time.monotonic() - t2, total)
-
-        if not nodes:
-            # Fall back to keyword search if semantic returns nothing
-            nodes, search_mode, total = db.fts_search(
-                db_path,
-                query,
-                max_results=max_results,
-                node_type=node_type,
-                scope=scope if scope != "all" else None,
-            )
-            result = agent.render_level_1(nodes)
-            shown = len(nodes)
-            header = f"[{shown} of {total} results -- semantic->keyword fallback]"
-            return f"{header}\n{result}" if result != "(no nodes)" else header
-
-        result = agent.render_level_1(nodes)
-        shown = len(nodes)
-        header = f"[{shown} of {total} results -- semantic]"
-        return f"{header}\n{result}" if result != "(no nodes)" else header
-    except Exception as exc:
-        logger.warning("Semantic search failed, falling back to keyword: %s", exc)
-        nodes, search_mode, total = db.fts_search(
-            db_path,
-            query,
-            max_results=max_results,
-            node_type=node_type,
-            scope=scope if scope != "all" else None,
-        )
-        result = agent.render_level_1(nodes)
-        shown = len(nodes)
-        mode_labels = {
-            "fts": "fts ranked",
-            "like_and": "LIKE-AND fallback",
-            "like_or": "LIKE-OR fallback (broad, low-confidence)",
-        }
-        label = mode_labels.get(search_mode, search_mode)
-        header = f"[{shown} of {total} results -- {label} (semantic unavailable)]"
-        return f"{header}\n{result}" if result != "(no nodes)" else header
-
-
-# ---------------------------------------------------------------------------
 # search
 # ---------------------------------------------------------------------------
 
@@ -223,20 +125,21 @@ def search_nodes(
     level: int | None = None,
     max_results: int = 20,
     node_type: str | None = None,
-    mode: str = "keyword",
     scope: str = "all",
     tag: str | None = None,
     offset: int = 0,
-    embedder_thread=None,
+    root: Path | None = None,
 ) -> str:
-    """Run a keyword or semantic search over the axiom-graph index.
+    """Run a keyword search over the axiom-graph index.
 
     Returns the formatted text result (the wire wrapper passes it through
-    unchanged).  In ``"keyword"`` mode a three-stage fallback chain runs
-    (FTS5 -> LIKE-AND -> LIKE-OR); in ``"semantic"`` mode the query is
-    embedded and matched via vector similarity, with graceful fallback
-    to keyword when embeddings are unavailable.  Header labels for each
-    stage are part of the wire contract.
+    unchanged).  A three-stage fallback chain runs (FTS5 -> LIKE-AND ->
+    LIKE-OR).  Header labels for each stage are part of the wire contract.
+
+    With *root*, the statuses of the shown nodes are refreshed first
+    (:func:`~axiom_graph.lifecycle.api.refresh_before_read`); a shown node
+    that is not VERIFIED ends its line with ``  [STATUS, ...]`` and the
+    read's notes follow after a blank line.  The call runs on one connection.
 
     Args:
         db_path: Path to the axiom-graph DB file.
@@ -245,50 +148,38 @@ def search_nodes(
             ``None`` (default) searches both.
         max_results: Maximum results to return.
         node_type: Optional node-type filter (raw value, no aliases).
-        mode: ``"keyword"`` (default) or ``"semantic"``.
         scope: ``"code"`` / ``"docs"`` / ``"all"``.
         tag: Optional tag filter.
         offset: Number of results to skip (default 0).
-        embedder_thread: The embedder warm-up thread to join (semantic only).
+        root: Project root.  When given, the shown nodes are refreshed and
+            tagged; when ``None`` the listing carries no statuses.
 
     Returns:
         Newline-delimited formatted search results.
     """
     logger.debug(
-        "search_nodes: query=%r, mode=%s, max_results=%d, offset=%d",
+        "search_nodes: query=%r, max_results=%d, offset=%d",
         query,
-        mode,
         max_results,
         offset,
     )
 
-    if mode == "semantic":
-        logger.debug("search_nodes: entering semantic search mode")
-        return _semantic_search_handler(
+    with _one_connection(db_path):
+        fetch_limit = max_results + offset
+        nodes, search_mode, total = db.fts_search(
             db_path,
             query,
-            max_results=max_results,
+            level=level,
+            max_results=fetch_limit,
             node_type=node_type,
-            scope=scope,
-            embedder_thread=embedder_thread,
+            scope=scope if scope != "all" else None,
+            tag=tag,
         )
-
-    # Default: keyword (FTS) mode
-    logger.debug("search_nodes: entering keyword search mode")
-    fetch_limit = max_results + offset
-    nodes, search_mode, total = db.fts_search(
-        db_path,
-        query,
-        level=level,
-        max_results=fetch_limit,
-        node_type=node_type,
-        scope=scope if scope != "all" else None,
-        tag=tag,
-    )
-    nodes = nodes[offset:]
-    if len(nodes) > max_results:
-        nodes = nodes[:max_results]
-    result = agent.render_level_1(nodes)
+        nodes = nodes[offset:]
+        if len(nodes) > max_results:
+            nodes = nodes[:max_results]
+        rr = _refresh_shown(db_path, root, [n.id for n in nodes])
+    result = agent.render_level_1(nodes, badges=rr.tags() if rr else None)
     mode_labels = {
         "fts": "fts ranked",
         "like_and": "LIKE-AND fallback",
@@ -297,7 +188,43 @@ def search_nodes(
     label = mode_labels.get(search_mode, search_mode)
     shown = len(nodes)
     header = f"[{shown} of {total} results -- {label}]"
-    return f"{header}\n{result}" if result != "(no nodes)" else header
+    text = f"{header}\n{result}" if result != "(no nodes)" else header
+    return _with_notes(text, rr)
+
+
+def _one_connection(db_path: Path):
+    """Return the operation scope for *db_path* (one connection per read), or a no-op when the DB is missing.
+
+    A missing DB keeps the error its first query raised before (the scope
+    would create the file).
+    """
+    if Path(db_path).exists():
+        return db.operation_connection(db_path)
+    return contextlib.nullcontext()
+
+
+def _refresh_shown(db_path: Path, root: Path | None, node_ids: list[str]):
+    """Refresh what a node-naming read shows (``refresh_before_read``), or nothing when *root* is ``None``.
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+        root: Project root, or ``None`` for a caller that shows no statuses.
+        node_ids: The nodes the read names.
+
+    Returns:
+        The :class:`~axiom_graph.lifecycle.api.ReadRefresh`, or ``None``.
+    """
+    if root is None:
+        return None
+    from axiom_graph.lifecycle.api import refresh_before_read  # noqa: PLC0415
+
+    return refresh_before_read(db_path, root, node_ids)
+
+
+def _with_notes(text: str, rr) -> str:
+    """Append a read's notes (behind / structural lines) after a blank line, when it has any."""
+    notes = rr.notes() if rr is not None else []
+    return "\n".join([text, "", *notes]) if notes else text
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +391,7 @@ def fetch_graph(
     max_results: int = 40,
     offset: int = 0,
     with_locations: bool = False,
+    root: Path | None = None,
 ) -> GraphResult:
     """Traverse and render the edge graph for a node.
 
@@ -471,6 +399,12 @@ def fetch_graph(
     Returns a :class:`GraphResult`; the CLI raises ``ClickException`` on
     not_found, the MCP wire wrapper formats both not_found and the
     optional truncation hint into a string.
+
+    The call runs on one connection.  With *root*, the statuses of the
+    root and of every node the shown edges name are refreshed first
+    (:func:`~axiom_graph.lifecycle.api.refresh_before_read`); each line
+    naming a node that is not VERIFIED ends with ``  [STATUS, ...]`` and the
+    read's notes follow after a blank line.
 
     Args:
         db_path: Path to the axiom-graph DB.
@@ -484,13 +418,59 @@ def fetch_graph(
             display ``@ path#L10-L45`` suffixes.  MCP wire passes True;
             the CLI passes False (preserves byte-identity with cycle-2
             ``cmd_graph`` output, which never showed locations).
+        root: Project root.  When given, the shown nodes are refreshed and
+            tagged; when ``None`` (the CLI) the tree carries no statuses.
 
     Returns:
         :class:`GraphResult`.
     """
+    with _one_connection(db_path):
+        sl = _graph_slice(db_path, node_id, direction, depth, max_results, offset)
+        if sl is None:
+            return GraphResult(rendered="", shown=0, total_edges=0, truncated=False, not_found=True)
+        node_lookup = None
+        if with_locations:
+            # Location lookup for all nodes appearing in the traversal, one batched read.
+            with db._connect(db_path) as conn:
+                node_lookup = db.get_nodes_conn(conn, sl.all_ids)
+        rr = _refresh_shown(db_path, root, sl.all_ids)
+    return _render_graph_slice(sl, direction, node_lookup, rr)
+
+
+@dataclass
+class BatchItem:
+    """One entry of a batch read (:func:`fetch_graph_batch`, :func:`fetch_source_batch`).
+
+    Attributes:
+        node_id: The id the entry asked for.
+        result: The entry's :class:`GraphResult` or :class:`NodeSource`, when it was read.
+        error: The exception reading the entry raised, when it failed on its own.
+    """
+
+    node_id: str
+    result: GraphResult | NodeSource | None = None
+    error: Exception | None = None
+
+
+@dataclass
+class _GraphSlice:
+    """What :func:`fetch_graph` read for one node before the refresh: the node, its edge slice, the ids it names."""
+
+    node: object
+    edges: list
+    shown: int
+    total_edges: int
+    truncated: bool
+    all_ids: list[str]
+
+
+def _graph_slice(
+    db_path: Path, node_id: str, direction: str, depth: int, max_results: int, offset: int
+) -> _GraphSlice | None:
+    """Read a node and the slice of its edges a graph read shows, or ``None`` when the node is unknown."""
     node = db.get_node(db_path, node_id)
     if node is None:
-        return GraphResult(rendered="", shown=0, total_edges=0, truncated=False, not_found=True)
+        return None
     edges = db.query_edges(db_path, node_id, direction=direction, depth=depth)
 
     total_edges = len(edges)
@@ -498,29 +478,93 @@ def fetch_graph(
     truncated = len(edges) > max_results
     if truncated:
         edges = edges[:max_results]
-    shown = len(edges)
 
-    if with_locations:
-        # Build location lookup for all nodes appearing in the traversal
-        all_ids: set[str] = {node_id}
-        for e in edges:
-            all_ids.add(e.from_id)
-            all_ids.add(e.to_id)
-        node_lookup = {}
-        for nid in all_ids:
-            n = db.get_node(db_path, nid)
-            if n is not None:
-                node_lookup[nid] = n
-        rendered = agent.render_graph(node, edges, direction=direction, node_lookup=node_lookup)
-    else:
-        rendered = agent.render_graph(node, edges, direction=direction)
-
-    return GraphResult(
-        rendered=rendered,
-        shown=shown,
-        total_edges=total_edges,
-        truncated=truncated,
+    # Every node the slice names: the root, then each edge's endpoints.
+    all_ids = list(dict.fromkeys([node_id, *(nid for e in edges for nid in (e.from_id, e.to_id))]))
+    return _GraphSlice(
+        node=node, edges=edges, shown=len(edges), total_edges=total_edges, truncated=truncated, all_ids=all_ids
     )
+
+
+def _render_graph_slice(sl: _GraphSlice, direction: str, node_lookup, rr) -> GraphResult:
+    """Render a graph slice with the statuses and notes of *rr* (``None``: no statuses)."""
+    rendered = agent.render_graph(
+        sl.node, sl.edges, direction=direction, node_lookup=node_lookup, badges=rr.tags() if rr else None
+    )
+    return GraphResult(
+        rendered=_with_notes(rendered, rr),
+        shown=sl.shown,
+        total_edges=sl.total_edges,
+        truncated=sl.truncated,
+    )
+
+
+def _narrowed(rr, node_ids: list[str], lookup: dict):
+    """Cut a batch's shared refresh down to one entry's nodes and their files (``None`` stays ``None``)."""
+    if rr is None:
+        return None
+    return rr.narrowed(node_ids, {lookup[nid].location for nid in node_ids if nid in lookup})
+
+
+def fetch_graph_batch(
+    db_path: Path,
+    node_ids: list[str],
+    *,
+    direction: str = "out",
+    depth: int = 1,
+    max_results: int = 40,
+    offset: int = 0,
+    with_locations: bool = False,
+    root: Path | None = None,
+) -> list[BatchItem]:
+    """Traverse the edge graph for several nodes on one connection with one refresh.
+
+    Each node's slice is read first (an exception there fails only that
+    entry); then one batched node lookup and one refresh cover every node
+    any slice names; then each entry is rendered from a view narrowed to its
+    own nodes, so its text equals what :func:`fetch_graph` returns for it.
+    An exception in the shared lookup or refresh fails the whole call.
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+        node_ids: The starting nodes, in output order.
+        direction: ``"out"`` / ``"in"`` / ``"both"``.
+        depth: Number of hops to traverse.
+        max_results: Maximum number of edges in each slice.
+        offset: Number of edges to skip in each slice.
+        with_locations: Pass each slice's node lookup to the renderer.
+        root: Project root.  When given, the shown nodes are refreshed and tagged.
+
+    Returns:
+        One :class:`BatchItem` per id, in order.
+    """
+    items = [BatchItem(node_id=nid) for nid in node_ids]
+    slices: dict[int, _GraphSlice] = {}
+    lookup: dict = {}
+    rr = None
+    with _one_connection(db_path):
+        for i, item in enumerate(items):
+            try:
+                sl = _graph_slice(db_path, item.node_id, direction, depth, max_results, offset)
+            except Exception as exc:  # noqa: BLE001 -- one entry's failure is reported on that entry
+                item.error = exc
+                continue
+            if sl is None:
+                item.result = GraphResult(rendered="", shown=0, total_edges=0, truncated=False, not_found=True)
+            else:
+                slices[i] = sl
+        shown = list(dict.fromkeys(nid for sl in slices.values() for nid in sl.all_ids))
+        if shown:
+            with db._connect(db_path) as conn:
+                lookup = db.get_nodes_conn(conn, shown)
+            rr = _refresh_shown(db_path, root, shown)
+    for i, sl in slices.items():
+        try:
+            node_lookup = {nid: lookup[nid] for nid in sl.all_ids if nid in lookup} if with_locations else None
+            items[i].result = _render_graph_slice(sl, direction, node_lookup, _narrowed(rr, sl.all_ids, lookup))
+        except Exception as exc:  # noqa: BLE001 -- one entry's failure is reported on that entry
+            items[i].error = exc
+    return items
 
 
 # ---------------------------------------------------------------------------
@@ -540,6 +584,12 @@ def fetch_source(
     the entire file is returned, with a child-table truncation for very
     large composite_process nodes.
 
+    The call runs on one connection.  After the file rescan, the statuses of
+    the node (and of the children a truncated module lists) are refreshed
+    (:func:`~axiom_graph.lifecycle.api.refresh_before_read`); the ``# id``
+    header line and each child entry naming a node that is not VERIFIED end
+    with ``  [STATUS, ...]``, and the read's notes follow after a blank line.
+
     Args:
         db_path: Path to the axiom-graph DB.
         root: Project root (used to resolve relative paths in
@@ -550,6 +600,75 @@ def fetch_source(
         :class:`NodeSource` with the rendered body text plus diagnostic
         flags for not-found / no-location / file-missing.
     """
+    with _one_connection(db_path):
+        prep = _source_slice(db_path, root, node_id)
+        if isinstance(prep, NodeSource):
+            return prep
+        rr = _refresh_shown(db_path, root, prep.shown_ids)
+    return _render_source_slice(prep, rr)
+
+
+def fetch_source_batch(db_path: Path, root: Path, node_ids: list[str]) -> list[BatchItem]:
+    """Return the source bodies of several nodes on one connection with one refresh.
+
+    Each node is read first (rescan, location, file lines, a truncated
+    module's children; an exception there fails only that entry); then one
+    batched node lookup and one refresh cover every node any entry names;
+    then each entry is rendered from a view narrowed to its own nodes, so its
+    text equals what :func:`fetch_source` returns for it.  An exception in
+    the shared lookup or refresh fails the whole call.
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+        root: Project root (resolves the relative paths in ``level_3_location``).
+        node_ids: Full node ids, in output order.
+
+    Returns:
+        One :class:`BatchItem` per id, in order.
+    """
+    items = [BatchItem(node_id=nid) for nid in node_ids]
+    preps: dict[int, _SourceSlice] = {}
+    lookup: dict = {}
+    rr = None
+    with _one_connection(db_path):
+        for i, item in enumerate(items):
+            try:
+                prep = _source_slice(db_path, root, item.node_id)
+            except Exception as exc:  # noqa: BLE001 -- one entry's failure is reported on that entry
+                item.error = exc
+                continue
+            if isinstance(prep, NodeSource):
+                item.result = prep
+            else:
+                preps[i] = prep
+        shown = list(dict.fromkeys(nid for prep in preps.values() for nid in prep.shown_ids))
+        if shown:
+            with db._connect(db_path) as conn:
+                lookup = db.get_nodes_conn(conn, shown)
+            rr = _refresh_shown(db_path, root, shown)
+    for i, prep in preps.items():
+        try:
+            items[i].result = _render_source_slice(prep, _narrowed(rr, prep.shown_ids, lookup))
+        except Exception as exc:  # noqa: BLE001 -- one entry's failure is reported on that entry
+            items[i].error = exc
+    return items
+
+
+@dataclass
+class _SourceSlice:
+    """What :func:`fetch_source` read for one node before the refresh."""
+
+    node_id: str
+    loc: str
+    lines: list[str]
+    start: int | None
+    end: int | None
+    children: list | None
+    shown_ids: list[str]
+
+
+def _source_slice(db_path: Path, root: Path, node_id: str) -> _SourceSlice | NodeSource:
+    """Read a node's file slice (rescanning its file first), or the :class:`NodeSource` that reports why not."""
     node = db.get_node(db_path, node_id)
     if node is None:
         return NodeSource(text="", not_found=True)
@@ -581,20 +700,32 @@ def fetch_source(
     all_lines = src_file.read_text(encoding="utf-8").splitlines()
 
     # Module-level truncation: large composite_process nodes get a TOC
+    children = None
+    shown_ids = [node_id]
     if start is None and node.node_type == "composite_process" and len(all_lines) > 200:
-        preview = "\n".join(all_lines[:50])
         children = db.query_children(db_path, node_id)
+        shown_ids = [node_id, *(c.id for c in children)]
+    return _SourceSlice(
+        node_id=node_id, loc=loc, lines=all_lines, start=start, end=end, children=children, shown_ids=shown_ids
+    )
+
+
+def _render_source_slice(prep: _SourceSlice, rr) -> NodeSource:
+    """Render a source slice with the statuses and notes of *rr*: the body, or a truncated module's TOC."""
+    node_id, loc, all_lines = prep.node_id, prep.loc, prep.lines
+    if prep.children is not None:
+        preview = "\n".join(all_lines[:50])
         child_lines = []
-        for child in children:
+        for child in prep.children:
             cloc = child.level_3_location or ""
             entry = f"- {child.id}"
             if cloc:
                 entry += f"  @ {cloc}"
-            child_lines.append(entry)
+            child_lines.append(entry + rr.tag(child.id))
         parts = [
-            f"# {node_id}  @ {loc}",
+            f"# {node_id}  @ {loc}{rr.tag(node_id)}",
             "",
-            f"Module has {len(all_lines)} lines and {len(children)} functions. Showing first 50 lines.",
+            f"Module has {len(all_lines)} lines and {len(prep.children)} functions. Showing first 50 lines.",
             "Use axiom_graph_source on a specific function for the full body.",
             "",
             preview,
@@ -603,10 +734,10 @@ def fetch_source(
             parts.append("")
             parts.append("Children (use axiom_graph_source with these IDs):")
             parts.extend(child_lines)
-        return NodeSource(text="\n".join(parts), location=loc)
+        return NodeSource(text=_with_notes("\n".join(parts), rr), location=loc)
 
-    body = "\n".join(all_lines[start - 1 : end] if start is not None else all_lines)
-    return NodeSource(text=f"# {node_id}  @ {loc}\n\n{body}", location=loc)
+    body = "\n".join(all_lines[prep.start - 1 : prep.end] if prep.start is not None else all_lines)
+    return NodeSource(text=_with_notes(f"# {node_id}  @ {loc}{rr.tag(node_id)}\n\n{body}", rr), location=loc)
 
 
 # ---------------------------------------------------------------------------
@@ -638,9 +769,7 @@ def run_sql(db_path: Path, query: str, max_results: int = 50) -> str:
     if not stripped.upper().startswith("SELECT"):
         return "ERROR: Only SELECT queries are allowed."
     max_results = min(max_results, 500)
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.row_factory = sqlite3.Row
+    conn = db.open_connection(db_path, read_only=True)
     try:
         rows = conn.execute(stripped).fetchmany(max_results + 1)
         if not rows:
@@ -695,6 +824,24 @@ def list_tags(db_path: Path) -> list[tuple[str, int]]:
     return db.list_tags(db_path)
 
 
+def node_tags(db_path: Path, node_ids: list[str]) -> dict[str, list[str]]:
+    """Return the tags of the nodes in *node_ids* that have any.
+
+    Reads in batches, on the caller's operation connection when one is open.
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+        node_ids: The node ids.
+
+    Returns:
+        ``{node_id: [tag, ...]}``, tags in row order.
+    """
+    if not node_ids:
+        return {}
+    with db._connect(db_path) as conn:
+        return db.get_tags_bulk_conn(conn, list(node_ids))
+
+
 # ---------------------------------------------------------------------------
 # list_undocumented
 # ---------------------------------------------------------------------------
@@ -724,11 +871,74 @@ def list_undocumented(
 # drift_query (D-3: verbatim move from lifecycle/api.py)
 # ---------------------------------------------------------------------------
 
+# Offender ids shown per via=/root= list before "(+N more)".
+_OFFENDER_DISPLAY_CAP = 10
+
 
 def compute_drift_query(
     db_path: Path,
     root: Path,
     *,
+    filter: str | None = None,
+    location_glob: str | None = None,
+    group_by: str | None = None,
+    format: str | None = None,
+    page: int = 0,
+    limit: int = 100,
+    include_frozen: bool = False,
+) -> str:
+    """Refresh the stored statuses (``refresh_before_read``), then project them; see :func:`_drift_projection`.
+
+    One connection per call.  Under ``"changed-files"`` (the default) the
+    incremental check runs first, so the listing is current; under
+    ``"off"`` the stored statuses are listed and a trailing
+    ``[index is behind for N files — run `check`]`` line says how many
+    tracked files moved since the index last read them; ``"check"`` runs
+    the check first.  Files whose last re-hash found structure the index
+    lacks add one ``[<file> has ... — run build]`` line each.  These lines
+    follow the projection after a blank line and start with ``[``, so a
+    consumer that skips lines starting with ``#`` or ``[`` skips them.
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+        root: Project root directory.
+        filter: Status filter.
+        location_glob: Path glob over node locations.
+        group_by: ``None`` / ``"status"`` / ``"location_prefix"`` / ``"feature"`` / ``"node_kind"``.
+        format: ``None`` / ``"full"`` / ``"ids"`` / ``"counts"``.
+        page: Zero-indexed page number.
+        limit: Page size.
+        include_frozen: Include frozen-doc rows.
+
+    Returns:
+        Newline-delimited text projection, then any notes.
+
+    Raises:
+        ValueError: As :func:`_drift_projection`, before anything is refreshed.
+    """
+    notes: list[str] = []
+    kwargs = {
+        "filter": filter,
+        "location_glob": location_glob,
+        "group_by": group_by,
+        "format": format,
+        "page": page,
+        "limit": limit,
+        "include_frozen": include_frozen,
+    }
+    if not Path(db_path).exists():
+        # Argument errors still surface first; the projection opens nothing before them.
+        return _drift_projection(db_path, root, notes_out=notes, **kwargs)
+    with db.operation_connection(db_path):
+        text = _drift_projection(db_path, root, notes_out=notes, **kwargs)
+    return "\n".join([text, "", *notes]) if notes else text
+
+
+def _drift_projection(
+    db_path: Path,
+    root: Path,
+    *,
+    notes_out: list[str],
     filter: str | None = None,
     location_glob: str | None = None,
     group_by: str | None = None,
@@ -750,8 +960,18 @@ def compute_drift_query(
     prefixed with a ``[N of M drifted nodes]`` count header (plus a
     ``(pass page=<next> for next page)`` hint when more rows remain),
     matching the sibling paginated tools.  ``format='full'`` additionally
-    emits the comment-line column header (``# node_id  status_pair
-    (own/link)  location  via``) once, after the count header.  Pagination
+    emits a ``#`` comment-line column header once, after the count
+    header, and labels each row's fields:
+    ``id=<node_id>  <own>/<link>  loc=<location>  via=...  root=...``.
+
+    ``via`` on a LINKED_STALE row lists its direct offenders from the
+    computed stale map (``_get_linked_stale_ids``), and ``root`` its leaf
+    root offenders (``resolve_root_offenders``, the resolver ``reverify``
+    uses) when they differ from ``via``.  Rows absent from the map
+    (frozen, composite-inherited) fall back to the persisted-status proxy
+    ``via``.  Each list shows at most 10 ids, then ``(+N more)``.
+    Doc-quality advisory rows (``filter='all'`` / ``'doc_quality'``)
+    carry a ``[DOC_SECTION_LONG]`` label.  Pagination
     is over the post-frozen-filter set ordered by id, so the count header
     is accurate even when ``frozen_tags`` drops rows; grouped output
     re-groups the page slice (groups may span page boundaries).
@@ -761,10 +981,13 @@ def compute_drift_query(
     the output should skip lines starting with ``#`` or ``[``.
 
     Frozen-tag handling (controlled by ``config.staleness.frozen_tags``):
-    when ``include_frozen`` is ``False`` (the default), rows whose owning
-    doc carries a frozen tag are dropped from the output, EXCEPT
-    BROKEN_LINK rows, which are retained with a ``[frozen-source]``
-    postfix on ``format='full'``.  When ``include_frozen=True`` all
+    when ``include_frozen`` is ``False`` (the default), the rows of a doc
+    carrying a frozen tag, its doc node (the envelope) included, are
+    dropped from the output, EXCEPT rows
+    whose link status is BROKEN_LINK, which are retained in every format
+    (``full``, ``ids`` and ``counts``, flat or grouped) — with a
+    ``[frozen-source]`` postfix on ``format='full'`` — so the counts and
+    the listed rows always agree.  When ``include_frozen=True`` all
     rows are returned and frozen-doc rows get a ``[frozen]`` postfix
     on ``format='full'``.  Markers never appear on ``format='ids'``
     or ``format='counts'``.  No effect when ``frozen_tags`` is empty.
@@ -774,23 +997,33 @@ def compute_drift_query(
         root: Project root directory (used to load ``frozen_tags`` from
             ``axiom-graph.toml``).
         filter: Status filter.
-        location_glob: fnmatch-style path glob.
-        group_by: ``None`` / ``"status"`` / ``"location_prefix"`` / ``"feature"``.
+        location_glob: Path glob over node locations: ``*`` / ``?``
+            stay within one path segment, ``**`` crosses directories,
+            ``[!x]`` and ``{a,b}`` are supported.  Matches the whole
+            location or its path part before a ``#Lx-Ly`` fragment.
+        group_by: ``None`` / ``"status"`` / ``"location_prefix"`` (path
+            prefix, ``#...`` line suffix dropped) / ``"feature"`` /
+            ``"node_kind"`` (``code`` / ``test`` / ``doc``; ``test`` uses
+            ``scan.test_paths`` from the project config).
         format: ``None`` (conditional default -> ``full`` flat / ``counts``
             grouped) / ``"full"`` / ``"ids"`` / ``"counts"``.
         page: Zero-indexed page number (``full``/``ids`` only).
         limit: Page size (``full``/``ids`` only).
-        include_frozen: When ``True``, include frozen-doc rows in
-            output with ``[frozen]`` marker on ``format='full'``.
+        include_frozen: When ``True``, include the rows of frozen docs
+            (sections and the doc node itself) in output with
+            ``[frozen]`` marker on ``format='full'``.
 
     Returns:
         Newline-delimited text projection.
 
     Raises:
-        ValueError: Invalid ``filter``, ``group_by``, ``format``, or
-            ``format='counts'`` without ``group_by``.
+        ValueError: Invalid ``filter`` (including ``'VERIFIED'``),
+            malformed ``location_glob``, invalid ``group_by`` or
+            ``format``, or ``format='counts'`` without ``group_by``.
     """
-    _FULL_HEADER = "# node_id  status_pair (own/link)  location  via"
+    _FULL_HEADER = (
+        "# id=<node_id>  <own>/<link>  loc=<location>  via=<direct offenders>  root=<root offenders, when different>"
+    )
     # Conditional default (single source of truth for both wrappers): an
     # unspecified format means a flat row list when ungrouped, but the
     # compact distribution when grouped -- so an aggregate call never dumps
@@ -799,8 +1032,8 @@ def compute_drift_query(
         format = "counts" if group_by is not None else "full"
     if format not in ("full", "ids", "counts"):
         raise ValueError(f"format must be one of full|ids|counts, got {format!r}")
-    if group_by is not None and group_by not in ("status", "location_prefix", "feature"):
-        raise ValueError(f"group_by must be one of None|status|location_prefix|feature, got {group_by!r}")
+    if group_by is not None and group_by not in ("status", "location_prefix", "feature", "node_kind"):
+        raise ValueError(f"group_by must be one of None|status|location_prefix|feature|node_kind, got {group_by!r}")
     if format == "counts" and group_by is None:
         raise ValueError("format='counts' requires group_by to be set")
     if page < 0:
@@ -808,24 +1041,38 @@ def compute_drift_query(
     if limit < 1:
         raise ValueError("limit must be >= 1")
 
-    # Validate filter early so the error is surface-level.
+    # Validate filter and glob early so the error is surface-level.
     from axiom_graph.db import staleness as st
 
     st.parse_drift_filter(filter)  # raises ValueError on bad filter
+    if location_glob is not None:
+        st._glob_to_regex(location_glob)  # raises ValueError on a malformed glob
+
+    # Arguments are valid: bring the stored statuses up to date (or count how
+    # far behind they are) before listing them.
+    from axiom_graph.lifecycle.api import refresh_before_read  # noqa: PLC0415
+
+    notes_out.extend(refresh_before_read(db_path, root).notes())
 
     # ------------------------------------------------------------------
     # Frozen-tag resolution (O(1) when frozen_tags is empty).
     # ------------------------------------------------------------------
-    frozen_section_ids: set[str] = set()
+    # Every node of a frozen doc, its envelope included: the one frozen-row
+    # set check and the build counts use.
     config = AxiomGraphConfig.load(root)
-    if config.staleness.frozen_tags:
-        frozen_doc_ids = db.get_doc_ids_with_tags(db_path, config.staleness.frozen_tags)
-        if frozen_doc_ids:
-            section_to_doc = db.get_section_doc_id_map(db_path, frozen_doc_ids)
-            frozen_section_ids = set(section_to_doc.keys())
+    frozen_rows = db.get_frozen_rows(db_path, config.staleness.frozen_tags)
+    frozen_section_ids: set[str] = set(frozen_rows)
 
     def _row_is_frozen(row_id: str) -> bool:
         return row_id in frozen_section_ids
+
+    # Frozen ids the default filter must still drop: every frozen row
+    # whose persisted link status is not BROKEN_LINK.  The grouped
+    # counts/ids projections carry ids only, so they read it from here;
+    # _filter_row applies the same rule to full rows.
+    dropped_frozen_ids: set[str] = set()
+    if frozen_section_ids and not include_frozen:
+        dropped_frozen_ids = {nid for nid, (_own, link) in frozen_rows.items() if link != BROKEN_LINK}
 
     def _filter_row(row: dict) -> tuple[bool, str]:
         """Decide whether to keep *row* and return (keep, marker).
@@ -870,10 +1117,59 @@ def compute_drift_query(
             grouped.setdefault(group, []).append(payload)
         return sorted(grouped.items())
 
+    # ------------------------------------------------------------------
+    # Offender attribution (format='full' only).  LINKED_STALE rows get
+    # their direct offenders (``via``) and leaf root offenders (``root``)
+    # from the computed stale map -- the same map and resolver
+    # ``reverify`` uses -- rather than the persisted-own_status proxy.
+    # Rows absent from the map (frozen, composite-inherited) keep the
+    # proxy ``via``.  Computed lazily, once, only when a page row needs it.
+    # ------------------------------------------------------------------
+    attribution: dict[str, tuple[list[str], list[str]]] = {}
+
+    def _attribute(page_rows: list[dict]) -> None:
+        if not any(r["link_status"] == LINKED_STALE for r in page_rows):
+            return
+        from axiom_graph.index.staleness import _get_linked_stale_ids, resolve_root_offenders
+
+        # Evaluate the page's LINKED_STALE rows, then the vias they name, hop
+        # by hop, until no via is left unevaluated: the map holds the page's
+        # via chains and nothing else, and each entry is the one the whole
+        # stale map holds (a scoped pass lists the same vias).
+        stale_map: dict[str, list[str]] = {}
+        evaluated: set[str] = set()
+        frontier = {r["id"] for r in page_rows if r["link_status"] == LINKED_STALE}
+        while frontier:
+            part = _get_linked_stale_ids(
+                db_path,
+                transitive_tags=config.staleness.transitive_tags,
+                frozen_tags=config.staleness.frozen_tags,
+                scope=frontier,
+            )
+            evaluated |= frontier
+            found = {nid: vias for nid, vias in part.items() if nid in frontier}
+            stale_map.update(found)
+            frontier = {v for vias in found.values() for v in vias} - evaluated
+        roots_map = resolve_root_offenders(stale_map)
+        for r in page_rows:
+            if r["link_status"] == LINKED_STALE and r["id"] in stale_map:
+                attribution[r["id"]] = (list(stale_map[r["id"]]), roots_map.get(r["id"], []))
+
+    def _offender_list(ids: list[str]) -> str:
+        shown = ",".join(ids[:_OFFENDER_DISPLAY_CAP])
+        extra = len(ids) - _OFFENDER_DISPLAY_CAP
+        return f"{shown} (+{extra} more)" if extra > 0 else shown
+
     def _full_row_line(r: dict, marker: str, indent: str = "") -> str:
-        via_part = "  via=" + ",".join(r["via"][:3]) if r["via"] else ""
+        via, roots = attribution.get(r["id"], (r["via"], []))
+        via_part = f"  via={_offender_list(via)}" if via else ""
+        root_part = f"  root={_offender_list(roots)}" if roots and sorted(roots) != sorted(via) else ""
         loc = r["location"] or "(no-location)"
-        return f"{indent}{r['id']}  {r['own_status']}/{r['link_status']}  {loc}{via_part}{marker}"
+        advisory = " [DOC_SECTION_LONG]" if r.get("long_section") else ""
+        return (
+            f"{indent}id={r['id']}  {r['own_status']}/{r['link_status']}  loc={loc}"
+            f"{via_part}{root_part}{advisory}{marker}"
+        )
 
     # ------------------------------------------------------------------
     # Flat (no group_by)
@@ -900,6 +1196,7 @@ def compute_drift_query(
             return "\n".join([header, *(r["id"] for r, _ in page_rows)])
 
         # format == "full"
+        _attribute([r for r, _ in page_rows])
         lines = [header, _FULL_HEADER]
         for r, marker in page_rows:
             lines.append(_full_row_line(r, marker))
@@ -908,31 +1205,50 @@ def compute_drift_query(
     # ------------------------------------------------------------------
     # Grouped
     # ------------------------------------------------------------------
+    # One table per (projection, axis), so every format -- and the frozen
+    # recount below -- dispatches the same axis the same way.
+    grouped_fns = {
+        "counts": {
+            "status": st.query_drift_counts_by_status,
+            "location_prefix": st.query_drift_counts_by_location_prefix,
+            "feature": st.query_drift_counts_by_feature,
+            "node_kind": st.query_drift_counts_by_node_kind,
+        },
+        "ids": {
+            "status": st.query_drift_ids_by_status,
+            "location_prefix": st.query_drift_ids_by_location_prefix,
+            "feature": st.query_drift_ids_by_feature,
+            "node_kind": st.query_drift_ids_by_node_kind,
+        },
+        "full": {
+            "status": st.query_drift_full_by_status,
+            "location_prefix": st.query_drift_full_by_location_prefix,
+            "feature": st.query_drift_full_by_feature,
+            "node_kind": st.query_drift_full_by_node_kind,
+        },
+    }
+
+    def _grouped(projection: str) -> list[dict]:
+        """Run the ``projection`` (counts / ids / full) helper for ``group_by``."""
+        fn = grouped_fns[projection][group_by]
+        if group_by == "node_kind":
+            return fn(db_path, filter=filter, location_glob=location_glob, test_paths=config.scan.test_paths)
+        return fn(db_path, filter=filter, location_glob=location_glob)
+
     if format == "counts":
-        if group_by == "status":
-            buckets = st.query_drift_counts_by_status(db_path, filter=filter, location_glob=location_glob)
-        elif group_by == "location_prefix":
-            buckets = st.query_drift_counts_by_location_prefix(db_path, filter=filter, location_glob=location_glob)
-        else:  # feature
-            buckets = st.query_drift_counts_by_feature(db_path, filter=filter, location_glob=location_glob)
+        buckets = _grouped("counts")
         # When frozen-tag filtering is active and there are frozen rows in
         # the underlying universe, we need to recompute counts from the
         # ids variant because we can't filter pre-aggregated counts.
         # Skip entirely when include_frozen=True — the original counts
         # query is already correct (no rows are dropped).
         if frozen_section_ids and not include_frozen:
-            if group_by == "status":
-                id_buckets = st.query_drift_ids_by_status(db_path, filter=filter, location_glob=location_glob)
-            elif group_by == "location_prefix":
-                id_buckets = st.query_drift_ids_by_location_prefix(db_path, filter=filter, location_glob=location_glob)
-            else:
-                id_buckets = st.query_drift_ids_by_feature(db_path, filter=filter, location_glob=location_glob)
-            # Filter ids per bucket; link_status unknown here so
-            # BROKEN_LINK retention can't be exercised in counts.  That's
-            # acceptable since markers don't show in counts.
+            id_buckets = _grouped("ids")
+            # Same retention rule as _filter_row: a frozen BROKEN_LINK row
+            # stays counted, every other frozen row is dropped.
             buckets = []
             for b in id_buckets:
-                kept_ids = [nid for nid in b["ids"] if nid not in frozen_section_ids]
+                kept_ids = [nid for nid in b["ids"] if nid not in dropped_frozen_ids]
                 if kept_ids:
                     buckets.append({"group": b["group"], "count": len(kept_ids)})
         if not buckets:
@@ -940,18 +1256,13 @@ def compute_drift_query(
         return "\n".join(f"{b['group']}  {b['count']}" for b in buckets)
 
     if format == "ids":
-        if group_by == "status":
-            buckets = st.query_drift_ids_by_status(db_path, filter=filter, location_glob=location_glob)
-        elif group_by == "location_prefix":
-            buckets = st.query_drift_ids_by_location_prefix(db_path, filter=filter, location_glob=location_glob)
-        else:
-            buckets = st.query_drift_ids_by_feature(db_path, filter=filter, location_glob=location_glob)
-        # Flatten to (group, id), dropping frozen ids (ids carry no marker).
+        buckets = _grouped("ids")
+        # Flatten to (group, id), dropping frozen non-BROKEN_LINK ids (ids
+        # carry no marker).
         items: list[tuple[str, object]] = []
-        drop_frozen = bool(frozen_section_ids) and not include_frozen
         for b in buckets:
             for nid in b["ids"]:
-                if drop_frozen and nid in frozen_section_ids:
+                if nid in dropped_frozen_ids:
                     continue
                 items.append((b["group"], nid))
         items.sort(key=lambda t: t[1])  # global id order
@@ -969,12 +1280,7 @@ def compute_drift_query(
         return "\n".join(out_lines)
 
     # format == "full"
-    if group_by == "status":
-        buckets = st.query_drift_full_by_status(db_path, filter=filter, location_glob=location_glob)
-    elif group_by == "location_prefix":
-        buckets = st.query_drift_full_by_location_prefix(db_path, filter=filter, location_glob=location_glob)
-    else:
-        buckets = st.query_drift_full_by_feature(db_path, filter=filter, location_glob=location_glob)
+    buckets = _grouped("full")
     # Flatten to (group, (row, marker)), applying the frozen-tag filter
     # (_filter_row is a no-op when frozen_section_ids is empty and retains
     # frozen BROKEN_LINK rows with a [frozen-source] marker).
@@ -991,6 +1297,7 @@ def compute_drift_query(
     if offset >= total:
         return "(page out of range)"
     page_items = items[offset : offset + limit]
+    _attribute([r for _, (r, _m) in page_items])
     out_lines = [_page_header(len(page_items), total), _FULL_HEADER]
     for group, members in _regroup(page_items):
         out_lines.append(f"[{group}]")

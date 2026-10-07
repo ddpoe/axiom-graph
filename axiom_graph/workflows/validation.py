@@ -18,8 +18,9 @@ All findings are WARNING severity.  Validators never raise.
 from __future__ import annotations
 
 import ast
+from collections.abc import Callable, Container, Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 from axiom_annotations.validation import (
     validate_autostep_args,
@@ -246,8 +247,9 @@ def validate_envelope(
 def validate_autostep_targets(
     autosteps: Iterable[AutoStepRecord],
     *,
-    envelope_node_ids: set[str],
+    envelope_node_ids: Container[str],
     is_rule_enabled=lambda rid: True,
+    resolve_target: Callable[[str], str | None] | None = None,
 ) -> list[ValidationFinding]:
     """Resolve AutoStep targets against envelope registry (B4, deferred pass).
 
@@ -257,19 +259,47 @@ def validate_autostep_targets(
       * "unresolved target" — target name couldn't be resolved to any indexed
         function (external module, dynamic dispatch, etc.).
 
+    A scanner records the target's bare function id, while the envelope a
+    ``@task`` or ``@workflow`` decorator mints carries the id
+    :func:`~axiom_graph.scanners._step_helpers.envelope_id_for` gives it.  A
+    target is decorated exactly when its envelope id is in
+    *envelope_node_ids*.
+
     Args:
         autosteps: Records produced during scan.
-        envelope_node_ids: Set of node IDs for which an envelope was emitted
-            (i.e. `@workflow` or `@task` decorated functions).
+        envelope_node_ids: Ids of the envelopes emitted for ``@workflow`` /
+            ``@task`` decorated functions.  Any container of node ids works,
+            so a caller may pass the whole live-node set.
         is_rule_enabled: rule filter callback.
+        resolve_target: Optional callable mapping a recorded target id to the
+            live node id it names (for example by following package
+            re-exports), or ``None`` when it names no live node; such a
+            target is reported as unresolved.  When omitted, the recorded id
+            is checked as it stands.
 
     Returns:
         List of findings.
     """
+    from axiom_graph.scanners._step_helpers import envelope_id_for  # noqa: PLC0415
+
     findings: list[ValidationFinding] = []
 
     if not is_rule_enabled("B4"):
         return findings
+
+    def _unresolved(rec: AutoStepRecord) -> ValidationFinding:
+        return ValidationFinding(
+            rule_id="B4",
+            severity=SEVERITY_WARNING,
+            module=rec.module,
+            function=rec.function,
+            line=rec.line,
+            message=(
+                f"AutoStep({rec.step_num}) target "
+                f"{rec.target_name!r} is unresolved "
+                f"(not a known intra-project function)"
+            ),
+        )
 
     for rec in autosteps:
         if not rec.has_next_call:
@@ -289,23 +319,18 @@ def validate_autostep_targets(
 
         if rec.target_node_id is None:
             # No intra-project resolution — external or dynamic call.
-            findings.append(
-                ValidationFinding(
-                    rule_id="B4",
-                    severity=SEVERITY_WARNING,
-                    module=rec.module,
-                    function=rec.function,
-                    line=rec.line,
-                    message=(
-                        f"AutoStep({rec.step_num}) target "
-                        f"{rec.target_name!r} is unresolved "
-                        f"(not a known intra-project function)"
-                    ),
-                )
-            )
+            findings.append(_unresolved(rec))
             continue
 
-        if rec.target_node_id not in envelope_node_ids:
+        target = rec.target_node_id
+        if resolve_target is not None:
+            target = resolve_target(target)
+            if target is None:
+                # The recorded id names no live node, even through re-exports.
+                findings.append(_unresolved(rec))
+                continue
+
+        if envelope_id_for(target) not in envelope_node_ids:
             findings.append(
                 ValidationFinding(
                     rule_id="B4",

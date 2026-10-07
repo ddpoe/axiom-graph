@@ -134,3 +134,49 @@ def test_post_refactor_tree_passes_clean() -> None:
     if violations:
         msg = "Layering violations on post-refactor tree:\n" + "\n".join(violations)
         pytest.fail(msg)
+
+
+# ---------------------------------------------------------------------------
+# Rule 4 — connections are opened in axiom_graph/db/ only
+# ---------------------------------------------------------------------------
+
+
+def test_rule4_fires_on_sqlite3_connect_outside_the_db_package(tmp_path: Path) -> None:
+    """``sqlite3.connect`` outside axiom_graph/db/ trips Rule 4; the same call inside it does not."""
+    fake_repo = tmp_path
+    source = "import sqlite3\n\n\ndef open_it(path):\n    return sqlite3.connect(path)\n"
+    bad = fake_repo / "axiom_graph" / "domain_x" / "api.py"
+    ok = fake_repo / "axiom_graph" / "db" / "_core.py"
+    imported = fake_repo / "axiom_graph" / "domain_y" / "api.py"
+    for path in (bad, ok, imported):
+        path.parent.mkdir(parents=True)
+    bad.write_text(source, encoding="utf-8")
+    ok.write_text(source, encoding="utf-8")
+    imported.write_text("from sqlite3 import connect\n", encoding="utf-8")
+    violations = check_layering.check_paths([fake_repo / "axiom_graph"], fake_repo)
+    assert len(violations) == 2, violations
+    assert all("Rule4" in v for v in violations)
+    assert {v.split(":")[0] for v in violations} == {"axiom_graph/domain_x/api.py", "axiom_graph/domain_y/api.py"}
+
+
+def test_rule4_follows_sqlite3_aliases_and_the_connection_class(tmp_path: Path) -> None:
+    """An aliased module, ``Connection`` construction and an aliased ``Connection`` import all trip Rule 4."""
+    sources = {
+        "aliased": "import sqlite3 as sq\n\n\ndef open_it(path):\n    return sq.connect(path)\n",
+        "klass": "import sqlite3\n\n\ndef open_it(path):\n    return sqlite3.Connection(path)\n",
+        "imported": "from sqlite3 import Connection as C\n\n\ndef open_it(path):\n    return C(path)\n",
+        "annotated": "import sqlite3\nfrom sqlite3 import Connection\n\n\ndef use(conn: Connection, other: sqlite3.Connection) -> None:\n    conn.execute('SELECT 1')\n",
+    }
+    for name, source in sources.items():
+        path = tmp_path / "axiom_graph" / name / "api.py"
+        path.parent.mkdir(parents=True)
+        path.write_text(source, encoding="utf-8")
+    violations = check_layering.check_paths([tmp_path / "axiom_graph"], tmp_path)
+    assert all("Rule4" in v for v in violations), violations
+    assert sorted(v.split(":")[0] for v in violations) == [
+        "axiom_graph/aliased/api.py",
+        "axiom_graph/imported/api.py",
+        "axiom_graph/klass/api.py",
+    ]
+    assert any("`sq.connect`" in v for v in violations), violations
+    assert any("`sqlite3.Connection`" in v for v in violations), violations

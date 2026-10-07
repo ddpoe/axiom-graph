@@ -1,203 +1,193 @@
-<!-- generated from axiom_graph::docs.consumer.get-started.configuration @ 90402c392b59; do not edit -->
+<!-- generated from axiom_graph::docs/consumer/get-started/configuration @ 74bc00ade0e0; do not edit -->
 
 # Configuration
 
 ## Overview
 
-axiom-graph is configured through a single `axiom-graph.toml` file in your project root. Every section and key is optional: missing values fall back to sensible defaults, and if the file is absent entirely axiom-graph runs with all defaults. You only add the keys you want to change.
+axiom-graph reads its settings from `axiom-graph.toml` in the project root. Every key is optional: a key you leave out takes its default, and with no file at all axiom-graph runs on defaults. All keys sit under the `[axiom_graph]` table and its sub-tables, such as `[axiom_graph.scan]`.
 
-The file uses [TOML](https://toml.io/) syntax, and all settings live under the `[axiom_graph]` table (sub-tables like `[axiom_graph.scan]` group related keys). A small number of behaviors -- logging in particular -- are controlled by environment variables instead; see [Environment Variables](#environment-variables) below.
+A misspelled key is ignored without a warning, so check names against the tables below. A bad value in `[axiom_graph.validation.rules]`, `[axiom_graph.docjson]`, `[axiom_graph.staleness]` (`refresh_before_read`) or a render target stops every command with an error that names it.
 
-Most of what you configure here shapes one thing: which files become nodes in the mesh, and how staleness flows across the edges between them. If you have not yet connected an agent, start with [Connect your agent](connect-your-agent.md); the CLI commands referenced throughout this page are documented in [Use the CLI](use-the-cli.md).
+Logging is set with environment variables instead; see [Environment variables](#environment-variables). The commands named on this page are covered in [Use the CLI](use-the-cli.md).
 
-## What gets indexed: the [axiom_graph.scan] section
+## Project id and database: [axiom_graph]
 
-The `[axiom_graph.scan]` section decides which files axiom-graph discovers and turns into nodes. The fewer irrelevant files in the mesh, the less an agent has to wade through later -- scanning configuration is the first lever on context reduction.
+Two keys sit directly under `[axiom_graph]`.
+
+```toml
+[axiom_graph]
+project_id = "my-project"
+db_path    = ".axiom_graph/graph.db"
+```
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `project_id` | string | the existing index's id, else the project directory name | Prefix of every node id, the part before `::`. |
+| `db_path` | string | `".axiom_graph/graph.db"` | Where the index database is stored. A relative path resolves against the project root. |
+
+`axiom-graph init` writes `project_id` for you: the `--id` you pass, else the existing index's id, else the directory name. The index records the id it was built with; if `project_id` later names a different id, `build` stops with an error that names both. To change the id, set the new `project_id` and run `axiom-graph init`, which rebuilds the index and discards its history and verification records. `axiom-graph init` leaves every other setting in the file alone. To return the whole file to the defaults, keeping `project_id`, run `axiom-graph init . --settings`; it lists what changes and asks first, and `axiom-graph build` then applies the new settings.
+
+## What gets indexed: [axiom_graph.scan]
+
+Every `.py` file under the project root is scanned. `[axiom_graph.scan]` adds docs, config files and JS/TS, and names directories to skip.
 
 ```toml
 [axiom_graph.scan]
-docs_dirs   = ["docs", ".pev"]
-config_dirs = [".claude"]
-test_paths  = ["tests/"]
-js_paths    = ["axiom_graph/viz/static/ts/*.ts"]
-exclude_dirs = ["worktrees", "pev-worktrees"]
+docs_dirs    = ["docs", ".pev"]
+config_dirs  = [".claude"]
+test_paths   = ["tests/"]
+js_paths     = ["web/src/**/*.ts"]
+exclude_dirs = ["data"]
 ```
 
-| Key | Type | Default | Purpose |
+| Key | Type | Default | Meaning |
 |---|---|---|---|
-| `docs_dirs` | list of strings | `["docs"]` | Directories scanned for Markdown and DocJSON files. The first entry is the primary write target for new docs. |
-| `config_dirs` | list of strings | `[".claude"]` | Directories scanned for agent/config artifacts (settings, commands, skills). |
-| `test_paths` | list of strings | `[]` | Path prefixes that contain test code, e.g. `["tests/"]`. Lets the viz dashboard filter test functions out of the Workflows tab. |
-| `js_paths` | list of strings | `[]` | Glob patterns for JS/TS files to scan. Empty means no JS/TS scanning. Requires the JS/TS extra (see below). |
-| `exclude_dirs` | list of strings | `[]` | Bare directory names to skip, **in addition to** the built-in set below. |
+| `docs_dirs` | list of strings | `["docs"]` | Directories read for Markdown and DocJSON docs, relative to the project root. New docs are written to the first entry. |
+| `docs_extensions` | list of strings | `[".docjson", ".json"]` | Extensions read as DocJSON under `docs_dirs`. Only `.docjson` and `.json` are valid; other entries are dropped with a build warning. New docs get the first entry's extension. |
+| `config_dirs` | list of strings | `[".claude"]` | Directories read for agent config files (Markdown, JSON, YAML and TOML). Each file becomes one node. |
+| `test_paths` | list of strings | `[]` | Path prefixes that hold tests. `axiom_graph_workflow_list` leaves them out unless you pass `scope="tests"` or `scope="all"`, the dashboard hides them until you tick **Show test files**, and `axiom_graph_drift_query(group_by="node_kind")` counts the code under them as `test`. |
+| `js_paths` | list of strings | `[]` | Glob patterns, relative to the project root, for `.js`, `.jsx`, `.ts` and `.tsx` files to scan. Empty means no JS/TS scanning. |
+| `exclude_dirs` | list of strings | `[]` | Directory names (not paths) to skip when scanning code and `config_dirs`. A name matches at any depth. |
+| `source_roots` | list of strings | `[]` | Directories, relative to the project root, that Python imports start from. Needed when your code lives somewhere other than the project root, such as `lib/` or `app/`, and axiom-graph cannot work it out. A single string is accepted as one root. |
 
-### Built-in exclusions
+A `docs_dirs` or `config_dirs` entry that does not exist gives a build warning.
 
-axiom-graph ships with a built-in set of directories it always skips — version-control, virtualenv, build-output, cache, and worktree directories. The authoritative list lives in code (`_BASE_SKIP_DIRS` in `axiom_graph/index/builder.py`), not here, so this guide doesn't duplicate it. Your `exclude_dirs` entries **add to** that set; they never replace it. Use `exclude_dirs` for project-specific data folders, scratch notebooks, or generated trees that would otherwise pollute the graph.
+### Python import roots
 
-### Multi-root docs and config
+An import such as `from demo.stats import mean` is linked to the file it names by trying a list of directories in order. The first one that holds the module wins:
 
-Because `docs_dirs` and `config_dirs` are lists, projects that scatter docs and config across several top-level directories do not have to consolidate them. axiom-graph scans each entry independently. Relative paths resolve against the project root; absolute paths are honored as-is.
+1. the directories in `source_roots`;
+2. pytest's `pythonpath` setting, from the first pytest config file found (`pytest.ini`, `.pytest.ini`, `pyproject.toml`, `tox.ini` or `setup.cfg`);
+3. the package directories your packaging config declares (setuptools, poetry or hatch in `pyproject.toml`, or `setup.cfg`);
+4. the project root;
+5. `src/`, when it holds Python code.
 
-**Every docs root flattens into one `docs.` namespace.** A doc id is `{project_id}::docs.` plus the file's path *relative to whichever root contained it* — the root's own name is not part of the id. So `.pev/test-policy.json` is `myproject::docs.test-policy`, and `.pev/cycles/foo.json` is `myproject::docs.cycles.foo`. Three consequences worth knowing:
+So a project with a `src/` layout works without any setting. Entries that do not exist or lie outside the project are ignored. A directory without an `__init__.py` still counts as a package when the import names a real `.py` file inside it. Relative imports (`from . import x`) always start from the importing file's own package.
 
-- **A listing that never mentions `.pev` is not evidence that `.pev` went unindexed.** `axiom_graph_list` and `read_doc("list")` print each doc's file path (`[.pev/test-policy.json]`) so you can tell the roots apart at a glance.
-- **Two roots can collide on one id.** `docs/x.json` and `.pev/x.json` both derive `myproject::docs.x` and overwrite each other — last scanned wins. The build emits a warning naming both files and the shared id; this check enumerates the whole document tree from disk, so an incremental build catches a collision against a file its mtime fast-pass skipped, not only files it re-scanned. Give docs in different roots distinct filenames. To see the full picture — every document and section id at once, not just the ones that collide — run `axiom-graph doc-ids preview <PROJECT_ROOT>`.
-- **New docs go to `docs_dirs[0]` unless you say otherwise.** Pass `docs_root` to `axiom_graph_write_doc` (e.g. `docs_root=".pev"`) to author into a different configured root; the value must match a `docs_dirs` entry.
+When you add or change roots, the next build re-reads every Python file once so the links are found; nothing else is needed.
 
-### JavaScript / TypeScript scanning
+If imports of what looks like your own code still match no file, the build prints one line naming them and pointing at `source_roots`. Add the directory they start from, and the line goes away on the next build. Imports of packages you list as dependencies in `pyproject.toml`, and of the standard library, are never reported.
 
-By default only Python is scanned. Set `js_paths` to glob patterns to also index `.js`, `.ts`, `.jsx`, and `.tsx` files; this requires the JS/TS optional extra, which installs tree-sitter:
+### Skipped directories
+
+axiom-graph always skips `.git`, `.venv`, `venv`, `node_modules`, `.tox`, `.pixi`, `dist`, `build`, `__pycache__`, `worktrees` and its own `.axiom_graph` directory. `exclude_dirs` adds to that list. It does not apply inside `docs_dirs`, where every doc file is read.
+
+### Several docs roots
+
+Each `docs_dirs` entry is scanned on its own, and a doc id keeps its root's path: `.pev/test-policy.docjson` becomes `my-project::.pev/test-policy`, so it cannot clash with `docs/test-policy`. To write a new doc into a root other than the first, pass `docs_root=".pev"` to `axiom_graph_write_doc`. To convert existing `.json` docs to `.docjson`, use `axiom-graph doc-ids rename-extension`.
+
+### JavaScript and TypeScript
+
+Scanning `js_paths` needs the `js` extra:
 
 ```bash
 pip install "axiom-graph[js]"
 ```
 
-The JS/TS scanner is what extends the semantic layer beyond Python: it picks up `workflow(opts)(fn)` / `task(opts)(fn)` envelopes and their `Step` / `AutoStep` markers, and -- as proof the semantic layer is framework-aware -- recognizes xstate v5 state machines (`createMachine`, `setup().createMachine`) as state/transition nodes. See [Annotations](../concepts/annotations.md) for what those markers mean.
+Without it, a build with `js_paths` set warns and skips those files. The scanner indexes functions and classes, the `workflow` / `task` / `Step` / `AutoStep` markers (see [Annotations](../concepts/annotations.md)), and xstate state machines built with `createMachine`.
 
-## Project identity and database path
+## Staleness propagation: [axiom_graph.staleness]
 
-Two top-level keys live directly under `[axiom_graph]`:
-
-```toml
-[axiom_graph]
-project_id = "my-project"
-db_path = ".axiom_graph/graph.db"
-```
-
-| Key | Type | Default | Purpose |
-|---|---|---|---|
-| `project_id` | string | directory name | Namespace prefix on every node ID (the part before `::`). Equivalent to the `--id` CLI flag. When omitted, the project directory name is used. |
-| `db_path` | string | `".axiom_graph/graph.db"` | Location of the indexed mesh -- the SQLite database that `build` writes and every read tool queries. Relative paths resolve against the project root; absolute paths are honored as-is. |
-
-`project_id` is worth setting explicitly: it is baked into every node ID, so changing it later re-namespaces the whole graph. `db_path` rarely needs to change, but you can point it elsewhere if `.axiom_graph/` is inconvenient for your layout.
-
-## Staleness propagation: the [axiom_graph.staleness] section
-
-Staleness is not a bolt-on feature -- it is a read on the same typed mesh that powers intent-scoped retrieval. Drift detection and "give me exactly the linked nodes" are two queries against one graph. The `[axiom_graph.staleness]` section tunes how a drift signal travels along the edges. For the full model, see [Staleness](../concepts/staleness.md).
+Two lists decide which docs `LINKED_STALE` spreads into. A third key decides whether the read tools bring statuses up to date before they answer. The statuses and how to clear them are in [Staleness](../concepts/staleness.md).
 
 ```toml
 [axiom_graph.staleness]
-transitive_tags = ["consumer"]
-frozen_tags = ["adr", "plan", "pev-cycle", "pev-instance", "pev-request"]
+transitive_tags     = ["consumer"]
+frozen_tags         = ["adr", "plan"]
+refresh_before_read = "changed-files"
 ```
 
-### transitive_tags -- let staleness flow doc-to-doc
-
-By default, staleness is computed only for direct code-to-doc links: edit a function, the doc section that documents it goes `LINKED_STALE`. `transitive_tags` extends this one more hop, propagating the signal through doc-to-doc `documents` edges -- but only for documents carrying one of the listed tags.
-
-This is exactly how the published docs you are reading stay honest. Consumer pages link *through* a dev-doc proxy rather than to raw code; because `"consumer"` is in `transitive_tags`, a consumer page inherits `LINKED_STALE` when the code beneath its proxy drifts. When this list is empty (the default), no transitive propagation occurs.
-
-| Value | Type | Default | Effect |
+| Key | Type | Default | Meaning |
 |---|---|---|---|
-| `transitive_tags` | list of strings | `[]` | Doc-level tags that opt **in** to transitive `LINKED_STALE` through `documents` edges. |
+| `transitive_tags` | list of strings | `[]` | Doc tags that let `LINKED_STALE` pass from one doc to another. |
+| `frozen_tags` | list of strings | `[]` | Doc tags whose sections get no new `LINKED_STALE`. |
+| `refresh_before_read` | string | `"changed-files"` | How current the statuses a read shows are: `"changed-files"`, `"check"` or `"off"`. See below. |
 
-### frozen_tags -- exempt historical docs
+The two lists match the `tags` list at the top of a DocJSON file.
 
-Some documents are intentionally point-in-time and should *not* light up when the code they describe moves on: ADRs, planning docs, and PEV cycle/instance/request manifests record decisions as of a date. `frozen_tags` lists doc-level tags whose documents are excluded from `LINKED_STALE` -- both direct and transitive.
+### transitive_tags
 
-| Value | Type | Default | Effect |
-|---|---|---|---|
-| `frozen_tags` | list of strings | `[]` | Doc-level tags that opt **out** of `LINKED_STALE` propagation. |
+Without it, a section goes `LINKED_STALE` only when code it links to changes. With it, a section in a doc carrying a listed tag also goes `LINKED_STALE` when a doc section it links to is `LINKED_STALE`, and the signal carries on along further links from tagged docs. Use it for published pages that link to dev docs instead of code; [the docs-honesty loop](../examples/docs-honesty-loop.md) shows the setup.
 
-With `frozen_tags` set:
+### frozen_tags
 
-- Frozen sections are dropped from the default `check` summary and from `drift_query` results.
-- A `BROKEN_LINK` on a frozen doc still surfaces, annotated `[frozen-source]` -- a deleted target warrants human review regardless of freeze status.
-- Any pre-existing `LINKED_STALE` on a frozen section is preserved (the sticky invariant); only `mark-clean` can clear it.
+Use it for point-in-time records such as ADRs and plans. Their sections get no new `LINKED_STALE`, and `check` (CLI and MCP) and `axiom_graph_drift_query` leave out both the sections and the frozen doc itself. A `BROKEN_LINK` on a frozen doc is still reported. Adding a tag does not clear `LINKED_STALE` a section already has while its cause remains; mark it clean as usual.
 
-### Including frozen docs on demand
+To see frozen sections, pass `include_frozen=true` to the `axiom_graph_check` or `axiom_graph_drift_query` MCP tool. Full-format rows mark them `[frozen]`.
 
-When you do want to see frozen rows, the staleness read tools take an `include_frozen` switch. Pass `include_frozen=true` to `axiom_graph_check` or `axiom_graph_drift_query` and frozen sections are included, marked `[frozen]` in full-format output. The depth of the read is otherwise unchanged -- this only widens *which* nodes are reported, not how far signals travel.
+### refresh_before_read
 
-## Rename detection: the [axiom_graph.rename] section
+The MCP read tools `axiom_graph_drift_query`, `axiom_graph_read_doc`, `axiom_graph_graph`, `axiom_graph_search` and `axiom_graph_source`, and the dashboard, show statuses. This key sets what they do first, so a function you edited a moment ago can already read as changed without a `check`:
 
-When a node disappears from one build and a similar node appears, axiom-graph tries to recognize that as a *rename* (identity moved) rather than a delete-plus-create. Welding the old identity to the new one preserves history, verification snapshots, and edges -- so a symbol rename does not silently break every link pointing at it. The `[axiom_graph.rename]` section tunes the matcher.
+- `"changed-files"` (the default) re-checks the changed files behind what the read shows, then answers.
+- `"check"` runs a full `check` of the project first, the same as `axiom-graph check`. Slower on a large project.
+- `"off"` answers from the statuses the last `build` or `check` stored. When files changed since then, a read tool's answer ends with a line such as ``index is behind for 3 files — run `check` ``.
+
+Any other value stops every command with an error that names the key.
+
+## Rename detection: [axiom_graph.rename]
+
+When a code node disappears in a build and a similar new one appears, the build records a rename: the new node takes over the old one's history, verification and links, and shows as `RENAMED` until you mark it clean.
 
 ```toml
 [axiom_graph.rename]
-code_threshold = 0.6   # min body-similarity ratio to auto-apply a code rename
-prose_threshold = 0.5  # min ratio for prose (DocJSON) renames
-pool_cap = 50          # max scoped-pool size before exact-hash fallback
+code_threshold = 0.6
+pool_cap       = 50
 ```
 
-| Key | Type | Default | Purpose |
+| Key | Type | Default | Meaning |
 |---|---|---|---|
-| `code_threshold` | float | `0.6` | Minimum body-similarity ratio (0-1) for a lost code node to auto-weld to a newly-appeared one. |
-| `prose_threshold` | float | `0.5` | Minimum ratio for prose/DocJSON renames. |
-| `pool_cap` | integer | `50` | Maximum number of candidate nodes in a scoped comparison pool. Above this, the matcher falls back to an exact-hash-only pass. |
+| `code_threshold` | float | `0.6` | Minimum body similarity, from 0 to 1, for an automatic rename. Lower values catch more renames and risk wrong matches. |
+| `pool_cap` | integer | `50` | Most nodes (disappeared plus new) compared by similarity in one group. A larger group matches identical bodies only. |
 
-Lower thresholds catch more renames but risk false welds; higher thresholds are conservative. The `pool_cap` keeps similarity scoring bounded -- when a build touches a large number of nodes at once, exact-hash matching still catches cross-file moves without an expensive all-pairs comparison. If the matcher ever guesses wrong, the welds it makes are not permanent: review them with the rename CLI/MCP tools and undo with `rename revert`. See [Use the CLI](use-the-cli.md) for the `rename apply` / `rename revert` commands.
+An identical body matches anywhere in the project. Similar bodies are compared within the old node's file and the file git reports it was renamed to; without git, only identical bodies match. Undo a wrong rename with `axiom-graph rename revert`, and record a missed one with `axiom-graph rename apply`.
 
-## Annotation validation
+## Annotation checks: [axiom_graph.validation]
 
-One more section governs the semantic layer -- the annotated orchestration highways (`@workflow` / `@task` envelopes with `Step` / `AutoStep` markers). These are not a full call graph; they are the spots you deliberately annotate so an agent can read intent and step names instead of tracing every call. See [Annotations](../concepts/annotations.md).
-
-### Validation rules
-
-At scan time, axiom-graph runs eight static rules (A1-A3, B1-B4, C1) over your annotations -- checking that step numbers are well-formed, sequential, and so on. Findings flow into the `build` summary and `check --format json`. You can toggle the whole pass or individual rules:
+Each scan checks your annotations (`@workflow`, `@task`, `Step` and `AutoStep`; see [Annotations](../concepts/annotations.md)) against eight rules. Findings appear in the output of `axiom-graph build` and `axiom-graph check`, and `check --strict-annotations` exits 1 while any remain. Changes here apply on the next `build` or `check`, with no rescan.
 
 ```toml
 [axiom_graph.validation]
 enabled = true
 
 [axiom_graph.validation.rules]
-A1 = true
-A2 = true
-A3 = true
-B1 = true
-B2 = true
-B3 = true
-B4 = true
-C1 = true
+B3 = false
 ```
 
-| Key | Type | Default | Purpose |
+| Key | Type | Default | Meaning |
 |---|---|---|---|
-| `validation.enabled` | boolean | `true` | Master switch. When `false`, all annotation findings are suppressed. |
-| `validation.rules.<ID>` | boolean | `true` | Per-rule toggle. An unknown rule ID raises a config error rather than being silently ignored. |
+| `enabled` | boolean | `true` | `false` turns every rule off. |
+| `rules.<ID>` | boolean | `true` | `false` turns one rule off. An unknown rule id is an error. |
 
-The rules, briefly: **A1** step_num is a positive int/float; **A2** `Step(name, purpose)` both non-empty; **A3** `AutoStep` arg shape valid; **B1** no duplicate step_num in an envelope; **B2** major step numbers form 1, 2, 3 with no gaps; **B3** non-integer step_num must sit inside a loop; **B4** `AutoStep` must be immediately followed by a call to a decorated function; **C1** `@workflow` / `@task` `purpose` is non-empty.
+| Rule | Checks that |
+|---|---|
+| A1 | `step_num` is a positive int or float. |
+| A2 | each `Step` has a non-empty `name` and `purpose`. |
+| A3 | an `AutoStep` `name`, if given, is a non-empty string. |
+| B1 | no two markers in one function share a `step_num`. |
+| B2 | major step numbers run 1, 2, 3 with no gaps. |
+| B3 | a fractional `step_num` such as `2.1` sits inside a `for` or `while` loop. |
+| B4 | each `AutoStep` is followed directly by a call to a `@task` or `@workflow` function. |
+| C1 | each `@workflow` and `@task` has a non-empty `purpose`. |
 
-## Size and age thresholds: [axiom_graph.thresholds]
+## Raw DocJSON edits: [axiom_graph.docjson]
 
-These thresholds drive advisory flags during builds and the age-based staleness clock.
+One key sets what a build does with a DocJSON section edited outside the doc tools, by hand or by a script.
 
 ```toml
-[axiom_graph.thresholds]
-max_function_lines = 80
-max_module_lines   = 600
-stale_days         = 90
+[axiom_graph.docjson]
+raw_docjson_edits = "warn"
 ```
 
-| Key | Type | Default | Purpose |
+| Key | Type | Default | Meaning |
 |---|---|---|---|
-| `max_function_lines` | integer | `80` | A function longer than this is flagged as oversized during builds. |
-| `max_module_lines` | integer | `600` | A module longer than this is flagged as oversized during builds. |
-| `stale_days` | integer | `90` | An unverified node older than this many days is considered stale. |
+| `raw_docjson_edits` | string | `"warn"` | `"warn"` records a `RAW_DOCJSON_EDIT` history event for each such section and reports it after the build. `"off"` records nothing. Any other value is an error. |
 
-The line limits nudge toward atomic, function-granular code -- which keeps each node small enough that reading one source range, not a whole file, is genuinely useful.
+A flagged section is never verified automatically. Accept its current text with `axiom-graph stamps accept <PROJECT_ROOT> --all` or `axiom_graph_accept_doc_edits`, or make the change again through a doc tool. With `"off"`, an edited section stays unverified until you mark it clean, like any other change. Editing docs is covered in [DocJSON](../concepts/docjson.md).
 
-## Publishing the docs site: [axiom_graph.site]
+## Rendering docs: [axiom_graph.site]
 
-The `[axiom_graph.site]` section controls the `axiom-graph render-site` pipeline, which converts DocJSON documents into clean Markdown for a static site generator.
-
-```toml
-[axiom_graph.site]
-nav_file   = "site-nav.yml"
-output_dir = "site"
-```
-
-| Key | Type | Default | Purpose |
-|---|---|---|---|
-| `nav_file` | string | `"site-nav.yml"` | YAML file defining the site navigation and which docs to include. Resolved relative to the project root. Used as the implicit `guide` target when no `[[axiom_graph.site.targets]]` are declared. |
-| `output_dir` | string | `"site"` | Output directory for the implicit render when no targets are declared. |
-
-Both can be overridden per invocation with `render-site`'s `--nav` and `--output` flags.
-
-## Configurable render targets: [[axiom_graph.site.targets]]
-
-Declare one or more named render targets. When any targets are present, `nav_file` / `output_dir` are ignored for the default run and only the explicit targets apply. Use `--target NAME` (repeatable) to render a subset.
+`axiom-graph render-site` turns DocJSON docs into Markdown: a Sphinx guide, a README, or a folder of plain pages. Each `[[axiom_graph.site.targets]]` entry is one output. [The multi-target rendering tutorial](../examples/multi-target-rendering.md) walks through a full setup.
 
 ```toml
 [[axiom_graph.site.targets]]
@@ -209,95 +199,76 @@ nav    = "site-nav.yml"
 [[axiom_graph.site.targets]]
 name      = "readme"
 output    = "README.md"
-format    = "plain"
-doc       = "myproject::docs.consumer.readme"
-overwrite = true
-
-[[axiom_graph.site.targets]]
-name      = "plugin-pev"
-output    = "pev_nexus_agents/pev/docs"
-format    = "plain"
-nav       = "docs/consumer/plugins/pev/nav.yml"
+doc       = "my-project::docs/consumer/readme"
 overwrite = true
 ```
 
-| Key | Type | Required | Purpose |
+| Key | Type | Default | Meaning |
 |---|---|---|---|
-| `name` | string | yes | Unique target identifier used by `--target` / `only=`. |
-| `output` | string | yes | Output path relative to project root. For `nav` targets: a directory. For `doc` targets: a file. |
-| `format` | string | `"plain"` | `"plain"` (GitHub-friendly GFM) or `"sphinx"` (MyST/toctree). Only nav targets may use `"sphinx"`; doc targets must use `"plain"`. |
-| `nav` | string | one of nav/doc | Path to a `site-nav.yml` relative to project root. Mutually exclusive with `doc`. |
-| `doc` | string | one of nav/doc | A single DocJSON doc-id to render to `output`. Mutually exclusive with `nav`. |
-| `overwrite` | bool | `false` | When `true`, an existing un-stamped file at `output` is replaced; otherwise it is warn-and-skipped (path safety). Set `true` for the first run when replacing hand-authored files. |
+| `name` | string | required | Unique target name, used by `render-site --target NAME`. |
+| `output` | string | required | Output path inside the project: a directory for a `nav` target, a file for a `doc` target. |
+| `nav` | string | none | Nav YAML file listing the docs to render as a page tree. |
+| `doc` | string | none | Id of one doc to render to a single file. |
+| `format` | string | `"plain"` | `"plain"` (GitHub-flavored Markdown) or `"sphinx"` (MyST pages with toctrees). Only a `nav` target can use `"sphinx"`. |
+| `overwrite` | boolean | `false` | Replace an existing file at `output` that `render-site` did not generate. Without it, such a file is skipped with a warning. Files `render-site` generated are always replaced. |
 
-**Validation rules (enforced at config load):** exactly one of `nav`/`doc` must be set; `format` must be `"plain"` or `"sphinx"`; `sphinx` requires `nav` (never `doc`); target names must be unique.
+Each target sets exactly one of `nav` or `doc`, and no two targets share a name.
 
-**Implicit target synthesis:** when `targets` is empty or absent, a synthetic `guide` target is created pointing `nav_file` → `userdocs/guide` with `format="sphinx"` — preserving the pre-targets default behavior.
+`render-site` with no options renders every target; `--target NAME`, repeatable, renders only those. With no targets declared, it renders one `guide` target: the nav file below to `userdocs/guide`, in `sphinx` format.
 
-**Hybrid manifest:** subtree (`nav`) targets keep their co-located `.render-manifest.json` in the output directory (unchanged). Single-file (`doc`) targets are recorded in `.axiom_graph/render-manifest.json` keyed by repo-relative output path. Subset runs (`--target NAME`) merge their entries into the central manifest without erasing other targets' entries.
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `nav_file` | string | `"site-nav.yml"` | Nav file for the implicit `guide` target, and for `render-site --output` when `--nav` is not given. Set it under `[axiom_graph.site]`. |
 
-For a worked, runnable walkthrough — declaring README, plugin-docs, and guide targets and rendering each — see [the multi-target rendering tutorial](../examples/multi-target-rendering.md).
+`render-site --nav PATH` or `--output DIR` renders one Sphinx tree and ignores the target list.
 
-This section is the publishing end of the docs-honesty loop. Consumer/published docs are themselves DocJSON nodes in the mesh; they link through a [dev-doc proxy](../examples/docs-honesty-loop.md#the-proxy-linking-architecture) to the code, and — because `"consumer"` is listed in `transitive_tags` — they inherit `LINKED_STALE` when that code drifts. That staleness is the signal to update the prose; verifying or `mark-clean`-ing the section clears it; `render-site` republishes the corrected page. The site you are reading is built this way (axiom-graph dogfooding its own loop). For the full walkthrough, see [the docs-honesty loop](../examples/docs-honesty-loop.md).
+## Environment variables
 
-## Environment Variables
+Logging is set with environment variables, not in `axiom-graph.toml`. Logs go to stderr.
 
-Logging is controlled by environment variables rather than the TOML file. These apply to both the CLI and the MCP server (the primary integration surface for agents).
-
-| Variable | Default | Description |
+| Variable | Default | Meaning |
 |---|---|---|
-| `AXIOM_GRAPH_LOG_LEVEL` | `INFO` | Override the log level. Accepts standard Python levels: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. At `DEBUG`, SQLite trace logging is also enabled. |
-| `AXIOM_GRAPH_LOG_FILE` | (none) | When set, log output is also written to this file path (in addition to stderr). Applies to the MCP server only. |
+| `AXIOM_GRAPH_LOG_LEVEL` | `INFO` | Log level for the CLI and the MCP server: `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`. `DEBUG` also logs every SQL statement. |
+| `AXIOM_GRAPH_LOG_FILE` | none | MCP server only. Also writes logs to this file, which rotates at 5 MB and keeps two old files. |
 
-When an MCP tool call behaves unexpectedly, setting `AXIOM_GRAPH_LOG_LEVEL=DEBUG` (and optionally `AXIOM_GRAPH_LOG_FILE`) is the fastest way to see what the server is doing.
+To see what the MCP server is doing, set both in the server's environment; [Connect your agent](connect-your-agent.md) shows where.
 
-## Complete Example
+## Complete example
 
-A full `axiom-graph.toml` with every section. All keys are optional -- include only the ones you want to change from their defaults.
+An `axiom-graph.toml` that uses every table. Keep only the keys you change.
 
 ```toml
 [axiom_graph]
 project_id = "my-project"
-db_path = ".axiom_graph/graph.db"
+db_path    = ".axiom_graph/graph.db"
 
 [axiom_graph.scan]
-docs_dirs   = ["docs", ".pev"]
-config_dirs = [".claude"]
-test_paths  = ["tests/"]
-js_paths    = ["src/**/*.ts"]
-exclude_dirs = ["worktrees", "pev-worktrees"]
-
-[axiom_graph.thresholds]
-max_function_lines = 80
-max_module_lines   = 600
-stale_days         = 90
+docs_dirs       = ["docs", ".pev"]
+docs_extensions = [".docjson", ".json"]
+config_dirs     = [".claude"]
+test_paths      = ["tests/"]
+js_paths        = ["web/src/**/*.ts"]
+exclude_dirs    = ["data", "scratch"]
+source_roots    = ["lib"]
 
 [axiom_graph.staleness]
-transitive_tags = ["consumer"]
-frozen_tags = ["adr", "plan", "pev-cycle", "pev-instance", "pev-request"]
+transitive_tags     = ["consumer"]
+frozen_tags         = ["adr", "plan"]
+refresh_before_read = "changed-files"   # or "check", or "off"
 
 [axiom_graph.rename]
 code_threshold = 0.6
-prose_threshold = 0.5
-pool_cap = 50
+pool_cap       = 50
 
 [axiom_graph.validation]
 enabled = true
 
 [axiom_graph.validation.rules]
-A1 = true
-A2 = true
-A3 = true
-B1 = true
-B2 = true
-B3 = true
-B4 = true
-C1 = true
+B3 = false   # allow fractional step numbers outside loops
 
-# Configurable render targets. With no --target, render-site regenerates all
-# targets; --target NAME renders a subset. overwrite = true lets the first run
-# replace hand-authored files; subsequent runs see the provenance stamp and
-# regenerate cleanly.
+[axiom_graph.docjson]
+raw_docjson_edits = "warn"
+
 [[axiom_graph.site.targets]]
 name   = "guide"
 output = "userdocs/guide"
@@ -307,18 +278,6 @@ nav    = "site-nav.yml"
 [[axiom_graph.site.targets]]
 name      = "readme"
 output    = "README.md"
-format    = "plain"
-doc       = "my-project::docs.consumer.readme"
-overwrite = true
-
-[[axiom_graph.site.targets]]
-name      = "plugin-docs"
-output    = "plugins/myplugin/docs"
-format    = "plain"
-nav       = "docs/consumer/plugins/myplugin/nav.yml"
+doc       = "my-project::docs/consumer/readme"
 overwrite = true
 ```
-
-> Note: a `[semantic]` install extra and embeddings-based search existed in earlier versions. Semantic search is deprecated (2.1.0) and removed in 3.0 -- there is no embeddings extra or config to set.
->
-> Note: omitting `[[axiom_graph.site.targets]]` entirely preserves the pre-targets default behavior: a synthetic `guide` sphinx target is created from `nav_file` → `userdocs/guide`.

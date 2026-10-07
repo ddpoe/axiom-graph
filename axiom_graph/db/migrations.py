@@ -24,9 +24,10 @@ Mechanism:
   :data:`CURRENT_SCHEMA_VERSION` (written by a newer package, then
   downgraded) raises :class:`SchemaVersionError` instead of corrupting it.
 
-The runner is invoked at the top of ``build`` (right after ``init_db``),
-so the entire user-facing upgrade is ``pip install -U axiom-graph`` +
-their normal ``build``.
+The runner is invoked at the top of ``build`` (right after ``init_db``)
+and before ``check`` reads the annotation findings store, so the entire
+user-facing upgrade is ``pip install -U axiom-graph`` + their normal
+``build`` or ``check``.
 
 Registered steps:
 
@@ -35,6 +36,25 @@ Registered steps:
 - **v2** — re-sync every DocJSON envelope's ``tags`` rows from the
   ``docs.tags`` JSON the DB already holds, repairing indexes whose envelope
   tags drifted while tag resync was gated on the node's stored text.
+- **v3** — clear the stored ``file_mtime`` of every node in a Python test
+  file (``test_*.py`` / ``*_test.py``), so the same build rescans those
+  files: only collected tests own ``validates`` edges now, and the
+  builder's scanner-edge reconciler retires the edges helpers, fixtures
+  and nested defs used to own once their file is walked.
+- **v4** — create the ``annotation_findings`` store (idempotently: ``init_db``
+  has already created it on an existing DB) and clear the stored
+  ``file_mtime`` of every node in a Python or JS/TS file
+  (``.py/.js/.jsx/.ts/.tsx``), so the next build rescans every code file
+  once and fills the store.
+- **v5** — add ``nodes.live_code_hash`` / ``nodes.live_desc_hash`` and the
+  ``node_verification_targets`` pairs table, then backfill pairs for every
+  verification that is current today: a dependent stored ``VERIFIED`` on
+  its link status gets one pair per dependency target stored ``VERIFIED`` on
+  its own status, at that target's stored baseline (a module at the digest
+  of its members' baselines).  Nothing else is backfilled; those
+  verifications keep the clock rule until they are re-verified.  It also
+  clears every per-file last-hashed fingerprint, so the next staleness pass
+  re-hashes each recorded file once and stores real live hashes.
 
 Preservation contract (ADR-021 migration amendment): migration steps never
 modify ``node_history``, ``node_verification``, or ``node_renames``.
@@ -43,7 +63,16 @@ pointing at the right rows.  The v1 step performs one **read-only** query
 against ``node_history`` (preserved DELETED tombstone check) to avoid
 resurrecting purged sections; it writes nothing there.  The v2 step reads
 ``docs`` and ``nodes`` and writes only ``tags``, so it disturbs neither
-staleness nor verification state.
+staleness nor verification state.  The v3 step writes only
+``nodes.file_mtime`` (to NULL), which the mtime fast-pass reads as "never
+scanned"; the rescan it forces is the build's normal path.  The v4 step
+creates the ``annotation_findings`` table and writes only
+``nodes.file_mtime`` (to NULL), the v3 shape widened to every code file; it
+touches no history, verification or rename row.  The v5 step adds two ``nodes`` columns,
+creates the pairs table and writes only pair rows and (to NULL) the
+per-file ``file_state.hashed_fp``; it reads
+``node_verification`` (to find the verified dependents) and modifies no
+history, verification or rename row.
 """
 
 from __future__ import annotations
@@ -54,14 +83,14 @@ import sqlite3
 from pathlib import Path
 from typing import Callable
 
-from axiom_graph.db._core import vacuum_into
+from axiom_graph.db._core import _ANNOTATION_FINDINGS_DDL, _VERIFICATION_TARGETS_DDL, vacuum_into
 
 logger = logging.getLogger(__name__)
 
 
 #: Schema version written by the current package.  Bump when registering a
 #: new migration step.
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 5
 
 
 class SchemaVersionError(RuntimeError):
@@ -345,10 +374,229 @@ def _migrate_v2_resync_doc_envelope_tags(conn: sqlite3.Connection) -> None:
         logger.info("migration v2: re-synced tag rows for %s", doc_id)
 
 
+# ---------------------------------------------------------------------------
+# Migration step v3 — force a rescan of Python test files
+# ---------------------------------------------------------------------------
+
+
+def _is_python_test_location(location: str) -> bool:
+    """Return True when *location* is a Python test module path (``test_*.py`` / ``*_test.py``)."""
+    basename = location.replace("\\", "/").rsplit("/", 1)[-1]
+    return basename.endswith(".py") and (basename.startswith("test_") or basename.endswith("_test.py"))
+
+
+def _migrate_v3_rescan_python_test_files(conn: sqlite3.Connection) -> None:
+    """Clear ``file_mtime`` on every node of a Python test file so the next build rescans it.
+
+    Earlier scanners tagged every def in a test file as a test and gave each
+    one its own ``validates`` edges, helpers, fixtures and nested defs
+    included.  The current scanner gives them only to the tests pytest
+    collects (folding helper and fixture calls into the tests that reach
+    them), and the builder reconciles ``validates`` edges against each file
+    it walks.  The mtime fast-pass would keep skipping unchanged test files,
+    so the old edges would never be retired; a NULL mtime makes the build
+    treat the file as never scanned.
+
+    Idempotent: a second run finds no stamped test-file mtime left (or,
+    after a build, re-stamped ones from a scan that already emitted the new
+    edges), and the rescan it forces changes nothing.
+
+    Never writes ``node_history`` / ``node_verification`` / ``node_renames``.
+
+    Args:
+        conn: Open connection inside the runner's migration transaction.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT location FROM nodes WHERE location LIKE '%.py' AND file_mtime IS NOT NULL"
+    ).fetchall()
+    locations = [r[0] for r in rows if r[0] and _is_python_test_location(r[0])]
+    for location in locations:
+        conn.execute("UPDATE nodes SET file_mtime = NULL WHERE location = ?", (location,))
+    if locations:
+        logger.info("migration v3: cleared file_mtime on %d Python test file(s) to force a rescan", len(locations))
+
+
+# ---------------------------------------------------------------------------
+# Migration step v4 — annotation findings store + one full code rescan
+# ---------------------------------------------------------------------------
+
+#: File suffixes whose nodes the v4 step makes the next build rescan: every
+#: file the Python and JS/TS scanners read.
+_V4_RESCAN_SUFFIXES: tuple[str, ...] = (".py", ".js", ".jsx", ".ts", ".tsx")
+
+
+def _migrate_v4_annotation_findings_store(conn: sqlite3.Connection) -> None:
+    """Create the annotation findings store and clear ``file_mtime`` on every code file.
+
+    The build now stores each scanned file's raw annotation findings and
+    AutoStep records, and ``check`` reads them for every file whose mtime
+    still matches the index.  An upgraded index has no stored rows, so every
+    Python and JS/TS file must be scanned once to fill the store: a NULL
+    mtime makes the build treat the file as never scanned (the v3
+    precedent, widened from test files to all code files).
+
+    The table is created with ``IF NOT EXISTS``, because ``init_db`` has
+    already created it on an existing DB before the runner fires.
+    Idempotent: a second run finds the table present and clears mtimes the
+    rescan then re-stamps.
+
+    Never writes ``node_history`` / ``node_verification`` / ``node_renames``.
+
+    Args:
+        conn: Open connection inside the runner's migration transaction.
+    """
+    for statement in _ANNOTATION_FINDINGS_DDL:
+        conn.execute(statement)
+    clauses = " OR ".join("location LIKE ?" for _ in _V4_RESCAN_SUFFIXES)
+    cleared = conn.execute(
+        f"UPDATE nodes SET file_mtime = NULL WHERE file_mtime IS NOT NULL AND ({clauses})",
+        tuple(f"%{suffix}" for suffix in _V4_RESCAN_SUFFIXES),
+    ).rowcount
+    if cleared:
+        logger.info("migration v4: cleared file_mtime on %d code node row(s) to force a rescan", cleared)
+
+
+# ---------------------------------------------------------------------------
+# Migration step v5 — verification pairs + live hashes, with a backfill
+# ---------------------------------------------------------------------------
+
+
+def _backfill_verification_pairs(conn: sqlite3.Connection) -> int:
+    """Record pairs for the verifications that are current today, at their stored baselines.
+
+    Conservative: a pair is written only where the clock rule already
+    settles the link today, so the pair agrees with the verdict the dependent
+    has now.  The dependent's stored ``link_status`` must be ``VERIFIED``,
+    the target's stored ``own_status`` must be ``VERIFIED`` (its baseline is
+    then its live hash), and the target's latest change that still counts --
+    code or docstring, and for a digest target any of its members' -- must be
+    no newer than the dependent's ``verified_at``.  A stored ``VERIFIED``
+    that no check refreshed since a later change (a frozen-doc section, or a
+    row an older check left behind) therefore gets no pair for that target,
+    and stays on the clock rule: an unfreeze or the next check reads what the
+    clock rule gives.  A module target pairs by the digest of its members'
+    baselines, under the same membership rule the staleness engine uses
+    (step views and NOT_FOUND members left out).  A LINKED_STALE dependent,
+    a dependent with no ``verified_at`` and an own-stale target get none, so
+    the backfill can only add future flags, never clear a current one.
+
+    Args:
+        conn: Open connection inside the runner's migration transaction.
+
+    Returns:
+        Number of pairs written.
+    """
+    from axiom_graph.db.history import effective_change_rows_conn  # noqa: PLC0415
+    from axiom_graph.index.dependency_set import (  # noqa: PLC0415
+        dependency_set,
+        digest_members,
+        is_digest_target,
+        live_value,
+        load_dependency_graph,
+        pair_hashes,
+    )
+
+    graph = load_dependency_graph(conn)
+    own: dict[str, str] = {}
+    baseline: dict[str, tuple[str | None, str | None]] = {}
+    for r in conn.execute("SELECT id, own_status, code_hash, desc_hash FROM nodes"):
+        own[r["id"]] = r["own_status"]
+        if r["code_hash"]:
+            baseline[r["id"]] = (r["code_hash"], r["desc_hash"])
+    dependents = [
+        (r["node_id"], r["verified_at"])
+        for r in conn.execute(
+            "SELECT v.node_id, v.verified_at FROM node_verification v JOIN nodes n ON n.id = v.node_id "
+            "WHERE n.link_status = 'VERIFIED' ORDER BY v.node_id"
+        )
+    ]
+    changes = effective_change_rows_conn(conn, None, include_desc=True)
+
+    def _missing(nid: str) -> bool:
+        return own.get(nid) == "NOT_FOUND"
+
+    latest_cache: dict[str, str | None] = {}
+
+    def _latest_change(target: str) -> str | None:
+        """Return the newest change time that still counts for *target* (and a digest target's members)."""
+        if target not in latest_cache:
+            ids = [target]
+            kind = graph.kinds.get(target)
+            if kind is not None and is_digest_target(kind.node_type, kind.subtype):
+                ids.extend(digest_members(graph, target))
+            times = [changes[nid][1] for nid in ids if nid in changes and changes[nid][1]]
+            latest_cache[target] = max(times) if times else None
+        return latest_cache[target]
+
+    live_cache: dict[str, tuple[str | None, str | None] | None] = {}
+    rows: list[tuple[str, str, str | None, str | None]] = []
+    for dep, verified_at in dependents:
+        if not verified_at:
+            continue
+        for target, kinds in dependency_set(graph, dep).items():
+            if own.get(target) != "VERIFIED":
+                continue
+            changed_at = _latest_change(target)
+            if changed_at and changed_at > verified_at:
+                continue
+            if target not in live_cache:
+                live_cache[target] = live_value(graph, target, baseline.get, _missing)
+            live = live_cache[target]
+            if live is None:
+                continue
+            code, desc = pair_hashes(kinds, live)
+            rows.append((dep, target, code, desc))
+    if not rows:
+        return 0
+    return conn.executemany(
+        "INSERT OR IGNORE INTO node_verification_targets (node_id, target_id, code_hash, desc_hash) VALUES (?, ?, ?, ?)",
+        rows,
+    ).rowcount
+
+
+def _migrate_v5_verification_pairs(conn: sqlite3.Connection) -> None:
+    """Create the verification pairs table and the live-hash columns, then backfill pairs.
+
+    Adds ``nodes.live_code_hash`` / ``nodes.live_desc_hash`` (guarded --
+    idempotent under crash-retry, and a no-op on a DB ``init_db`` created at
+    v5), creates ``node_verification_targets`` with ``IF NOT EXISTS``
+    (``init_db`` has already created it on an existing DB), and runs
+    :func:`_backfill_verification_pairs`.  When it adds the live-hash
+    columns it also clears every ``file_state.hashed_fp``: the new columns
+    are empty, so no file's nodes carry the live hashes its record vouches
+    for, and the next staleness pass re-hashes each recorded file once (a
+    module or config anchor then stores its file's real fingerprint, as
+    ``check --full`` does).
+
+    Never writes ``node_history`` / ``node_verification`` / ``node_renames``.
+
+    Args:
+        conn: Open connection inside the runner's migration transaction.
+    """
+    added = False
+    for column in ("live_code_hash", "live_desc_hash"):
+        if not _column_exists(conn, "nodes", column):
+            conn.execute(f"ALTER TABLE nodes ADD COLUMN {column} TEXT")
+            added = True
+    if added and _table_exists(conn, "file_state"):
+        # The live hashes start empty, so no file's nodes hold the hashes of
+        # the bytes its record says were last re-hashed (a module's live hash
+        # would read its scan-time baseline).  A file with no last-hashed
+        # fingerprint is re-hashed by the next pass, once.
+        conn.execute("UPDATE file_state SET hashed_fp = NULL WHERE hashed_fp IS NOT NULL")
+    for statement in _VERIFICATION_TARGETS_DDL:
+        conn.execute(statement)
+    written = _backfill_verification_pairs(conn)
+    logger.info("migration v5: backfilled %d verification pair(s)", written)
+
+
 #: Ordered registry of migration steps, keyed by **target** version.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_v1_legacy_to_envelope,
     2: _migrate_v2_resync_doc_envelope_tags,
+    3: _migrate_v3_rescan_python_test_files,
+    4: _migrate_v4_annotation_findings_store,
+    5: _migrate_v5_verification_pairs,
 }
 
 
@@ -379,12 +627,12 @@ def run_migrations(db_path: Path) -> list[int]:
     if not db_path.exists():
         return []
 
-    # Peek at the version with a short-lived read connection.
-    peek = sqlite3.connect(db_path, timeout=5)
-    try:
+    # Peek at the version on the operation's connection (a short-lived read
+    # connection outside one).
+    from axiom_graph.db._core import _connect  # noqa: PLC0415
+
+    with _connect(db_path) as peek:
         version = get_user_version(peek)
-    finally:
-        peek.close()
 
     if version > CURRENT_SCHEMA_VERSION:
         raise SchemaVersionError(

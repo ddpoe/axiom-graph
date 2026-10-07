@@ -1,0 +1,53 @@
+{
+  "title": "Template: PEV Audit (annotations)",
+  "tags": [],
+  "meta": {
+    "template_version": "1.0.0"
+  },
+  "sections": [
+    {
+      "id": "meta",
+      "heading": "Meta",
+      "content": "status: active\naudit-type: annotations\nstarted-at: {ISO timestamp}\ndispatcher: pev-audit-annotations\nrequest-link: {audit-request-doc-id or null}\nscope-hints: {hints or \"full-tree\"}"
+    },
+    {
+      "id": "request",
+      "heading": "Request",
+      "content": "(pointer to, or copy of, the audit-request doc)"
+    },
+    {
+      "id": "orchestrator",
+      "heading": "Orchestrator",
+      "content": "**Filled by:** the `/pev-audit-annotations` orchestrator.",
+      "sections": [
+        {
+          "id": "discovery",
+          "heading": "Discovery",
+          "content": "(placeholder — the finding set across the three categories)"
+        },
+        {
+          "id": "handoff",
+          "heading": "Handoff",
+          "content": "(placeholder)",
+          "sections": [
+            {
+              "id": "recommended-requests",
+              "heading": "Recommended Requests",
+              "content": "(empty list — one bullet per spawned request doc id)"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "code-edits-applied",
+      "heading": "Code Edits Applied",
+      "content": "(empty — inline mechanical edits applied after the batch gate)"
+    },
+    {
+      "id": "friction",
+      "heading": "Friction",
+      "content": "(empty — friction observations; empty is fine)"
+    }
+  ]
+}

@@ -23,8 +23,10 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from axiom_annotations import Step, task
 
@@ -37,13 +39,46 @@ from axiom_graph.db._core import (
     _row_to_node,
 )
 from axiom_graph.db.edges import _migrate_edges
+from axiom_graph.db.nodes import rekey_verification_targets_conn
+
+if TYPE_CHECKING:
+    from axiom_graph.index.link_maintenance import LinkPatchResult
 
 logger = logging.getLogger(__name__)
+
+
+#: Separator between a DocJSON document's ID and a section's dot-path.  The
+#: default everywhere in this module: DocJSON is the only class with a
+#: ``docs`` table row, so it is the only class most of these helpers ever see.
+DOCJSON_SECTION_SEP = "::"
 
 
 # ---------------------------------------------------------------------------
 # Doc ID + file_path helpers
 # ---------------------------------------------------------------------------
+
+
+def all_doc_ids(db_path: Path) -> list[str]:
+    """Return every document envelope ID in the index, both document classes.
+
+    DocJSON documents carry a ``docs`` metadata row; Markdown documents do
+    not -- they exist only as ``nodes`` rows -- so a query over ``docs``
+    alone would report a Markdown-only project as having no doc identities
+    at all.  Section nodes are excluded: they are not envelopes.
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+
+    Returns:
+        Document envelope IDs, sorted.
+    """
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id FROM docs "
+            "UNION "
+            "SELECT id FROM nodes WHERE source = 'doc_scanner' AND node_type = 'composite_process'"
+        ).fetchall()
+    return sorted(r["id"] for r in rows)
 
 
 def get_doc_ids_by_filepath(db_path: Path, file_path: str) -> list[str]:
@@ -67,6 +102,7 @@ def delete_doc_by_id(
     conn: sqlite3.Connection,
     doc_id: str,
     reason_meta: dict | None = None,
+    section_sep: str = DOCJSON_SECTION_SEP,
 ) -> None:
     """Delete a doc and all related rows (sections, nodes, edges, tags, FTS, history).
 
@@ -83,8 +119,12 @@ def delete_doc_by_id(
         conn: Open SQLite connection (caller manages the transaction).
         doc_id: The full doc node ID to delete.
         reason_meta: Optional dict merged into the DELETED history row's meta
-            (e.g. ``{"actor": "agent:pev-auditor", "reason": "..."}``).
+            (e.g. ``{"actor": "agent", "reason": "..."}``).
             Defaults to ``{"actor": "system"}`` when not provided.
+        section_sep: How this document's class attaches its sections --
+            ``::`` for DocJSON dot-paths, ``#`` for Markdown H2 slugs.  With
+            the wrong separator the envelope is retired and its sections are
+            left behind pointing at an identity that no longer exists.
     """
     口 = Step(
         step_num=1,
@@ -94,7 +134,7 @@ def delete_doc_by_id(
     # Collect all node rows for this doc (parent + sections)
     nodes = conn.execute(
         "SELECT id, node_type, subtype, title, location FROM nodes WHERE id = ? OR id LIKE ?",
-        (doc_id, doc_id + "::%"),
+        (doc_id, doc_id + section_sep + "%"),
     ).fetchall()
 
     if nodes:
@@ -192,7 +232,11 @@ def delete_doc_by_id(
 # ---------------------------------------------------------------------------
 
 
-def _doc_section_suffixes(conn: sqlite3.Connection, old_id: str) -> list[str]:
+def _doc_section_suffixes(
+    conn: sqlite3.Connection,
+    old_id: str,
+    section_sep: str = DOCJSON_SECTION_SEP,
+) -> list[str]:
     """Return every section suffix currently attached to *old_id*.
 
     A section's identity can survive in more tables than one: an unverified
@@ -204,11 +248,13 @@ def _doc_section_suffixes(conn: sqlite3.Connection, old_id: str) -> list[str]:
     Args:
         conn: Open SQLite connection.
         old_id: The document envelope ID being renamed from.
+        section_sep: How this document's class attaches its sections --
+            ``::`` for DocJSON dot-paths, ``#`` for Markdown H2 slugs.
 
     Returns:
-        Section suffixes (the part after ``{old_id}::``), sorted.
+        Section suffixes (the part after ``{old_id}{section_sep}``), sorted.
     """
-    prefix = old_id + "::"
+    prefix = old_id + section_sep
     like = prefix + "%"
     suffixes: set[str] = set()
     queries = (
@@ -236,6 +282,7 @@ def record_doc_rename_conn(
     old_id: str,
     new_id: str,
     file_path: str,
+    section_sep: str = DOCJSON_SECTION_SEP,
 ) -> None:
     """Migrate one document's identity on an already-open connection.
 
@@ -255,6 +302,10 @@ def record_doc_rename_conn(
         old_id: The old doc node ID being renamed from.
         new_id: The new doc node ID being renamed to.
         file_path: File path recorded in the ``node_renames`` ledger.
+        section_sep: How this document's class attaches its sections --
+            ``::`` for DocJSON dot-paths, ``#`` for Markdown H2 slugs.  A
+            Markdown document whose sections were enumerated with ``::``
+            would migrate its envelope and strand every section it owns.
     """
     now = _now_utc()
     口 = Step(
@@ -272,15 +323,16 @@ def record_doc_rename_conn(
         (new_id, old_id),
     )
     _migrate_edges(conn, old_id, new_id)
+    rekey_verification_targets_conn(conn, old_id, new_id)
 
     口 = Step(
         step_num=2,
         name="Migrate every section identity",
         purpose="Move each section's ledger entry, history, verification, and edges to the new envelope",
     )
-    for suffix in _doc_section_suffixes(conn, old_id):
-        old_sec_id = old_id + "::" + suffix
-        new_sec_id = new_id + "::" + suffix
+    for suffix in _doc_section_suffixes(conn, old_id, section_sep):
+        old_sec_id = old_id + section_sep + suffix
+        new_sec_id = new_id + section_sep + suffix
         口 = Step(
             step_num=2.1,
             name="Migrate one section",
@@ -296,6 +348,7 @@ def record_doc_rename_conn(
             (new_sec_id, old_sec_id),
         )
         _migrate_edges(conn, old_sec_id, new_sec_id)
+        rekey_verification_targets_conn(conn, old_sec_id, new_sec_id)
 
 
 @dataclass(frozen=True)
@@ -317,7 +370,7 @@ class RekeyCounts:
 
 
 @task(
-    purpose="Materialise a document's node, doc, tag, and FTS rows under a new id so the new identity exists before dependent rows move onto it",
+    purpose="Materialise a document's node, doc, tag, and FTS rows under a new id so the new identity exists before dependent rows move onto it, and point verification pairs that target the document or its sections at the new ids",
     inputs="open connection, old_id, new_id, optional new file_path",
     outputs="RekeyCounts — whether the envelope row was cloned, and how many section rows were",
 )
@@ -326,6 +379,7 @@ def rekey_doc_identity(
     old_id: str,
     new_id: str,
     new_file_path: str | None = None,
+    section_sep: str = DOCJSON_SECTION_SEP,
 ) -> RekeyCounts:
     """Clone a document's identity rows onto *new_id*, leaving the old ones.
 
@@ -335,23 +389,37 @@ def rekey_doc_identity(
     and every other dependent row -- survive the move.  The old rows are
     left in place for the caller to retire.
 
+    Verification pairs whose target is the document or one of its sections
+    are pointed at the new ids, hashes unchanged, so a verification checked
+    against the document still matches it under its new identity.
+
+    Works for a document with **no ``docs`` table row**.  Markdown documents
+    are ``nodes`` rows and nothing else -- only DocJSON gets a ``docs``
+    record -- so the metadata clone is conditional rather than assumed.
+
     Args:
         conn: Open SQLite connection (caller owns the transaction).
         old_id: The document envelope ID being renamed from.
         new_id: The document envelope ID being renamed to.
         new_file_path: File path for the new ``docs`` row.  Defaults to the
             old row's path -- a doc-ID migration moves the identity, not the
-            file.
+            file.  Ignored when the document has no ``docs`` row.
+        section_sep: How this document's class attaches its sections --
+            ``::`` for DocJSON dot-paths, ``#`` for Markdown H2 slugs.
 
     Returns:
         A :class:`RekeyCounts` describing what was actually cloned.
     """
     pairs = [(old_id, new_id, False)]
-    pairs.extend((old_id + "::" + s, new_id + "::" + s, True) for s in _doc_section_suffixes(conn, old_id))
+    pairs.extend(
+        (old_id + section_sep + s, new_id + section_sep + s, True)
+        for s in _doc_section_suffixes(conn, old_id, section_sep)
+    )
 
     envelope_cloned = False
     sections_cloned = 0
     for old_node_id, new_node_id, is_section in pairs:
+        rekey_verification_targets_conn(conn, old_node_id, new_node_id)
         row = conn.execute("SELECT * FROM nodes WHERE id = ?", (old_node_id,)).fetchone()
         if row is None:
             continue
@@ -401,7 +469,7 @@ def record_doc_rename(
     new_id: str,
     file_path: str,
     project_root: Path | None = None,
-) -> None:
+) -> LinkPatchResult | None:
     """Record a doc ID rename and migrate history/verification/edges to the new ID.
 
     Call this BEFORE deleting the old doc rows so history can be migrated.
@@ -414,21 +482,27 @@ def record_doc_rename(
         project_root: If provided, DocJSON files on disk will be patched
             to update link references from old_id to new_id, including
             references to its sections.
+
+    Returns:
+        The link patch's :class:`~axiom_graph.index.link_maintenance.LinkPatchResult`
+        (``not_patched`` files still link *old_id*; ``unreadable`` ones were not checked), or ``None`` when no
+        *project_root* was given.
     """
     with _connect(db_path) as conn:
         record_doc_rename_conn(conn, old_id, new_id, file_path)
 
     # Patch DocJSON files on disk if project_root is provided
-    if project_root is not None:
-        from axiom_graph.index.link_maintenance import patch_doc_links  # noqa: PLC0415
+    if project_root is None:
+        return None
+    from axiom_graph.index.link_maintenance import patch_doc_links_batch  # noqa: PLC0415
 
-        patch_doc_links(project_root, db_path, old_id, new_id)
+    return patch_doc_links_batch(project_root, {old_id: new_id})
 
 
 @task(
-    purpose="Record a code node rename: insert into node_renames table, migrate history rows and verification snapshot from old node ID to new node ID",
+    purpose="Record a code node rename: insert into node_renames table, migrate history rows and verification snapshot from old node ID to new node ID, and point verification pairs recorded against the old ID at the new one with their hashes unchanged",
     inputs="db_path, old_id, new_id, file_path",
-    outputs="None (side effect: node_renames row inserted, node_history and node_verification rows migrated)",
+    outputs="LinkPatchResult of the on-disk link patch, or None without project_root (side effect: node_renames row inserted, node_history, node_verification and node_verification_targets rows migrated)",
 )
 def record_code_rename(
     db_path: Path,
@@ -436,13 +510,19 @@ def record_code_rename(
     new_id: str,
     file_path: str,
     project_root: Path | None = None,
-) -> None:
+) -> LinkPatchResult | None:
     """Record a code node rename and migrate history/verification/edges to the new ID.
 
     Used by hash-similarity rename detection: when a function disappears from
     one module but an identical ``code_hash`` appears in another, this migrates
     the old node's history, verification, and edges to the new node ID and
     records the mapping in ``node_renames``.
+
+    Verification pairs that target the old id are pointed at the new one
+    with their recorded hashes unchanged.  A rename that keeps the code
+    hash (a move) therefore leaves its dependents matching; one that
+    changes it (a renamed function name is part of the hash) leaves them
+    mismatched, and they go LINKED_STALE.
 
     Args:
         db_path: Path to the axiom-graph SQLite database.
@@ -451,83 +531,132 @@ def record_code_rename(
         file_path: File path for the node_renames record.
         project_root: If provided, DocJSON files on disk will be patched
             to update link references from old_id to new_id.
+
+    Returns:
+        The link patch's :class:`~axiom_graph.index.link_maintenance.LinkPatchResult`
+        (``not_patched`` files still link *old_id*; ``unreadable`` ones were not checked), or ``None`` when no
+        *project_root* was given.
     """
     口 = Step(
         step_num=1,
         name="Migrate history, verification, and edges to new node ID",
-        purpose="Record rename, then UPDATE history/verification rows and edge references from old_id to new_id",
+        purpose="Record rename, then UPDATE history/verification rows, edge references and the verification pairs "
+        "that name it from old_id to new_id, for the function and its @workflow envelope and step rows, with "
+        "foreign keys checked at commit",
     )
-    now = _now_utc()
     with _connect(db_path) as conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO node_renames (old_id, new_id, renamed_at, file_path) VALUES (?, ?, ?, ?)",
-            (old_id, new_id, now, file_path),
-        )
-        # Migrate history rows
-        conn.execute(
-            "UPDATE node_history SET node_id = ? WHERE node_id = ?",
-            (new_id, old_id),
-        )
-        # Migrate verification (if any)
-        conn.execute(
-            "UPDATE OR IGNORE node_verification SET node_id = ? WHERE node_id = ?",
-            (new_id, old_id),
-        )
-        # Clean up the old verification row if the UPDATE created a conflict
-        conn.execute(
-            "DELETE FROM node_verification WHERE node_id = ?",
-            (old_id,),
-        )
-        # Migrate edges: update to_id and from_id references
-        _migrate_edges(conn, old_id, new_id)
-
-        # Cascade rename to the envelope + step children this function owns.
-        # Envelope ID: ``{func_id}@workflow``.  Step IDs: ``{func_id}::step-*``.
-        # We also update the envelope/step nodes' code_hash/subtype-neutral
-        # metadata via a straight UPDATE: the IDs change, everything else
-        # stays referentially intact.
-        old_env = f"{old_id}@workflow"
-        new_env = f"{new_id}@workflow"
-        env_exists = conn.execute("SELECT 1 FROM nodes WHERE id = ?", (old_env,)).fetchone()
-        if env_exists is not None:
-            conn.execute("UPDATE nodes SET id = ? WHERE id = ?", (new_env, old_env))
-            conn.execute(
-                "INSERT OR IGNORE INTO node_renames (old_id, new_id, renamed_at, file_path) VALUES (?, ?, ?, ?)",
-                (old_env, new_env, now, file_path),
-            )
-            conn.execute("UPDATE node_history SET node_id = ? WHERE node_id = ?", (new_env, old_env))
-            conn.execute(
-                "UPDATE OR IGNORE node_verification SET node_id = ? WHERE node_id = ?",
-                (new_env, old_env),
-            )
-            conn.execute("DELETE FROM node_verification WHERE node_id = ?", (old_env,))
-            _migrate_edges(conn, old_env, new_env)
-
-        step_rows = conn.execute(
-            "SELECT id FROM nodes WHERE id LIKE ?",
-            (f"{old_id}::step-%",),
-        ).fetchall()
-        for srow in step_rows:
-            old_step = srow["id"]
-            new_step = new_id + old_step[len(old_id) :]
-            conn.execute("UPDATE nodes SET id = ? WHERE id = ?", (new_step, old_step))
-            conn.execute(
-                "INSERT OR IGNORE INTO node_renames (old_id, new_id, renamed_at, file_path) VALUES (?, ?, ?, ?)",
-                (old_step, new_step, now, file_path),
-            )
-            conn.execute("UPDATE node_history SET node_id = ? WHERE node_id = ?", (new_step, old_step))
-            _migrate_edges(conn, old_step, new_step)
+        record_code_rename_conn(conn, old_id, new_id, file_path)
 
     口 = Step(
         step_num=2,
         name="Patch DocJSON link references on disk",
-        purpose="Walk DocJSON files and replace old_id with new_id in links arrays",
+        purpose="Walk DocJSON files and replace old_id with new_id in links arrays and in each section stamp's "
+        "verified_against entries, hashes unchanged",
     )
     # Patch DocJSON files on disk if project_root is provided
-    if project_root is not None:
-        from axiom_graph.index.link_maintenance import patch_doc_links  # noqa: PLC0415
+    if project_root is None:
+        return None
+    from axiom_graph.index.link_maintenance import patch_doc_links_batch  # noqa: PLC0415
 
-        patch_doc_links(project_root, db_path, old_id, new_id)
+    return patch_doc_links_batch(project_root, {old_id: new_id})
+
+
+def record_code_rename_conn(conn: sqlite3.Connection, old_id: str, new_id: str, file_path: str) -> None:
+    """Record a code node rename on an open connection: the index half of :func:`record_code_rename`.
+
+    Inserts the ``node_renames`` rows and moves history, verification, edges
+    and verification pairs from *old_id* to *new_id*, for the function, its
+    ``@workflow`` envelope and its step rows.  Foreign keys are checked when
+    the caller's transaction commits.  Patches no file on disk.
+
+    Args:
+        conn: Open connection; the caller owns the transaction.
+        old_id: The old node ID being renamed from.
+        new_id: The new node ID being renamed to.
+        file_path: File path for the node_renames record.
+    """
+    now = _now_utc()
+    conn.execute(
+        "INSERT OR IGNORE INTO node_renames (old_id, new_id, renamed_at, file_path) VALUES (?, ?, ?, ?)",
+        (old_id, new_id, now, file_path),
+    )
+    # The envelope and step rows below change id while a verification row
+    # still references the old one; the verification moves right after.
+    # Check the foreign keys at commit, when every reference is in place.
+    # Set inside the transaction the insert above opened: the pragma is
+    # cleared at every commit, including an autocommit.
+    conn.execute("PRAGMA defer_foreign_keys = ON")
+    # Migrate history rows
+    conn.execute(
+        "UPDATE node_history SET node_id = ? WHERE node_id = ?",
+        (new_id, old_id),
+    )
+    # Migrate verification (if any)
+    conn.execute(
+        "UPDATE OR IGNORE node_verification SET node_id = ? WHERE node_id = ?",
+        (new_id, old_id),
+    )
+    # Clean up the old verification row if the UPDATE created a conflict
+    conn.execute(
+        "DELETE FROM node_verification WHERE node_id = ?",
+        (old_id,),
+    )
+    # Migrate edges: update to_id and from_id references
+    _migrate_edges(conn, old_id, new_id)
+    rekey_verification_targets_conn(conn, old_id, new_id)
+
+    # Cascade rename to the envelope + step children this function owns.
+    # Envelope ID: ``{func_id}@workflow``.  Step IDs: ``{func_id}::step-*``.
+    # We also update the envelope/step nodes' code_hash/subtype-neutral
+    # metadata via a straight UPDATE: the IDs change, everything else
+    # stays referentially intact.
+    old_env = f"{old_id}@workflow"
+    new_env = f"{new_id}@workflow"
+    env_exists = conn.execute("SELECT 1 FROM nodes WHERE id = ?", (old_env,)).fetchone()
+    if env_exists is not None:
+        # A rename welded after the scan indexed the new envelope (an
+        # applied rename) keeps that row and moves the old one's
+        # history, verification and edges onto it, as for the function.
+        if conn.execute("SELECT 1 FROM nodes WHERE id = ?", (new_env,)).fetchone() is None:
+            conn.execute("UPDATE nodes SET id = ? WHERE id = ?", (new_env, old_env))
+        conn.execute(
+            "INSERT OR IGNORE INTO node_renames (old_id, new_id, renamed_at, file_path) VALUES (?, ?, ?, ?)",
+            (old_env, new_env, now, file_path),
+        )
+        conn.execute("UPDATE node_history SET node_id = ? WHERE node_id = ?", (new_env, old_env))
+        conn.execute(
+            "UPDATE OR IGNORE node_verification SET node_id = ? WHERE node_id = ?",
+            (new_env, old_env),
+        )
+        conn.execute("DELETE FROM node_verification WHERE node_id = ?", (old_env,))
+        _migrate_edges(conn, old_env, new_env)
+        rekey_verification_targets_conn(conn, old_env, new_env)
+
+    # A primary-key range over the ``{old_id}::step-`` prefix: exact and
+    # case-sensitive, where a LIKE pattern would read ``_`` in the id as a
+    # wildcard and re-key a sibling's steps (``do_it`` matching ``doxit``).
+    step_prefix = f"{old_id}::step-"
+    step_rows = conn.execute(
+        "SELECT id FROM nodes WHERE id >= ? AND id < ?",
+        (step_prefix, step_prefix[:-1] + chr(ord(step_prefix[-1]) + 1)),
+    ).fetchall()
+    for srow in step_rows:
+        old_step = srow["id"]
+        new_step = new_id + old_step[len(old_id) :]
+        if conn.execute("SELECT 1 FROM nodes WHERE id = ?", (new_step,)).fetchone() is None:
+            conn.execute("UPDATE nodes SET id = ? WHERE id = ?", (new_step, old_step))
+        conn.execute(
+            "INSERT OR IGNORE INTO node_renames (old_id, new_id, renamed_at, file_path) VALUES (?, ?, ?, ?)",
+            (old_step, new_step, now, file_path),
+        )
+        conn.execute("UPDATE node_history SET node_id = ? WHERE node_id = ?", (new_step, old_step))
+        conn.execute(
+            "UPDATE OR IGNORE node_verification SET node_id = ? WHERE node_id = ?",
+            (new_step, old_step),
+        )
+        conn.execute("DELETE FROM node_verification WHERE node_id = ?", (old_step,))
+        _migrate_edges(conn, old_step, new_step)
+        rekey_verification_targets_conn(conn, old_step, new_step)
 
 
 # ---------------------------------------------------------------------------
@@ -574,9 +703,10 @@ _SECTION_FILTER_SQL = _section_filter_sql()
 def split_section_id(section_id: str) -> tuple[str, str]:
     """Split a full section ID into ``(doc_id, dot_path)``.
 
-    Section IDs are ``{doc_id}::{dot_path}`` where ``doc_id`` itself
-    contains exactly one ``::`` (``proj::docs.x``) and the dot-path never
-    does — so the split is the last ``::``.
+    Section IDs are ``{doc_id}::{dot_path}``.  A document ID carries exactly
+    one ``::`` however deep the document sits — the docs-root prefix and the
+    path separators inside it introduce none — and a section dot-path never
+    carries one, so the split is the last ``::``.
     """
     doc_id, _, dot_path = section_id.rpartition("::")
     return doc_id, dot_path
@@ -717,11 +847,13 @@ def get_long_sections(db_path: Path, threshold: int = DOC_SECTION_LONG_THRESHOLD
     filters on, so ``check`` and ``drift_query`` agree by construction.
     """
     with _connect(db_path) as conn:
+        # The unary ``+`` keeps the section filter off the indexes: one pass
+        # reading LENGTH(level_2) beats an index lookup per section row.
         rows = conn.execute(
             f"""
             SELECT id, level_1 AS heading, LENGTH(level_2) AS chars
             FROM nodes
-            WHERE {_SECTION_FILTER_SQL}
+            WHERE {_section_filter_sql("+")}
               AND LENGTH(level_2) > ?
             ORDER BY LENGTH(level_2) DESC
             """,
@@ -781,7 +913,38 @@ def query_doc_sections_by_tags(
 # ---------------------------------------------------------------------------
 
 
-def get_tagged_doc_doc_edges(db_path: Path, tags: list[str]) -> list[dict]:
+def get_tagged_doc_doc_edges(
+    db_path: Path,
+    tags: list[str],
+    source_ids: Collection[str] | None = None,
+    target_ids: Collection[str] | None = None,
+) -> list[dict]:
+    """Return doc-to-doc ``documents`` edges where the source doc has a matching tag.
+
+    Opens a connection for :func:`get_tagged_doc_doc_edges_conn`.
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+        tags: List of tag strings to match against ``docs.tags`` JSON array.
+        source_ids: Only edges from these sections (``None``: every source).
+        target_ids: Only edges into these sections (``None``: every target).
+
+    Returns:
+        List of dicts with ``source_section_id`` and ``target_section_id``,
+        sorted by source, then target.
+    """
+    if not tags:
+        return []
+    with _connect(db_path) as conn:
+        return get_tagged_doc_doc_edges_conn(conn, tags, source_ids, target_ids)
+
+
+def get_tagged_doc_doc_edges_conn(
+    conn: sqlite3.Connection,
+    tags: list[str],
+    source_ids: Collection[str] | None = None,
+    target_ids: Collection[str] | None = None,
+) -> list[dict]:
     """Return doc-to-doc ``documents`` edges where the source doc has a matching tag.
 
     Used by the transitive LINKED_STALE propagation pass.  Only returns
@@ -793,18 +956,19 @@ def get_tagged_doc_doc_edges(db_path: Path, tags: list[str]) -> list[dict]:
     doc must carry at least one tag from *tags*.
 
     Args:
-        db_path: Path to the axiom-graph DB.
+        conn: Open connection.
         tags: List of tag strings to match against ``docs.tags`` JSON array.
+        source_ids: Only edges from these sections (``None``: every source).
+        target_ids: Only edges into these sections (``None``: every target).
 
     Returns:
-        List of dicts with ``source_section_id`` and ``target_section_id``.
+        List of dicts with ``source_section_id`` and ``target_section_id``,
+        sorted by source, then target.
     """
     if not tags:
         return []
 
-    with _connect(db_path) as conn:
-        rows = conn.execute(
-            f"""
+    sql = f"""
             SELECT
                 e.from_id AS source_section_id,
                 e.to_id   AS target_section_id
@@ -813,8 +977,19 @@ def get_tagged_doc_doc_edges(db_path: Path, tags: list[str]) -> list[dict]:
             JOIN nodes s_tgt ON s_tgt.id = e.to_id AND {_section_filter_sql("s_tgt.")}
             WHERE e.edge_type = 'documents'
             """
-        ).fetchall()
-        doc_tag_rows = conn.execute("SELECT id, tags FROM docs WHERE tags IS NOT NULL").fetchall()
+    if source_ids is None and target_ids is None:
+        rows = conn.execute(sql).fetchall()
+    else:
+        column, ids = ("e.from_id", source_ids) if source_ids is not None else ("e.to_id", target_ids)
+        wanted = sorted(set(ids or ()))
+        rows = []
+        for start in range(0, len(wanted), 500):
+            chunk = wanted[start : start + 500]
+            rows.extend(conn.execute(f"{sql} AND {column} IN ({','.join('?' * len(chunk))})", chunk).fetchall())
+        if source_ids is not None and target_ids is not None:
+            keep = set(target_ids)
+            rows = [r for r in rows if r["target_section_id"] in keep]
+    doc_tag_rows = conn.execute("SELECT id, tags FROM docs WHERE tags IS NOT NULL").fetchall()
 
     # Filter in Python: docs.tags is a JSON array string; check overlap with
     # the requested tags set.  The tag check is at the document level — the
@@ -840,6 +1015,7 @@ def get_tagged_doc_doc_edges(db_path: Path, tags: list[str]) -> list[dict]:
                     "target_section_id": r["target_section_id"],
                 }
             )
+    result.sort(key=lambda d: (d["source_section_id"], d["target_section_id"]))
     return result
 
 
@@ -901,6 +1077,10 @@ def get_section_doc_id_map(db_path: Path, doc_ids: set[str] | None = None) -> di
     if doc_ids is not None and not doc_ids:
         return {}
 
+    if doc_ids is not None:
+        with _connect(db_path) as conn:
+            return {sid: split_section_id(sid)[0] for sid in get_section_statuses_under_docs_conn(conn, doc_ids)}
+
     with _connect(db_path) as conn:
         rows = conn.execute(f"SELECT id FROM nodes WHERE {_SECTION_FILTER_SQL}").fetchall()
 
@@ -935,11 +1115,193 @@ def get_all_doc_file_paths(db_path: Path) -> list[str]:
         return [r["file_path"] for r in rows]
 
 
-def get_all_node_locations(db_path: Path) -> list[str]:
-    """Return distinct ``location`` values from the nodes table."""
+def get_section_statuses_under_docs_conn(
+    conn: sqlite3.Connection, doc_ids: Collection[str]
+) -> dict[str, tuple[str, str]]:
+    """Return ``{section_id: (own_status, link_status)}`` for every section of *doc_ids*.
+
+    One query: a primary-key range per doc (its ``{doc_id}::`` prefix),
+    keeping the ids whose last ``::`` ends the doc id (the rule of
+    :func:`split_section_id`), so the cost grows with those docs' sections.
+
+    Args:
+        conn: Open connection.
+        doc_ids: The doc ids.
+
+    Returns:
+        The sections' stored statuses.
+    """
+    if not doc_ids:
+        return {}
+    rows = conn.execute(
+        "SELECT n.id, n.own_status, n.link_status FROM json_each(?) d "
+        "CROSS JOIN nodes n ON n.id >= d.value || '::' AND n.id < d.value || ':;' "
+        # The unary ``+`` keeps the section filter off the indexes, so each doc
+        # is one primary-key range rather than a pass over every section.
+        f"WHERE {_section_filter_sql('+n.')} AND instr(substr(n.id, length(d.value) + 3), '::') = 0",  # noqa: S608
+        (json.dumps(sorted(set(doc_ids))),),
+    )
+    return {r[0]: (r[1], r[2]) for r in rows}
+
+
+def get_own_drifted_sections_conn(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    """Return the DocJSON sections stored own-drifted, grouped by the file that holds them.
+
+    Own-drifted means ``own_status`` CONTENT_UPDATED or DESC_UPDATED: the
+    section's text differs from what its last verification saw.  One query,
+    driven by the ``(own_status, link_status)`` index, so the cost grows with
+    the outstanding own drift rather than with the index.
+
+    Args:
+        conn: Open connection.
+
+    Returns:
+        ``{location: [section_id, ...]}``, ids sorted within each file;
+        sections with no location are left out.
+    """
+    rows = conn.execute(
+        "SELECT id, location FROM nodes WHERE own_status IN ('CONTENT_UPDATED', 'DESC_UPDATED') "
+        f"AND {_section_filter_sql()} ORDER BY location, id"  # noqa: S608
+    )
+    out: dict[str, list[str]] = {}
+    for r in rows:
+        if r[1]:
+            out.setdefault(r[1], []).append(r[0])
+    return out
+
+
+def get_doc_rows_under_docs_conn(conn: sqlite3.Connection, doc_ids: Collection[str]) -> dict[str, tuple[str, str]]:
+    """Return ``{node_id: (own_status, link_status)}`` for every node of *doc_ids*: sections and envelopes.
+
+    The rows a frozen doc set withholds from the counts: each doc's sections
+    (:func:`get_section_statuses_under_docs_conn`) plus the doc's own node,
+    the envelope (id ``{doc_id}``), which carries the worst status of its
+    subtree.  One more primary-key lookup per doc.
+
+    Args:
+        conn: Open connection.
+        doc_ids: The doc ids.
+
+    Returns:
+        The stored statuses of the docs' sections and envelopes.
+    """
+    if not doc_ids:
+        return {}
+    out = get_section_statuses_under_docs_conn(conn, doc_ids)
+    rows = conn.execute(
+        "SELECT n.id, n.own_status, n.link_status FROM json_each(?) d CROSS JOIN nodes n ON n.id = d.value",
+        (json.dumps(sorted(set(doc_ids))),),
+    )
+    out.update({r[0]: (r[1], r[2]) for r in rows})
+    return out
+
+
+def get_frozen_rows(db_path: Path, frozen_tags: list[str] | None) -> dict[str, tuple[str, str]]:
+    """Return the stored statuses of every node of a doc carrying a frozen tag, envelopes included.
+
+    The one definition of "frozen rows" the counting surfaces share
+    (``check``, the build counts, ``drift_query``, reverify's counts).  The
+    staleness engine's own frozen set is sections only: it is not a counting
+    surface.
+
+    Args:
+        db_path: Path to the axiom-graph DB.
+        frozen_tags: ``config.staleness.frozen_tags``.
+
+    Returns:
+        ``{node_id: (own_status, link_status)}``; empty without frozen tags
+        or frozen docs (no connection is opened for empty tags).
+    """
+    doc_ids = get_doc_ids_with_tags(db_path, list(frozen_tags or []))
+    if not doc_ids:
+        return {}
     with _connect(db_path) as conn:
-        rows = conn.execute("SELECT DISTINCT location FROM nodes").fetchall()
-        return [r["location"] for r in rows]
+        return get_doc_rows_under_docs_conn(conn, doc_ids)
+
+
+def get_tags_bulk_conn(conn: sqlite3.Connection, node_ids: list[str]) -> dict[str, list[str]]:
+    """Return ``{node_id: [tag, ...]}`` for *node_ids*, read in batches of 500 ids, tags in row order.
+
+    Args:
+        conn: Open connection.
+        node_ids: The node ids.
+
+    Returns:
+        The tags of the nodes that have any.
+    """
+    out: dict[str, list[str]] = {}
+    for start in range(0, len(node_ids), 500):
+        chunk = node_ids[start : start + 500]
+        rows = conn.execute(
+            f"SELECT node_id, tag FROM tags WHERE node_id IN ({','.join('?' * len(chunk))})",  # noqa: S608
+            chunk,
+        ).fetchall()
+        for r in rows:
+            out.setdefault(r[0], []).append(r[1])
+    return out
+
+
+def locations_of_conn(conn: sqlite3.Connection, node_ids: Collection[str]) -> set[str]:
+    """Return the distinct ``nodes.location`` values of *node_ids*, read in batches.
+
+    Args:
+        conn: Open connection.
+        node_ids: The node ids; an id with no row contributes nothing.
+
+    Returns:
+        The locations.
+    """
+    ids = list(dict.fromkeys(node_ids))
+    out: set[str] = set()
+    for start in range(0, len(ids), 500):
+        chunk = ids[start : start + 500]
+        out.update(
+            r[0]
+            for r in conn.execute(
+                f"SELECT DISTINCT location FROM nodes WHERE id IN ({','.join('?' * len(chunk))})",  # noqa: S608
+                chunk,
+            )
+        )
+    return out
+
+
+def distinct_locations_conn(conn: sqlite3.Connection, *, tracked_only: bool = False) -> list[str]:
+    """Return the distinct ``nodes.location`` values in ascending order, one index step per file.
+
+    A loose scan of ``idx_nodes_location``: each step seeks the smallest
+    location past the previous one, so the cost grows with the number of
+    files, not with the nodes they hold.
+
+    Args:
+        conn: Open connection.
+        tracked_only: Only the files the discovery walk tracks: a non-empty
+            location holding a node that is neither an ``entity`` nor an
+            ``external_package``.
+
+    Returns:
+        The locations.
+    """
+    if not tracked_only:
+        sql = (
+            "WITH RECURSIVE locs(loc) AS (SELECT MIN(location) FROM nodes "
+            "UNION ALL SELECT (SELECT MIN(location) FROM nodes WHERE location > locs.loc) FROM locs "
+            "WHERE locs.loc IS NOT NULL) SELECT loc FROM locs WHERE loc IS NOT NULL"
+        )
+    else:
+        sql = (
+            "WITH RECURSIVE locs(loc) AS (SELECT MIN(location) FROM nodes WHERE location > '' "
+            "UNION ALL SELECT (SELECT MIN(location) FROM nodes WHERE location > locs.loc) FROM locs "
+            "WHERE locs.loc IS NOT NULL) SELECT loc FROM locs WHERE loc IS NOT NULL "
+            "AND EXISTS (SELECT 1 FROM nodes n WHERE n.location = locs.loc AND n.node_type != 'entity' "
+            "AND COALESCE(n.subtype, '') != 'external_package')"
+        )
+    return [r[0] for r in conn.execute(sql)]
+
+
+def get_all_node_locations(db_path: Path) -> list[str]:
+    """Return distinct ``location`` values from the nodes table (ascending)."""
+    with _connect(db_path) as conn:
+        return distinct_locations_conn(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -1101,8 +1463,8 @@ def fts_search(
         return [_row_to_node(r) for r in rows[:or_cap]], "like_or", total
 
 
-def index_doc_sections_fts(db_path: Path) -> int:
-    """Re-sync node_fts entries for every DocJSON section node.
+def index_doc_sections_fts(db_path: Path, locations: Iterable[str] | None = None) -> int:
+    """Re-sync node_fts entries for every DocJSON section node, or for those in *locations*.
 
     Sections are first-class ``nodes`` rows, so this is a pure FTS refresh
     from the canonical ``level_1`` / ``level_2`` columns.  It never creates
@@ -1118,12 +1480,42 @@ def index_doc_sections_fts(db_path: Path) -> int:
     section makes the pass quadratic in the number of sections and turns it
     into the dominant cost of a build; the bulk form scans once.
 
+    A build passes the doc files it parsed: the sections of every other
+    file are as the last re-sync left them, so the FTS rows equal a whole
+    re-sync's.  An empty *locations* re-syncs nothing.
+
     Args:
         db_path: Path to the axiom-graph DB file.
+        locations: Re-sync only the sections stored at these files; every
+            section when ``None``.
 
     Returns:
         Number of doc sections indexed.
     """
+    if locations is not None:
+        locs = sorted(set(locations))
+        if not locs:
+            return 0
+        count = 0
+        with _connect(db_path) as conn:
+            for start in range(0, len(locs), 500):
+                chunk = locs[start : start + 500]
+                in_locs = f"location IN ({','.join('?' * len(chunk))})"
+                sections = conn.execute(
+                    f"SELECT id, level_1, level_2 FROM nodes WHERE {_SECTION_FILTER_SQL} AND {in_locs}", chunk
+                ).fetchall()
+                if not sections:
+                    continue
+                conn.execute(
+                    f"DELETE FROM node_fts WHERE id IN (SELECT id FROM nodes WHERE {_SECTION_FILTER_SQL} AND {in_locs})",
+                    chunk,
+                )
+                conn.executemany(
+                    "INSERT INTO node_fts (id, level_1, level_2) VALUES (?, ?, ?)",
+                    [(sec["id"], sec["level_1"] or "", sec["level_2"] or "") for sec in sections],
+                )
+                count += len(sections)
+        return count
     with _connect(db_path) as conn:
         sections = conn.execute(f"SELECT id, level_1, level_2 FROM nodes WHERE {_SECTION_FILTER_SQL}").fetchall()
         # Subquery rather than an ``IN (?, ?, ...)`` parameter list so the
@@ -1137,8 +1529,12 @@ def index_doc_sections_fts(db_path: Path) -> int:
 
 
 __all__ = [
+    "get_tags_bulk_conn",
+    "locations_of_conn",
     # Doc ID helpers
+    "all_doc_ids",
     "get_doc_ids_by_filepath",
+    "DOCJSON_SECTION_SEP",
     # Doc delete
     "delete_doc_by_id",
     # Renames
@@ -1147,6 +1543,7 @@ __all__ = [
     "rekey_doc_identity",
     "RekeyCounts",
     "record_code_rename",
+    "record_code_rename_conn",
     # Upserts + reads
     "upsert_doc",
     "get_doc_sections",
@@ -1157,12 +1554,18 @@ __all__ = [
     "split_section_id",
     "query_doc_sections_by_tags",
     "get_tagged_doc_doc_edges",
+    "get_tagged_doc_doc_edges_conn",
     "get_doc_ids_with_tags",
     "get_section_doc_id_map",
     # Move / location
     "move_doc",
     "get_all_doc_file_paths",
     "get_all_node_locations",
+    "distinct_locations_conn",
+    "get_section_statuses_under_docs_conn",
+    "get_doc_rows_under_docs_conn",
+    "get_frozen_rows",
+    "get_own_drifted_sections_conn",
     # Tags + FTS
     "list_tags",
     "fts_search",

@@ -57,7 +57,6 @@ const state: AppState = {
   _sinceUntilTimestamp: null,
   _sinceChangeKinds: {},
   _sinceEnabledKinds: new Set(NET_KINDS),
-  searchMode: 'keyword',
   searchQuery: '',
   searchResultNodes: null,
 };
@@ -155,7 +154,6 @@ export async function init(): Promise<void> {
       const input = document.getElementById('search-input') as HTMLInputElement;
       onSearch(input.value);
     });
-    _initSearchModeDropdown();
 
     // Since filter — presets and browse
     document.querySelectorAll('.since-preset').forEach(btn => {
@@ -225,7 +223,6 @@ async function _loadProject(): Promise<void> {
     _populateSidebarFilters(meta);
     _renderSidebarStats(meta);
     _populateStalenessFilter();
-    _updateSearchModeDropdown();
 
     const data = await apiFetch('/api/all');
     state.allNodes = data.nodes;
@@ -882,7 +879,7 @@ function _applyFiltersAndRefresh(): void {
 
 /**
  * Render the index-freshness banner in the Changed-Since panel.
- *  - resolved=false → warning that the requested commit isn't indexed.
+ *  - resolved=false → warning that neither the index nor git knows the commit.
  *  - behind > 0     → standing "index is N behind HEAD — rebuild" nudge.
  *  - otherwise      → hidden.
  * Informational only: never triggers a rebuild (the passive model stays).
@@ -896,9 +893,9 @@ function _renderSinceBanner(opts: { resolved: boolean; requestedSha?: string | n
     const reqSha = escHtml((opts.requestedSha || '').slice(0, 8));
     el.className = 'since-banner';
     el.innerHTML =
-      `⚠ Commit <code>${reqSha}</code> isn't in the index — "changed since" ` +
-      `can't be computed for it.${behindMsg} Rebuild the index ` +
-      `(<code>axiom-graph build</code>) and try again.`;
+      `⚠ Commit <code>${reqSha}</code> isn't in the index and isn't a commit git ` +
+      `knows in this repository (or the prefix is ambiguous / too short) — "changed since" ` +
+      `can't be computed for it.${behindMsg}`;
   } else if (behind > 0) {
     el.className = 'since-banner nudge';
     el.innerHTML =
@@ -1138,51 +1135,6 @@ function _renderSinceSummary(): string {
   );
 }
 
-// ── Search mode dropdown ────────────────────────────────────────────────────
-
-function _initSearchModeDropdown(): void {
-  const toggle = document.getElementById('search-mode-toggle')!;
-  const dropdown = document.getElementById('search-mode-dropdown')!;
-  const label = document.getElementById('search-mode-label')!;
-
-  toggle.addEventListener('click', (e) => {
-    e.stopPropagation();
-    dropdown.classList.toggle('hidden');
-  });
-
-  dropdown.querySelectorAll('.search-mode-option').forEach(opt => {
-    opt.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const el = opt as HTMLElement;
-      if (el.classList.contains('disabled')) return;
-      const mode = el.dataset.mode as 'keyword' | 'semantic';
-      state.searchMode = mode;
-      label.textContent = mode === 'keyword' ? 'Keyword' : 'Semantic';
-      dropdown.classList.add('hidden');
-      // Re-run current query in new mode
-      if (state.searchQuery) onSearch(state.searchQuery);
-    });
-  });
-
-  // Close dropdown on outside click
-  document.addEventListener('click', () => dropdown.classList.add('hidden'));
-
-  _updateSearchModeDropdown();
-}
-
-function _updateSearchModeDropdown(): void {
-  const semOpt = document.querySelector('.search-mode-option[data-mode="semantic"]') as HTMLElement | null;
-  if (!semOpt) return;
-  const emb = state.meta?.embeddings;
-  if (emb && emb.available && emb.count > 0) {
-    semOpt.classList.remove('disabled');
-    semOpt.title = `${emb.count} embeddings (${Math.round(emb.coverage * 100)}% coverage)`;
-  } else {
-    semOpt.classList.add('disabled');
-    semOpt.title = 'No embeddings built';
-  }
-}
-
 // ── Graph notice / search / selectNode / check / rescan ─────────────────────
 
 function _showGraphNotice(message: string, btnAction: () => void): void {
@@ -1249,35 +1201,14 @@ async function onSearch(query: string): Promise<void> {
     return;
   }
 
-  // Keyword search is answered entirely in the browser against `state.allNodes`
-  // (substring, uncapped, instant). Only semantic search needs the server, where
-  // the embeddings live.
-  if (state.searchMode === 'keyword') {
-    state.searchResultNodes = _keywordFilter(state.allNodes, q);
-    _applyFilters();
-    if (state.view !== 'list') setView('list');
-    List.render(state.filteredNodes, state.stalenessMap);
-    const shown = state.filteredNodes.length;
-    setStatus(`${shown} result${shown === 1 ? '' : 's'} (keyword)`);
-    return;
-  }
-
-  try {
-    const data = await apiFetch(`/api/search?q=${encodeURIComponent(q)}&mode=${state.searchMode}`);
-    state.searchResultNodes = data.nodes;
-    _applyFilters();
-    // Switch to list view from any tab
-    if (state.view !== 'list') setView('list');
-    List.render(state.filteredNodes, state.stalenessMap);
-    const total = data.nodes.length;
-    const shown = state.filteredNodes.length;
-    const modeLabel = state.searchMode;
-    if (shown < total) {
-      setStatus(`${shown} of ${total} results (${modeLabel})`);
-    } else {
-      setStatus(`${total} results (${modeLabel})`);
-    }
-  } catch (err: any) { setStatus(`Search error: ${err.message}`); }
+  // Search is answered entirely in the browser against `state.allNodes`
+  // (substring, uncapped, instant).
+  state.searchResultNodes = _keywordFilter(state.allNodes, q);
+  _applyFilters();
+  if (state.view !== 'list') setView('list');
+  List.render(state.filteredNodes, state.stalenessMap);
+  const shown = state.filteredNodes.length;
+  setStatus(`${shown} result${shown === 1 ? '' : 's'} (keyword)`);
 }
 
 export async function selectNode(nodeId: string): Promise<void> {
@@ -1316,7 +1247,7 @@ function navigateToNode(targetNodeId: string): void {
   const nodeType = node ? node.node_type : '';
 
   if (nodeType === 'doc' || nodeType === 'doc_section') {
-    // Extract doc ID: for doc sections like "project::docs.foo.bar#section", use the doc part
+    // Extract doc ID: for doc sections like "project::docs/foo/bar.md#section", use the doc part
     const docId = targetNodeId.includes('#') ? targetNodeId.split('#')[0] : targetNodeId;
     setView('docs');
     // Trigger doc selection after view switch renders

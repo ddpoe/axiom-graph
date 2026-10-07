@@ -1,189 +1,176 @@
-<!-- generated from axiom_graph::docs.consumer.examples.docs-honesty-loop @ 4b6969d300cf; do not edit -->
+<!-- generated from axiom_graph::docs/consumer/examples/docs-honesty-loop @ 360e20d5c376; do not edit -->
 
-# Tutorial: The Docs-Honesty Loop
+# Tutorial: The docs-honesty loop
 
-## What You'll Build
+## What you'll build
 
-Published documentation rots the moment the code it describes changes. The usual fix is discipline: remember to update the docs, hope a reviewer catches the ones you forgot. axiom-graph replaces that hope with a signal.
+A consumer doc is a page written for your users and published to a site. This tutorial adds one to the project from the [reporting-pipeline tutorial](reporting-pipeline.md), changes the code it describes, and takes the page through being flagged, updated, verified and published again. This user guide is maintained the same way.
 
-This tutorial walks the full loop end to end, the same loop that produced the site you are reading right now:
+Start with the project files from the first section of that tutorial, indexed with `axiom-graph build .`, and `axiom-graph check .` reporting all nodes `VERIFIED`. Run every command from the project root.
 
-1. **Author** a consumer doc in DocJSON, linked through a dev-doc proxy to the capability it describes.
-2. **Change the code** behind that capability.
-3. **Watch staleness flag the consumer doc** `LINKED_STALE` automatically, even though it never linked to the code directly.
-4. **Update** the doc through the viz Doc Manager or the MCP doc tools, then re-verify.
-5. **Republish** the corrected public site with `render-site`.
+## How a consumer doc links to code
 
-The payoff is a documentation set that tells you when it has drifted instead of silently lying — because linking docs to code and detecting that those docs went stale are the [two reads](../concepts/the-mesh.md#two-reads-one-mesh) against one mesh.
-
-This is the companion to the [reporting-pipeline tutorial](reporting-pipeline.md). That one shows an agent consuming the mesh to do work; this one shows the mesh keeping its own documentation honest.
-
-## The Proxy-Linking Architecture
-
-Before the steps, the one idea that makes the whole loop work: **consumer docs link through a dev-doc proxy, not at raw code.**
-
-It is tempting to point a user guide straight at the function it describes. Don't. Function and symbol names change constantly; a consumer page wired to `compute_staleness` breaks the instant someone renames it, and the page itself rarely talks about that symbol by name anyway. Consumer docs describe capabilities, not symbols.
-
-So the provenance chain has three layers, connected by `documents` edges in the [mesh](../concepts/the-mesh.md):
+A consumer doc links to a section of a dev doc, such as a design doc, a spec or a PRD, and that section links to the code:
 
 ```
-Code node  <--documents--  Dev-doc section  <--documents--  Consumer-doc section
- (the symbol)               (PRD / design / ADR)            (this guide)
+transform  <--documents--  design-doc section  <--documents--  consumer-doc section
 ```
 
-The **dev-doc layer** (a feature PRD, an interface spec, a design section, or an ADR) binds tightly to the code: it links to the actual functions and classes. The **consumer layer** binds only to that dev-doc section. The consumer page therefore *rides the chain*: it inherits a staleness signal whenever the code changes, but it is insulated from the code's churn. Rename the function and the dev-doc's link updates; the consumer page never notices, because it was never pointing at the symbol.
+When the code changes, the flag passes along both links, so the consumer page is flagged even though it names no function. When a function is renamed, only the dev doc's link has to change. [DocJSON](../concepts/docjson.md) covers links in general.
 
-This is the difference between linking *at* code and linking *through* a stable description of code. Pick the dev-doc section that documents the capability, link to that, and your page stays stable under refactors while still hearing about real changes. The same architecture is described from the engine's side in [staleness](../concepts/staleness.md) and from the authoring side in [DocJSON](../concepts/docjson.md).
+## Step 1: Write the consumer doc
 
-## Step 1: Author the Consumer Doc
+Find the dev-doc section that describes the behavior your page covers. To see which sections document `transform`:
 
-Suppose you want to publish a user-facing page about how staleness detection works. The capability is real code, but your page describes the concept, not the implementation.
-
-First, find the dev-doc section that already documents that capability and binds to the code. That dev-doc section is your proxy target. You can discover it with search:
-
-```bash
-axiom-graph list /path/to/project --tag design
+```
+axiom-graph graph proj::reporting.pipeline::transform . --direction in
 ```
 
-or from an agent, `axiom_graph_search(project_root, "staleness design")`.
+The output includes `<--[documents]-- proj::docs/design/reporting-pipeline::transform`. An agent can find it with `axiom_graph_search` and `scope="docs"`.
 
-Now author the consumer doc as DocJSON. Each section is its own node, so you document at section granularity, not whole-file granularity. The `links` array on the section points at the **dev-doc proxy section**, never the raw function:
+Create `docs/consumer/generating-reports.docjson`. Tag the doc `consumer`, and link its section to the design-doc section, not to the function:
 
 ```json
 {
-  "id": "how-it-works",
-  "heading": "How Staleness Works",
-  "content": "axiom-graph compares a code hash...",
-  "links": [
-    { "node_id": "axiom_graph::docs.features.staleness.design::architecture" }
+  "title": "Generating Reports",
+  "tags": ["consumer"],
+  "sections": [
+    {
+      "id": "filtering",
+      "heading": "Which rows the report includes",
+      "content": "The report includes only rows whose status is `active`.",
+      "links": [{"node_id": "proj::docs/design/reporting-pipeline::transform"}]
+    }
   ]
 }
 ```
 
-Tag the document `consumer`, the tag that opts it into transitive propagation (Step 3 explains why that matters). Then index it:
-
-```bash
-axiom-graph build /path/to/project
-```
-
-Agents do the same thing through MCP: `axiom_graph_write_doc` to create the file and register it in one step, or `axiom_graph_add_link` to attach the proxy link afterward. `axiom_graph_read_doc` then shows the linked dev-doc summary under your section, confirming the chain is wired.
-
-The granularity here is deliberate. A section is the unit a reader loads and the unit that goes stale, so an agent can read exactly this section instead of the whole page, and the staleness engine can flag exactly this section instead of the whole document.
-
-Indexing makes the page real in the mesh, but it does not yet publish it to the static site. Listing it in `site-nav.yml` does that, as Step 5 shows.
-
-## Step 2: Change the Code
-
-Now play the part of the developer who refactors the underlying capability. Someone edits the staleness computation, the function your *dev-doc* section links to, and rebuilds the index:
-
-```bash
-axiom-graph build /path/to/project
-```
-
-`build` is discovery-only: it inserts new nodes and notices changed ones, but it does not overwrite existing staleness signals. It simply records that the code node's content hash no longer matches the hash captured when the dev-doc was last verified.
-
-Nothing about your consumer page changed. You did not touch its file. Yet, as the next step shows, it is about to be flagged, because the mesh knows your page is two `documents` hops downstream of the code that just moved. That is the whole point: drift is detected structurally, by following edges, not by anyone remembering to look.
-
-## Step 3: Transitive Staleness Flags the Doc
-
-Run a check:
-
-```bash
-axiom-graph check /path/to/project
-```
-
-The code change ripples outward through the chain. The dev-doc section goes `LINKED_STALE` because the code it links to changed. And because your consumer page links to that dev-doc section, *it* goes `LINKED_STALE` too, transitively:
-
-```
-own: 1 CONTENT_UPDATED / 0 DESC_UPDATED / 0 RENAMED / 0 NOT_FOUND · link: 2 LINKED_STALE / 0 BROKEN_LINK · 47 VERIFIED
-
-NODE                                                  OWN_STATUS       LINK_STATUS
-axiom_graph::...index.staleness::compute_staleness    CONTENT_UPDATED  VERIFIED
-docs.features.staleness.design::architecture          VERIFIED         LINKED_STALE  via ...::compute_staleness
-docs.consumer.staleness::how-it-works                 VERIFIED         LINKED_STALE  via docs.features.staleness.design::architecture
-```
-
-Read the `via` breadcrumbs bottom to top: the consumer page is stale *via* the design spec, which is stale *via* the function that changed. You can trace the entire path back to the root cause without grepping.
-
-### Why the consumer page hears about it
-
-Direct doc-to-code staleness is a single hop. Transitive propagation is what carries the signal across the doc-to-doc `documents` edge to the consumer layer, and it is **opt-in and tag-gated**. axiom-graph only propagates through documents that carry a tag listed in `transitive_tags`:
+In `axiom-graph.toml`, let docs tagged `consumer` receive flags through the docs they link to:
 
 ```toml
 [axiom_graph.staleness]
 transitive_tags = ["consumer"]
 ```
 
-Because your page is tagged `consumer`, it participates. Developer specs that link to other specs do not pick up transitive signals unless their own tag is listed, so the noise stays where it belongs. The propagation loop walks doc-to-doc edges until the stale set stabilizes (usually one or two passes), with a visited-set guard so cycles can't spin. See [staleness](../concepts/staleness.md) for the full status model and [configuration](../get-started/configuration.md) for the tag knobs, including `frozen_tags` for historical docs like ADRs that should *not* chase every edit.
+Without this setting a code change flags the design doc but not the consumer doc. [Configuration](../get-started/configuration.md) lists the staleness settings.
 
-This is the loop's keystone: published, user-facing prose stays honest even though it never touches code, because staleness is a read on the same mesh the docs live in.
+Index the new doc:
 
-## Step 4: Update and Re-Verify
-
-A `LINKED_STALE` flag is an invitation to review, not a verdict that the prose is wrong. Sometimes the code change does not affect what your page says; sometimes it does. Follow the breadcrumb to find out.
-
-**Review the chain.** Read the dev-doc section that the page links to (and, through it, the code that moved) to see whether your user-facing description is still accurate.
-
-**Edit if needed.** Two paths, same mesh:
-
-- *Viz Doc Manager.* Open the [viz dashboard](../viz.md), go to the Docs tab, and edit the section in the rich-text editor. Edits save straight back to the DocJSON file on disk, and the link picker lets you re-point the proxy link if the dev-doc section itself was renamed or restructured.
-- *MCP doc tools.* An [agent connected over MCP](../get-started/connect-your-agent.md) calls `axiom_graph_update_section` to patch the content, and `axiom_graph_add_link` / `axiom_graph_delete_link` to fix proxy links.
-
-**Re-verify, and mind the sticky rule.** `LINKED_STALE` is *sticky*. It does not clear because you edited the prose, ran another check, or because someone upstream marked the code clean. The only thing that clears it is a fresh verification snapshot on the doc section itself:
-
-```bash
-axiom-graph mark-clean docs.consumer.staleness::how-it-works /path/to/project \
-  --reason "Reviewed after staleness refactor; user-facing behavior unchanged"
+```
+axiom-graph build .
 ```
 
-Note a sharp edge: the CLI `mark-clean` clears own-status drift (CONTENT_UPDATED / DESC_UPDATED), but to clear `LINKED_STALE` on a doc section, save it through `axiom_graph_update_section`, which auto-records a verification snapshot, or call `mark_clean` over MCP with the doc section's node ID. Either way the snapshot captures the current hashes, so the next check promotes the section back to `VERIFIED`, and if the code drifts again later, the snapshot invalidates and the flag returns. That hash-anchored snapshot is the audit trail: a durable record of who reviewed which section against which version of the code.
+Because you wrote the file by hand, the build warns:
 
-While you are in here, also watch for `BROKEN_LINK`. Every `build` and `check` runs a consistency pass that flags any edge pointing at a node ID that no longer exists, for instance, if the dev-doc proxy section was deleted out from under you. Repair it with `axiom_graph_delete_link` plus a new link to the correct target. Unlike a rename (which the proxy architecture absorbs silently), a deletion is a structural break that always wants human eyes.
+```
+! 1 DocJSON section(s) were edited outside the doc tools (raw DocJSON edits) and are not verified. Fix: re-apply the change with update_section / patch_section / add_section, or accept the current text with axiom_graph_accept_doc_edits (CLI: axiom-graph stamps accept <ids>|--all).
+```
 
-## Step 5: Publish to the Site
+Accept it:
 
-With the section reviewed and back to `VERIFIED`, publish the corrected page to the static site.
+```
+axiom-graph stamps accept . --all
+```
 
-### The publish gate: `site-nav.yml`
+An agent creates the same file with `axiom_graph_write_doc`, which indexes it and needs no accept step.
 
-`render-site` does not publish every DocJSON file under `docs/consumer/`. It publishes exactly the docs listed in **`site-nav.yml`**, a small manifest at the project root. Presence in `show:` is the explicit publish gate; list order is the display / toctree order. The folder tree under `root:` *is* the site tree -- `docs/consumer/**` maps one-to-one to `userdocs/guide/**`.
+## Step 2: Change the code
+
+Change the filter in `transform` so trial users are included, then rebuild:
+
+```python
+    return df[df['status'].isin(['active', 'trial'])]
+```
+
+```
+axiom-graph build .
+```
+
+The consumer doc has not been touched.
+
+## Step 3: See the consumer doc flagged
+
+```
+axiom-graph check .
+```
+
+```
+own: 2 CONTENT_UPDATED / 0 DESC_UPDATED / 0 RENAMED / 0 NOT_FOUND · link: 7 LINKED_STALE / 0 BROKEN_LINK · 8 VERIFIED
+
+NODE                                                        OWN_STATUS       LINK_STATUS
+--------------------------------------------------------------------------------------------------
+proj::reporting.pipeline                                    CONTENT_UPDATED  VERIFIED
+proj::reporting.pipeline::transform                         CONTENT_UPDATED  VERIFIED
+proj::tests.test_pipeline                                   VERIFIED         LINKED_STALE
+proj::tests.test_pipeline::test_transform_filters_inactive  VERIFIED         LINKED_STALE  via proj::reporting.pipeline::transform
+proj::tests.test_pipeline::test_reporting_pipeline_e2e      VERIFIED         LINKED_STALE  via proj::reporting.pipeline::transform
+proj::docs/design/reporting-pipeline                        VERIFIED         LINKED_STALE
+proj::docs/design/reporting-pipeline::transform             VERIFIED         LINKED_STALE  via proj::reporting.pipeline::transform
+proj::docs/consumer/generating-reports                      VERIFIED         LINKED_STALE
+proj::docs/consumer/generating-reports::filtering           VERIFIED         LINKED_STALE  via proj::docs/design/reporting-pipeline::transform
+```
+
+Follow the `via` column from the last row up: the consumer section is stale via the design-doc section, which is stale via `transform`. The tests are flagged as in the [reporting-pipeline tutorial](reporting-pipeline.md). [Staleness](../concepts/staleness.md) explains the statuses.
+
+## Step 4: Update the docs and verify
+
+Read the code change and the design-doc section, then decide whether the page is still true. It is not: it says only `active` rows are included.
+
+1. Change the consumer section to "The report includes rows whose status is `active` or `trial`." An agent saves it with `axiom_graph_update_section`. If you edit the file by hand or in the Docs tab of the [dashboard](../viz.md), accept the edit:
+
+   ```
+   axiom-graph stamps accept . proj::docs/consumer/generating-reports::filtering
+   ```
+
+   The section is still `LINKED_STALE`. Its flag comes through the design-doc section, so verifying the consumer section does not clear it. The agent's save says so:
+
+   ```
+   still LINKED_STALE via: proj::docs/design/reporting-pipeline::transform (clears when it does)
+   ```
+
+2. Update the design-doc section the same way. An agent saves it with `axiom_graph_update_section` and names the code the section was flagged through, `addresses=["proj::reporting.pipeline::transform"]`. Saving the text alone, or accepting a hand edit, leaves the section `LINKED_STALE`. After a hand edit, or if the text is still true, verify it:
+
+   ```
+   axiom-graph mark-clean proj::docs/design/reporting-pipeline::transform . --reason "covers trial users"
+   ```
+
+   Clearing the design-doc section also clears every consumer section that links to it, so update those pages first.
+
+`axiom-graph check .` no longer lists the doc rows. Clear the code and tests as in Step 5 of the [reporting-pipeline tutorial](reporting-pipeline.md).
+
+If the dev-doc section a consumer page links to is deleted, `build` and `check` mark the consumer section `BROKEN_LINK`. Point its link at another section by editing `links`, or with `axiom_graph_delete_link` and `axiom_graph_add_link`.
+
+## Step 5: Publish the site
+
+`render-site` turns the docs listed in `site-nav.yml` into Markdown pages for Sphinx (MyST). Create `site-nav.yml` at the project root:
 
 ```yaml
-site_name: axiom-graph
-site_description: Local-first code intelligence for AI agents
-root: docs/consumer            # source publish boundary
-
-show:                          # presence = published; order = display order
-  - index                      # a bare string is a leaf page
-  - concepts:                  # a single-key mapping is a section folder
-      show:                    # ...with its own ordered list of children
-        - the-mesh
-        - staleness
-  - get-started:
-      show:
-        - connect-your-agent
-        - configuration
-  - viz
+site_name: Reporting
+root: docs/consumer
+show:
+  - generating-reports
 ```
 
-**To publish a new page:** drop its DocJSON at `docs/consumer/<folder>/<stem>.json`, then add `<stem>` to the matching folder's `show:` list (or the top-level `show:` for a root page). A doc that exists on disk but is absent from `show:` is simply not published -- that is the gate. A section folder can name its landing page with `landing: <stem>` or carry its own `<folder>/index.json`; if it does neither, `render-site` synthesizes a landing page with a table of contents for free.
+`root` is the folder that holds the published docs, and `show` lists the pages in order. A doc that is not listed is not published. [Multi-target rendering](multi-target-rendering.md) covers the full nav format and other outputs, such as a README.
 
-### Render
-
-```bash
-axiom-graph render-site /path/to/project
+```
+axiom-graph render-site .
 ```
 
-`render-site` walks the nav, renders each listed DocJSON section to clean Markdown (stripping the internal node-id links), prepends a provenance stamp, and writes the nested pages into `userdocs/guide/` for a static site generator (Sphinx/MyST) to build into HTML. Because the output tree mirrors the source tree one-to-one, the relative links between pages resolve without any per-page configuration. Commit the generated `userdocs/guide/**` alongside your DocJSON. The nav file location and render defaults live under `[axiom_graph.site]` -- see [configuration](../get-started/configuration.md).
+```
+  [guide] sphinx -> userdocs/guide : 1 page(s)
+```
 
-The corrected page is now live, and the loop is closed: code changed, the mesh flagged the downstream consumer doc, you reviewed and re-verified it, and the republished site reflects reality.
+`userdocs/guide/generating-reports.md` holds the corrected text, under a comment that names the source doc and commit:
 
-**One nuance on grouping.** A section folder renders as an *expandable tree* under its landing page, not as a Sphinx `:caption:` header — `render-site` emits no `:caption:` directive in any flavor. And a bare leaf string is always one flat page even with a slash in it (`concepts/staleness` at the top level is a single leaf, not a `concepts` group); folders group only via the single-key mapping shown above. If you want bold caption groups — a Diátaxis Tutorials / How-to / Explanation sidebar, say — post-process the generated `index.md` into one captioned `{toctree}` per group yourself.
+```
+<!-- generated from proj::docs/consumer/generating-reports @ 7110821ab167; do not edit -->
 
-## This Site Is Built This Way
+# Generating Reports
 
-None of this is hypothetical. The documentation you are reading is itself a set of DocJSON nodes in the axiom-graph mesh. Each consumer page links through dev-doc proxies, ADRs, PRDs, and design sections, that bind to the code. Because `consumer` is a transitive tag, these pages inherit `LINKED_STALE` whenever the underlying code drifts. That flag is the maintainer's cue to review; `mark-clean` re-verifies; `render-site` republishes the public mirror.
+## Which rows the report includes
 
-The full set of consumer guides, the recursive nav manifest, the `render-site` pipeline, and transitive `LINKED_STALE` are all shipping capabilities, not aspirations.
+The report includes rows whose status is `active` or `trial`.
+```
 
-The takeaway is the loop itself. Documentation in axiom-graph is not a static artifact you periodically remember to update; it is a node in a typed mesh that tells you when it has drifted. The same edges that let an agent pull exactly the context it needs are the edges that carry a staleness signal from a changed function all the way out to the published page describing it. Honesty is not a process you impose on the docs; it is a query the docs answer about themselves.
+`render-site` also writes `userdocs/guide/index.md`, the table of contents. Commit the generated pages with your docs.

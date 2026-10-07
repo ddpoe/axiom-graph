@@ -10,7 +10,7 @@ Symptom-first where possible — scan the section headings, find what matches, r
 
 ```
 axiom-graph (marketplace)
-├── pev_nexus_agents/pev/         Real PEV workflow + /pev-spike (11-test integration)
+├── pev_nexus_agents/pev/         Real PEV workflow + /pev-spike (13-test integration)
 └── pev_nexus_agents/hook-spike/  Low-level plugin-hook infra test harness
 ```
 
@@ -56,7 +56,7 @@ Canary contents include: `fired=true`, `pwd=...`, `CLAUDE_PLUGIN_ROOT=...`, `CLA
 
 Integration test for the real PEV hook behavior. Exercises the scope hooks, budget counter, gate, and allowlists end-to-end in a disposable worktree.
 
-### 11-test protocol
+### 13-test protocol
 
 | # | Test | What it exercises |
 |---|---|---|
@@ -69,8 +69,10 @@ Integration test for the real PEV hook behavior. Exercises the scope hooks, budg
 | 6b | budget urgent advisory (5/7) | `pev-tool-counter.sh` urgent threshold |
 | 6c | budget gate advisory (7/7) | `pev-tool-counter.sh` + `pev-tool-gate.sh` at threshold |
 | 7 | gate blocks non-allowlisted tool | `pev-tool-gate.sh` block path |
-| 8 | allowlist: Write works after gate | gate allowlist pass-through |
-| 9 | allowlist: `axiom_graph_update_section` works after gate | gate + doc-scope stacking |
+| 8 | worktree-scope: write into the session scratchpad allowed | `pev-worktree-scope.sh` scratchpad carve-out |
+| 9 | allowlist: Write works after gate | gate allowlist pass-through |
+| 10 | allowlist: `axiom_graph_update_section` works after gate | gate + doc-scope stacking |
+| 11 | hand-back after the gate allowed | gate allowlist pass-through for the hand-back |
 
 ### Driver skill
 

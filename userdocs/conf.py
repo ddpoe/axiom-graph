@@ -5,7 +5,7 @@ Two public surfaces are documented:
 * **CLI** -- rendered by ``sphinx-click`` from the Click command group, split
   into one page per command group.
 * **MCP tools** -- rendered by ``sphinx.ext.autodoc`` from
-  ``axiom_graph.mcp.server`` (the ``@mcp.tool()`` functions stay introspectable
+  ``axiom_graph.mcp.server`` (the ``@_tool()`` functions stay introspectable
   after decoration), as a single flat page.
 
 The user-facing narrative pages (generated from DocJSON by the consumer
@@ -66,17 +66,13 @@ napoleon_numpy_docstring = False
 
 # -- autodoc ------------------------------------------------------------------
 
-# Heavy / deprecated optional extras are never installed in the docs build
+# Heavy optional extras are never installed in the docs build
 # (RTD installs the base package only). Mock them so importing the MCP module
 # for autodoc never fails on a missing optional dependency.
 autodoc_mock_imports = [
     "tree_sitter",
     "tree_sitter_javascript",
     "tree_sitter_typescript",
-    "fastembed",
-    "onnxruntime",
-    "sentence_transformers",
-    "sqlite_vec",
     "fastapi",
     "uvicorn",
 ]

@@ -6,12 +6,15 @@ cycle-guarded, DESC_ONLY excluded).  Mapped to US-3 and US-4.
 
 from __future__ import annotations
 
-import os
+import time
 from pathlib import Path
 
+import pytest
 from axiom_annotations import workflow
 
 from axiom_graph.index import builder, db
+from axiom_graph.index.staleness import _get_linked_stale_ids
+from axiom_graph.lifecycle.api import build_index, compute_check_summary, mark_clean_nodes
 
 
 def _write(path: Path, text: str) -> Path:
@@ -21,7 +24,6 @@ def _write(path: Path, text: str) -> Path:
 
 
 def _build(project_root: Path, discovery_only: bool = True) -> None:
-    os.environ["AXIOM_GRAPH_SKIP_EMBEDDINGS"] = "1"
     builder.build(project_root, project_id="proj", discovery_only=discovery_only)
 
 
@@ -304,3 +306,74 @@ def A():
     _, b_link = _status(ag_db, "proj::b::B@workflow")
     assert a_link == "LINKED_STALE"  # Pass A on A itself
     assert b_link == "LINKED_STALE"  # Pass B via delegates_to -> A
+
+
+_LEAF = """
+from axiom_annotations import task
+
+@task(purpose="leaf")
+def T():
+    return {value}
+""".lstrip()
+
+_TOP = """
+from axiom_annotations import workflow, AutoStep
+from leaf import T
+
+@workflow(purpose="top")
+def W():
+    '''{doc}'''
+    口 = AutoStep(step_num=1, name="run leaf")
+    T(){tail}
+""".lstrip()
+
+_ENVELOPE = "proj::top::W@workflow"
+_OWN_TARGET = "proj::top::W"
+_DELEGATED_TASK = "proj::leaf::T"
+
+
+def _write_pair(root: Path, *, leaf_value: int = 1, doc: str = "Run the leaf.", tail: str = "") -> None:
+    _write(root / "leaf.py", _LEAF.format(value=leaf_value))
+    _write(root / "top.py", _TOP.format(doc=doc, tail=tail))
+
+
+@pytest.mark.parametrize(
+    ("first_edit", "second_edit", "newer_offender"),
+    [
+        ({"leaf_value": 2}, {"leaf_value": 2, "doc": "Run the leaf, docs reworded."}, _OWN_TARGET),
+        ({"tail": "\n    return 1"}, {"tail": "\n    return 1", "leaf_value": 2}, _DELEGATED_TASK),
+    ],
+    ids=["annotates-docstring-change-after", "delegates-to-change-after"],
+)
+@workflow(
+    purpose=(
+        "An annotation envelope verified after one of its linked functions changed "
+        "is not held stale by that change again when another one changes later — "
+        "for annotated targets (including a docstring-only change) and for "
+        "delegated tasks alike"
+    ),
+)
+def test_verified_envelope_reports_only_offenders_newer_than_its_verification(
+    tmp_path: Path, first_edit: dict, second_edit: dict, newer_offender: str
+):
+    db_p = tmp_path / ".axiom_graph" / "graph.db"
+    _write_pair(tmp_path)
+    build_index(db_p, tmp_path, project_id="proj", discovery_only=False)
+
+    time.sleep(0.05)
+    _write_pair(tmp_path, **first_edit)
+    build_index(db_p, tmp_path, project_id="proj", discovery_only=False)
+    assert _ENVELOPE in _get_linked_stale_ids(db_p)
+
+    time.sleep(0.05)
+    mark_clean_nodes(db_p, tmp_path, [_ENVELOPE], "Envelope re-read.", verified_by="agent")
+    assert _ENVELOPE not in _get_linked_stale_ids(db_p)
+
+    time.sleep(0.05)
+    _write_pair(tmp_path, **second_edit)
+    build_index(db_p, tmp_path, project_id="proj", discovery_only=False)
+
+    assert _get_linked_stale_ids(db_p)[_ENVELOPE] == [newer_offender]
+    _own, link, via = compute_check_summary(db_p, tmp_path).statuses[_ENVELOPE]
+    assert link == "LINKED_STALE"
+    assert via == [newer_offender]

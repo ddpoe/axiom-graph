@@ -1,4 +1,4 @@
-<!-- generated from axiom_graph::docs.consumer.examples @ e904d660e42d; do not edit -->
+<!-- generated from axiom_graph::docs/consumer/examples @ 1fa07ded4691; do not edit -->
 
 # Examples
 
@@ -8,4 +8,5 @@
 reporting-pipeline
 docs-honesty-loop
 multi-target-rendering
+share-a-workflow
 ```

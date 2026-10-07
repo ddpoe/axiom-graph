@@ -164,6 +164,10 @@ def _leave_orphaned_rows(project_root: Path, db_path: Path) -> Path:
     _drop_enclosing_workflow(db_path, PIPELINE_ENVELOPE)
     _write_module(project_root, '@workflow(purpose="Do nothing in particular")\ndef unrelated():\n    return 0')
     _hold_below_the_index_mtime(src)
+    # Residue predates the per-file parse records: with none, the mtime rule
+    # alone decides whether the file is parsed, so the held-back file is skipped.
+    with db._connect(db_path) as conn:
+        conn.execute("DELETE FROM file_state WHERE location = ?", (src.relative_to(project_root).as_posix(),))
     return src
 
 

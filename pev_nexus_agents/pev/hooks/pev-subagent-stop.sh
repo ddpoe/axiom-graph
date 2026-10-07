@@ -2,6 +2,7 @@
 # pev-subagent-stop.sh — SubagentStop hook for every PEV subagent.
 # Runs when a PEV subagent returns. Two jobs:
 #   1. Clean up the subagent's counter file (/tmp/pev-counter-<agent_id>.txt).
+#      An input with no agent_id has no counter file, so nothing is removed.
 #   2. For the Builder: rebuild the axiom-graph index on the worktree DB so
 #      the Reviewer starts with a fresh index.
 #
@@ -10,7 +11,11 @@
 
 INPUT=$(cat)
 
-AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // empty' 2>/dev/null)
+# Fail closed for PEV agents when jq is missing (see lib/pev-hook-common.sh).
+. "$(dirname "${BASH_SOURCE[0]}")/lib/pev-hook-common.sh"
+pev_require_jq stop
+
+AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // empty')
 AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null)
 
 case "$AGENT_TYPE" in
@@ -21,8 +26,6 @@ esac
 # 1. Clean up counter file (best-effort)
 if [ -n "$AGENT_ID" ]; then
   rm -f "/tmp/pev-counter-${AGENT_ID}.txt" 2>/dev/null
-else
-  rm -f "/tmp/pev-counter-${AGENT_TYPE//:/-}.txt" 2>/dev/null
 fi
 
 # 2. Builder-only: refresh axiom-graph index on the worktree DB.

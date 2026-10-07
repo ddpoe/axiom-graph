@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
 from axiom_annotations import Step, workflow
 
-from axiom_graph.db import migrations
+from axiom_graph.db import _core, migrations
 from axiom_graph.index import builder, db
 
 PROJ_TOML = '[axiom_graph]\nproject_id = "proj"\n'
@@ -86,7 +87,7 @@ def _make_legacy_project(root: Path) -> Path:
     db_path = ag / "graph.db"
     db.init_db(db_path)
 
-    doc_id = "proj::docs.guide"
+    doc_id = "proj::docs/guide"
     now = "2026-01-01T00:00:00Z"
     with db._connect(db_path) as conn:
         conn.execute("PRAGMA user_version = 0")
@@ -270,7 +271,7 @@ def test_legacy_db_upgrade_e2e(tmp_path: Path) -> None:
     assert "doc_sections" not in _table_names(db_path)
     assert {"doc_position", "doc_level"} <= _node_columns(db_path)
     assert db_path.with_name(f"graph.db.pre-v{migrations.CURRENT_SCHEMA_VERSION}.bak").exists()
-    doc_id = "proj::docs.guide"
+    doc_id = "proj::docs/guide"
     assert f"{doc_id}::intro" in ids
     assert f"{doc_id}::intro.details" in ids
     assert f"{doc_id}::extra" in ids
@@ -309,7 +310,7 @@ def test_migration_preserves_history_verification_renames(tmp_path: Path) -> Non
     assert post_history == pre_history
     assert post_verification == pre_verification
     assert post_renames == pre_renames
-    assert ("proj::docs.guide::intro", "proj::mod::f") in edges
+    assert ("proj::docs/guide::intro", "proj::mod::f") in edges
 
 
 @workflow(
@@ -382,8 +383,31 @@ def test_fresh_init_stamps_version_and_noop(tmp_path: Path) -> None:
     builder.build(tmp_path)
     assert "doc_sections" not in _table_names(db_path)
     with db._connect(db_path) as conn:
-        sub = conn.execute("SELECT subtype FROM nodes WHERE id = 'proj::docs.note::s1'").fetchone()
+        sub = conn.execute("SELECT subtype FROM nodes WHERE id = 'proj::docs/note::s1'").fetchone()
     assert sub is not None and sub[0] == "docjson_section"
+
+
+def test_v3_clears_mtimes_of_python_test_files_only(tmp_path: Path) -> None:
+    """The v3 step NULLs the stored mtime of every Python test file and keeps production files' mtimes."""
+    (tmp_path / "axiom-graph.toml").write_text(PROJ_TOML, encoding="utf-8")
+    (tmp_path / "mod.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_mod.py").write_text("def test_f():\n    assert True\n", encoding="utf-8")
+    (tmp_path / "tests" / "mod_test.py").write_text("def test_g():\n    assert True\n", encoding="utf-8")
+    db_path = tmp_path / ".axiom_graph" / "graph.db"
+    builder.build(tmp_path)
+
+    def stamped() -> dict[str, bool]:
+        with db._connect(db_path) as conn:
+            rows = conn.execute(
+                "SELECT location, MAX(file_mtime IS NOT NULL) FROM nodes WHERE location LIKE '%.py' GROUP BY location"
+            ).fetchall()
+        return {r[0]: bool(r[1]) for r in rows}
+
+    assert stamped() == {"mod.py": True, "tests/test_mod.py": True, "tests/mod_test.py": True}
+    with db._connect(db_path) as conn:
+        migrations._migrate_v3_rescan_python_test_files(conn)
+    assert stamped() == {"mod.py": True, "tests/test_mod.py": False, "tests/mod_test.py": False}
 
 
 # ---------------------------------------------------------------------------
@@ -423,8 +447,8 @@ def _make_tagged_docs_project(root: Path) -> Path:
 )
 def test_v2_resyncs_drifted_envelope_tags(tmp_path: Path) -> None:
     db_path = _make_tagged_docs_project(tmp_path)
-    drifted_id = "proj::docs.drifted"
-    intact_id = "proj::docs.intact"
+    drifted_id = "proj::docs/drifted"
+    intact_id = "proj::docs/intact"
 
     # A verification baseline so the preservation claim has something to bite on.
     db.upsert_verification(db_path, drifted_id, verified_by="human", code_hash_at="base", desc_hash_at="base")
@@ -434,7 +458,7 @@ def test_v2_resyncs_drifted_envelope_tags(tmp_path: Path) -> None:
     with db._connect(db_path) as conn:
         conn.execute("DELETE FROM tags WHERE node_id = ?", (drifted_id,))
         conn.execute("INSERT INTO tags (node_id, tag) VALUES (?, ?)", (drifted_id, "obsolete"))
-        conn.execute(f"PRAGMA user_version = {migrations.CURRENT_SCHEMA_VERSION - 1}")
+        conn.execute("PRAGMA user_version = 1")
     assert _tag_rows(db_path, drifted_id) == {"obsolete"}
 
     with db._connect(db_path) as conn:
@@ -444,7 +468,7 @@ def test_v2_resyncs_drifted_envelope_tags(tmp_path: Path) -> None:
         pre_renames = _snapshot(conn, "node_renames")
         pre_docs = _snapshot(conn, "docs")
 
-    assert migrations.run_migrations(db_path) == [migrations.CURRENT_SCHEMA_VERSION]
+    assert migrations.run_migrations(db_path) == list(range(2, migrations.CURRENT_SCHEMA_VERSION + 1))
 
     # The drifted document's rows now agree with its stored tags — in both
     # directions: the tags it lacked were added, the one it should not have
@@ -478,8 +502,8 @@ def test_v2_resyncs_drifted_envelope_tags(tmp_path: Path) -> None:
 def test_v2_tolerates_missing_and_malformed_doc_tags(tmp_path: Path) -> None:
     """Unparseable docs.tags is skipped, NULL clears the rows, orphans stay orphaned."""
     db_path = _make_tagged_docs_project(tmp_path)
-    drifted_id = "proj::docs.drifted"
-    intact_id = "proj::docs.intact"
+    drifted_id = "proj::docs/drifted"
+    intact_id = "proj::docs/intact"
 
     with db._connect(db_path) as conn:
         conn.execute("UPDATE docs SET tags = ? WHERE id = ?", ("{not-json", drifted_id))
@@ -488,7 +512,7 @@ def test_v2_tolerates_missing_and_malformed_doc_tags(tmp_path: Path) -> None:
         _insert_row(
             conn,
             "docs",
-            id="proj::docs.ghost",
+            id="proj::docs/ghost",
             title="Ghost",
             tags='["ghost"]',
             file_path="docs/ghost.json",
@@ -498,4 +522,248 @@ def test_v2_tolerates_missing_and_malformed_doc_tags(tmp_path: Path) -> None:
 
     assert _tag_rows(db_path, drifted_id) == {"architecture", "v2"}, "unparseable tags must leave the rows alone"
     assert _tag_rows(db_path, intact_id) == set(), "NULL tags means the document has none"
-    assert _tag_rows(db_path, "proj::docs.ghost") == set(), "a docs row with no node must not create tag rows"
+    assert _tag_rows(db_path, "proj::docs/ghost") == set(), "a docs row with no node must not create tag rows"
+
+
+# ---------------------------------------------------------------------------
+# Migration step v4 — annotation findings store
+# ---------------------------------------------------------------------------
+
+
+@workflow(
+    purpose=(
+        "An index from before the annotation findings store upgrades on its first check with no init and that "
+        "check writes no store rows; the next build rescans every code file once and fills the store, leaving "
+        "verification and history untouched"
+    )
+)
+def test_v4_upgrades_on_check_then_build_rescans_everything(tmp_path: Path) -> None:
+    from axiom_graph.lifecycle.api import build_index, mark_clean_nodes, read_annotation_findings  # noqa: PLC0415
+
+    (tmp_path / "axiom-graph.toml").write_text(PROJ_TOML, encoding="utf-8")
+    (tmp_path / "dup.py").write_text(
+        "from axiom_annotations import Step, workflow\n\n\n"
+        '@workflow(purpose="duplicate step numbers")\n'
+        "def run_demo():\n"
+        "    _ = Step(step_num=1, name='one', purpose='first')\n"
+        "    _ = Step(step_num=1, name='two', purpose='second')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "plain.py").write_text("def g():\n    return 2\n", encoding="utf-8")
+    db_path = tmp_path / ".axiom_graph" / "graph.db"
+    build_index(db_path, tmp_path)
+    mark_clean_nodes(db_path, tmp_path, ["proj::plain::g"], reason="reviewed", verified_by="human")
+    with db._connect(db_path) as conn:
+        conn.execute("DROP TABLE annotation_findings")
+        conn.execute("PRAGMA user_version = 3")
+        history = _snapshot(conn, "node_history")
+        verification = _snapshot(conn, "node_verification")
+    assert "annotation_findings" not in _table_names(db_path)
+
+    read = read_annotation_findings(db_path, tmp_path)
+    with db._connect(db_path) as conn:
+        assert migrations.get_user_version(conn) == migrations.CURRENT_SCHEMA_VERSION
+        assert conn.execute("SELECT COUNT(*) FROM annotation_findings").fetchone()[0] == 0
+        assert _snapshot(conn, "node_history") == history
+        assert _snapshot(conn, "node_verification") == verification
+    assert read.files_rescanned == 2
+    assert [f["rule_id"] for f in read.findings] == ["B1"]
+    assert read.new == 1
+
+    summary = build_index(db_path, tmp_path)
+    assert summary.files_skipped_mtime == 0
+    assert summary.annotation_findings_new == 1
+    with db._connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM annotation_findings WHERE kind = 'finding'").fetchone()[0] == 1
+        # The rescan may append its own history rows; the existing ones stay as they were.
+        assert _snapshot(conn, "node_history")[: len(history)] == history
+        assert _snapshot(conn, "node_verification") == verification
+    assert read_annotation_findings(db_path, tmp_path).new == 0
+
+
+# ---------------------------------------------------------------------------
+# Migration step v5 — verification pairs + live hashes
+# ---------------------------------------------------------------------------
+
+
+def _downgrade_to_v4(conn: sqlite3.Connection) -> None:
+    """Strip the v5 schema from a fresh index, leaving the v4 shape.
+
+    The v5-only scan indexes go first: a v4 index never has them, and one
+    of them filters on a column dropped here.
+    """
+    for name in _core._SCAN_INDEX_NAMES:
+        conn.execute(f"DROP INDEX IF EXISTS {name}")
+    conn.execute("DROP TABLE node_verification_targets")
+    conn.execute("ALTER TABLE nodes DROP COLUMN live_code_hash")
+    conn.execute("ALTER TABLE nodes DROP COLUMN live_desc_hash")
+    conn.execute("PRAGMA user_version = 4")
+
+
+def _pairs(db_path: Path) -> dict[tuple[str, str], tuple[str, str | None]]:
+    """Return every stored verification pair keyed by (dependent, target)."""
+    with db._connect(db_path) as conn:
+        rows = conn.execute("SELECT node_id, target_id, code_hash, desc_hash FROM node_verification_targets")
+        return {(r[0], r[1]): (r[2], r[3]) for r in rows}
+
+
+_UTIL_SRC = """\
+from axiom_annotations import Step, workflow
+
+
+def a():
+    return 1
+
+
+class K:
+    def m(self):
+        return 2
+
+
+@workflow(purpose="Run a")
+def run():
+    口 = Step(step_num=1, name="A", purpose="Call a")
+    return a()
+"""
+
+
+@workflow(
+    purpose=(
+        "A v4 index upgrades to v5 keeping every history, verification and rename row, and backfills pairs only "
+        "for VERIFIED dependents against VERIFIED targets at their stored baselines; a doc section linking a "
+        "module stays VERIFIED after the upgrade's build and check; a fresh index starts at v5"
+    )
+)
+def test_v5_backfills_pairs_only_for_current_verifications(tmp_path: Path) -> None:
+    from axiom_graph.index.staleness import _get_linked_stale_ids  # noqa: PLC0415
+    from axiom_graph.lifecycle.api import build_index, compute_check_summary, mark_clean_nodes  # noqa: PLC0415
+
+    (tmp_path / "axiom-graph.toml").write_text(PROJ_TOML, encoding="utf-8")
+    (tmp_path / "mod.py").write_text("def f():\n    return 1\n\n\ndef g():\n    return 2\n", encoding="utf-8")
+    (tmp_path / "util.py").write_text(_UTIL_SRC, encoding="utf-8")
+    module_section = "proj::docs/spec::util"
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "spec.json").write_text(
+        json.dumps(
+            {
+                "title": "Spec",
+                "sections": [
+                    {"id": "util", "heading": "Util", "content": "Util.", "links": [{"node_id": "proj::util"}]}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "test_mod.py").write_text(
+        "from mod import f, g\n\n\n"
+        "def test_f():\n    assert f() == 1\n\n\n"
+        "def test_g():\n    assert g() == 2\n\n\n"
+        "def test_fg():\n    assert f() + g() == 3\n",
+        encoding="utf-8",
+    )
+    db_path = tmp_path / ".axiom_graph" / "graph.db"
+    build_index(db_path, tmp_path)
+    tests = ["proj::test_mod::test_f", "proj::test_mod::test_g"]
+    mark_clean_nodes(db_path, tmp_path, [*tests, module_section], reason="reviewed", verified_by="human")
+    # g changes: test_g goes LINKED_STALE and g is own-stale; test_fg is
+    # re-verified while g is still own-stale.
+    (tmp_path / "mod.py").write_text("def f():\n    return 1\n\n\ndef g():\n    return 2 + 0\n", encoding="utf-8")
+    build_index(db_path, tmp_path)
+    mark_clean_nodes(db_path, tmp_path, ["proj::test_mod::test_fg"], reason="reviewed", verified_by="human")
+    compute_check_summary(db_path, tmp_path)
+    with db._connect(db_path) as conn:
+        statuses = {r[0]: (r[1], r[2]) for r in conn.execute("SELECT id, own_status, link_status FROM nodes")}
+        f_hash = conn.execute("SELECT code_hash FROM nodes WHERE id = 'proj::mod::f'").fetchone()[0]
+        _downgrade_to_v4(conn)
+        history = _snapshot(conn, "node_history")
+        verification = _snapshot(conn, "node_verification")
+        renames = _snapshot(conn, "node_renames")
+    assert statuses["proj::test_mod::test_g"][1] == "LINKED_STALE"
+    assert statuses["proj::mod::g"][0] == "CONTENT_UPDATED"
+    assert statuses["proj::test_mod::test_fg"][1] == "VERIFIED"
+
+    assert migrations.run_migrations(db_path) == [5]
+
+    with db._connect(db_path) as conn:
+        assert migrations.get_user_version(conn) == 5
+        assert _snapshot(conn, "node_history") == history
+        assert _snapshot(conn, "node_verification") == verification
+        assert _snapshot(conn, "node_renames") == renames
+    pairs = _pairs(db_path)
+    assert pairs[("proj::test_mod::test_f", "proj::mod::f")] == (f_hash, None)
+    assert pairs[("proj::test_mod::test_fg", "proj::mod::f")] == (f_hash, None)
+    assert ("proj::test_mod::test_fg", "proj::mod::g") not in pairs, "an own-stale target gets no pair"
+    assert not [key for key in pairs if key[0] == "proj::test_mod::test_g"], "a LINKED_STALE dependent gets none"
+    assert (module_section, "proj::util") in pairs, "a module target pairs by its digest"
+
+    # The backfilled digest leaves out the workflow's step rows, as the engine
+    # does, so the module-linked section is not flagged by the upgrade.
+    for after, run_pass in (("build", build_index), ("check", compute_check_summary)):
+        run_pass(db_path, tmp_path)
+        with db._connect(db_path) as conn:
+            link = conn.execute("SELECT link_status FROM nodes WHERE id = ?", (module_section,)).fetchone()[0]
+        assert link == "VERIFIED", after
+        assert module_section not in _get_linked_stale_ids(db_path), after
+
+    fresh = tmp_path / "fresh" / "graph.db"
+    db.init_db(fresh)
+    with db._connect(fresh) as conn:
+        assert migrations.get_user_version(conn) == 5
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assert "node_verification_targets" in tables
+        assert {"live_code_hash", "live_desc_hash"} <= {r[1] for r in conn.execute("PRAGMA table_info(nodes)")}
+    assert migrations.run_migrations(fresh) == []
+
+
+@workflow(
+    purpose=(
+        "On an index not yet upgraded to v5, drift_query, mark_clean and reverify work as before, write no pairs and "
+        "leave the schema version at 4; the next build upgrades it and backfills pairs for those verifications"
+    )
+)
+def test_v4_index_tools_work_without_pairs_until_a_build_upgrades_it(tmp_path: Path) -> None:
+    from axiom_graph.lifecycle.api import build_index, mark_clean_nodes, reverify_nodes  # noqa: PLC0415
+    from axiom_graph.query.api import compute_drift_query  # noqa: PLC0415
+
+    f_id, section, test = "proj::mod::f", "proj::docs/spec::f", "proj::test_mod::test_f"
+    (tmp_path / "axiom-graph.toml").write_text(PROJ_TOML, encoding="utf-8")
+    (tmp_path / "mod.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "test_mod.py").write_text(
+        "from mod import f\n\n\ndef test_f():\n    assert f() == 1\n", encoding="utf-8"
+    )
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "spec.json").write_text(
+        json.dumps(
+            {"title": "Spec", "sections": [{"id": "f", "heading": "F", "content": "F.", "links": [{"node_id": f_id}]}]}
+        ),
+        encoding="utf-8",
+    )
+    db_path = tmp_path / ".axiom_graph" / "graph.db"
+    build_index(db_path, tmp_path)
+    mark_clean_nodes(db_path, tmp_path, [section, test], reason="reviewed", verified_by="human")
+    time.sleep(0.02)
+    (tmp_path / "mod.py").write_text("def f():\n    return 1 + 0\n", encoding="utf-8")
+    build_index(db_path, tmp_path)
+    with db._connect(db_path) as conn:
+        _downgrade_to_v4(conn)
+        stale = {r[0] for r in conn.execute("SELECT id FROM nodes WHERE link_status = 'LINKED_STALE'")}
+    assert {section, test} <= stale
+
+    listed = compute_drift_query(db_path, tmp_path, filter="LINKED_STALE", format="ids", limit=100)
+    assert section in listed and test in listed
+    assert mark_clean_nodes(db_path, tmp_path, [test], reason="reviewed", verified_by="human").marked == [test]
+    assert section in reverify_nodes(db_path, tmp_path, [f_id], "reviewed", verified_by="human").cleared
+
+    with db._connect(db_path) as conn:
+        assert migrations.get_user_version(conn) == 4
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assert "node_verification_targets" not in tables, "no pairs are written below v5"
+        assert "live_code_hash" not in {r[1] for r in conn.execute("PRAGMA table_info(nodes)")}
+
+    build_index(db_path, tmp_path)
+    with db._connect(db_path) as conn:
+        assert migrations.get_user_version(conn) == migrations.CURRENT_SCHEMA_VERSION
+        f_hash = conn.execute("SELECT code_hash FROM nodes WHERE id = ?", (f_id,)).fetchone()[0]
+    pairs = _pairs(db_path)
+    assert pairs[(section, f_id)] == (f_hash, None)
+    assert pairs[(test, f_id)] == (f_hash, None)

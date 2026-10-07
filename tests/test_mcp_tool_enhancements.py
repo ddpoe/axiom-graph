@@ -80,7 +80,7 @@ class TestUpdateSectionReorder:
             ],
         )
 
-        sec_id = f"{pid}::docs.guide::intro"
+        sec_id = f"{pid}::docs/guide::intro"
         result = axiom_graph_update_section(str(mini_project), sec_id, after="setup")
         assert "after" in result.lower() or "reorder" in result.lower() or "Updated" in result
 
@@ -112,7 +112,7 @@ class TestUpdateSectionReorder:
             ],
         )
 
-        sec_id = f"{pid}::docs.arch::database.tables"
+        sec_id = f"{pid}::docs/arch::database.tables"
         result = axiom_graph_update_section(str(mini_project), sec_id, after="migrations")
         assert "Updated" in result
 
@@ -135,7 +135,7 @@ class TestUpdateSectionReorder:
             ],
         )
 
-        sec_id = f"{pid}::docs.guide::intro"
+        sec_id = f"{pid}::docs/guide::intro"
         result = axiom_graph_update_section(str(mini_project), sec_id, after="intro")
         # Should not error — either a no-op message or Updated
         assert "ERROR" not in result
@@ -168,7 +168,7 @@ class TestUpdateSectionReorder:
         )
 
         # Try to reorder database.tables after "api" which is a top-level sibling, not a child of database
-        sec_id = f"{pid}::docs.arch::database.tables"
+        sec_id = f"{pid}::docs/arch::database.tables"
         result = axiom_graph_update_section(str(mini_project), sec_id, after="api")
         assert "ERROR" in result
 
@@ -188,7 +188,7 @@ class TestUpdateSectionReorder:
             ],
         )
 
-        sec_id = f"{pid}::docs.guide::intro"
+        sec_id = f"{pid}::docs/guide::intro"
         result = axiom_graph_update_section(str(mini_project), sec_id, after="usage", content="Updated intro")
         assert "Updated" in result
 
@@ -222,7 +222,7 @@ class TestUpdateSectionTags:
             ],
         )
 
-        sec_id = f"{pid}::docs.guide::intro"
+        sec_id = f"{pid}::docs/guide::intro"
         result = axiom_graph_update_section(str(mini_project), sec_id, tags=["important", "reviewed"])
         assert "Updated" in result
         assert "tags" in result
@@ -244,7 +244,7 @@ class TestUpdateSectionTags:
             ],
         )
 
-        sec_id = f"{pid}::docs.guide::intro"
+        sec_id = f"{pid}::docs/guide::intro"
         result = axiom_graph_update_section(str(mini_project), sec_id, tags=[])
         assert "Updated" in result
 
@@ -274,7 +274,7 @@ class TestUpdateDocMeta:
             ],
         )
 
-        doc_id = f"{pid}::docs.guide"
+        doc_id = f"{pid}::docs/guide"
         result = axiom_graph_update_doc_meta(str(mini_project), doc_id, title="New Title")
         assert "Updated" in result or "title" in result
 
@@ -301,7 +301,7 @@ class TestUpdateDocMeta:
             ],
         )
 
-        doc_id = f"{pid}::docs.guide"
+        doc_id = f"{pid}::docs/guide"
         result = axiom_graph_update_doc_meta(str(mini_project), doc_id, tags=["architecture", "v2"])
         assert "Updated" in result
 
@@ -330,7 +330,7 @@ class TestUpdateDocMeta:
             ],
         )
 
-        doc_id = f"{pid}::docs.guide"
+        doc_id = f"{pid}::docs/guide"
         result = axiom_graph_update_doc_meta(str(mini_project), doc_id, title="")
         assert "ERROR" in result
 
@@ -476,7 +476,7 @@ class TestBatchReadDoc:
         result = axiom_graph_read_doc(
             str(mini_project),
             doc_id="ignored",
-            doc_ids=[f"{pid}::docs.guide", f"{pid}::docs.reference"],
+            doc_ids=[f"{pid}::docs/guide", f"{pid}::docs/reference"],
         )
         assert "Guide" in result
         assert "Reference" in result
@@ -498,7 +498,7 @@ class TestBatchReadDoc:
         result = axiom_graph_read_doc(
             str(mini_project),
             doc_id="ignored",
-            doc_ids=[f"{pid}::docs.guide", f"{pid}::docs.nonexistent"],
+            doc_ids=[f"{pid}::docs/guide", f"{pid}::docs/nonexistent"],
         )
         assert "Guide" in result
         assert "ERROR" in result

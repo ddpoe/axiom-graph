@@ -371,6 +371,11 @@ class CodeRenameAdapter:
         self._found_loc = {f.node_id: f.location for f in found}
         #: New IDs that received a migrated history/edges (RENAMED) this run.
         self.applied_new_ids: list[str] = []
+        #: ``(old_id, new_id, unreadable, not_patched)`` per applied rename
+        #: whose DocJSON link rewrite did not get through every file:
+        #: ``not_patched`` files still link ``old_id`` (write locks busy);
+        #: ``unreadable`` ones could not be checked.
+        self.links_not_patched: list[tuple[str, str, list[str], list[str]]] = []
 
     def all_found_candidates(self) -> list[FoundNode]:
         """Return every found node, for the core's global exact-hash pre-pass.
@@ -442,5 +447,7 @@ class CodeRenameAdapter:
         from axiom_graph.index import db  # noqa: PLC0415
 
         location = self._found_loc.get(new_id, "")
-        db.record_code_rename(self.db_path, old_id, new_id, location, self.project_root)
+        patched = db.record_code_rename(self.db_path, old_id, new_id, location, self.project_root)
         self.applied_new_ids.append(new_id)
+        if patched is not None and patched.skipped:
+            self.links_not_patched.append((old_id, new_id, patched.unreadable, patched.not_patched))

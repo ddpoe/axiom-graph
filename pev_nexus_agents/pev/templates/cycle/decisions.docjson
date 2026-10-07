@@ -1,0 +1,16 @@
+{
+  "title": "Template: PEV Cycle Decisions",
+  "tags": [
+    "pev-cycle"
+  ],
+  "meta": {
+    "template_version": "1.0.0"
+  },
+  "sections": [
+    {
+      "id": "about",
+      "heading": "About This Log",
+      "content": "**Filled by:** Architect, Builder and orchestrator — the cycle-wide decision log, one top-level section per decision. The Reviewer reads it to understand judgment calls.\n\nEach entry records a design or implementation decision: what was chosen, the alternatives considered, and why. Read this doc's outline (`axiom_graph_read_doc(outline=true)`) for the next free number, then add the entry at the top level of this doc with `section_id=\"d-N\"` and heading `D-N ({Role}): {title}`. `add_section` refuses a duplicate id, so if another writer took the number first, re-read the outline and take the next one.\n\n**Entry rule:** add one subsection per entry with `axiom_graph_add_section`. Entry ids are slugs with no dots. Omit `content` rather than passing `\"\"`. After two identical failures, change approach instead of retrying. The doc-scope hook refuses `axiom_graph_update_section` and `axiom_graph_patch_section` here, so an entry, once written, is never overwritten.\n\n**Entry content:**\n```\n**Phase:** plan | build | review | audit\n**Choice:** {what was decided}\n**Alternatives:** {what was considered}\n**Reason:** {why}\n```"
+    }
+  ]
+}

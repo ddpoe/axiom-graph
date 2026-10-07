@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import click
@@ -27,6 +26,30 @@ def _require_db(project_root: Path) -> Path:
     return path
 
 
+def _echo_annotation_findings(
+    findings: list[dict], new: int, resolved: int, *, show_all: bool = False, indent: str = ""
+) -> None:
+    """Print the annotation-findings count line and the findings worth listing.
+
+    Prints ``Annotation findings: N (X new, Y resolved)`` followed by the
+    new findings only, or by every current finding when *show_all* is set.
+    Prints nothing when there are no current findings and none resolved.
+
+    Args:
+        findings: Current findings, each carrying a ``new`` flag.
+        new: How many are new.
+        resolved: How many stored findings are gone.
+        show_all: List every current finding, not only the new ones.
+        indent: Prefix for the count line; findings get two more spaces.
+    """
+    if not findings and not resolved:
+        return
+    click.echo(f"{indent}Annotation findings: {len(findings)} ({new} new, {resolved} resolved)")
+    for f in findings:
+        if show_all or f.get("new"):
+            click.echo(f"{indent}  ! [{f['rule_id']}] {f['module']}:{f['line']} {f['function']} — {f['message']}")
+
+
 def _echo_build_summary(summary) -> None:
     """Print the standard build/init summary.
 
@@ -34,11 +57,17 @@ def _echo_build_summary(summary) -> None:
     :class:`axiom_graph.lifecycle.api.BuildSummary` dataclass; both expose
     the same field names so the f-strings work either way.
 
+    A :class:`BuildSummary` that carries staleness counts ends the report
+    with a ``staleness`` line holding the same count summary ``check``
+    prints (frozen-doc sections excluded, LINKED_STALE included).
+
     Args:
         summary: Build summary (dict or :class:`BuildSummary`).
     """
+    check = None
     # Adapt dataclass -> dict-like access without forcing a specific type.
     if hasattr(summary, "files_scanned") and not isinstance(summary, dict):
+        check = getattr(summary, "check", None)
         warnings = list(summary.warnings)
         files_scanned = summary.files_scanned
         files_skipped = summary.files_skipped_mtime
@@ -49,6 +78,8 @@ def _echo_build_summary(summary) -> None:
         edges_written = summary.edges_written
         edges_skipped = summary.edges_skipped
         annotation_findings = list(summary.annotation_findings)
+        findings_new = summary.annotation_findings_new
+        findings_resolved = summary.annotation_findings_resolved
     else:
         warnings = summary["warnings"]
         files_scanned = summary.get("files_scanned", "?")
@@ -60,11 +91,13 @@ def _echo_build_summary(summary) -> None:
         edges_written = summary["edges_written"]
         edges_skipped = summary["edges_skipped"]
         annotation_findings = summary.get("annotation_findings") or []
+        findings_new = summary.get("annotation_findings_new", 0)
+        findings_resolved = summary.get("annotation_findings_resolved", 0)
 
     click.echo(
         f"  files scanned : {files_scanned} (Python)\n"
-        f"  files skipped : {files_skipped} (Python, mtime unchanged)\n"
-        f"  docs skipped  : {docs_skipped} (markdown + DocJSON, mtime unchanged)\n"
+        f"  files skipped : {files_skipped} (Python, content and mtime unchanged)\n"
+        f"  docs skipped  : {docs_skipped} (markdown + DocJSON, content and mtime unchanged)\n"
         f"  nodes written : {nodes_written}\n"
         f"  nodes skipped : {nodes_skipped}\n"
         f"  nodes renamed : {nodes_renamed}\n"
@@ -75,22 +108,10 @@ def _echo_build_summary(summary) -> None:
         click.echo(f"  warnings ({len(warnings)}):")
         for w in warnings:
             click.echo(f"    ! {w}")
-    if annotation_findings:
-        click.echo(f"  Annotation findings ({len(annotation_findings)}):")
-        for f in annotation_findings:
-            click.echo(f"    ! [{f['rule_id']}] {f['module']}:{f['line']} {f['function']} — {f['message']}")
+    _echo_annotation_findings(annotation_findings, findings_new, findings_resolved, indent="  ")
     click.echo("Done.")
+    if check is not None:
+        click.echo(f"  staleness     : {check.summary_line()}")
 
 
-def _row_for_json(row: dict) -> dict:
-    """Prepare a history row dict for JSON serialization."""
-    out = {k: row[k] for k in ("node_id", "scanned_at", "change_type", "git_sha")}
-    if row.get("meta"):
-        try:
-            out["meta"] = json.loads(row["meta"])
-        except Exception:
-            out["meta"] = row["meta"]
-    return out
-
-
-__all__ = ["_db_path", "_require_db", "_echo_build_summary", "_row_for_json"]
+__all__ = ["_db_path", "_require_db", "_echo_annotation_findings", "_echo_build_summary"]

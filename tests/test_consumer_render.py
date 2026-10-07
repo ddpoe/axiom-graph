@@ -18,6 +18,8 @@ from axiom_graph.docjson.render_consumer import (
     load_site_nav,
     validate_site_nav,
     parse_show,
+    _root_to_prefix,
+    _nav_doc_id,
     build_site,
     _strip_docid_links,
 )
@@ -28,7 +30,7 @@ class TestStripDocidLinks:
     reduced to plain text; every other link is left untouched."""
 
     def test_docid_link_collapses_to_text(self):
-        md = "See [Git rename](axiom_graph::docs.pev-requests.git-aware-rename-detection) for details."
+        md = "See [Git rename](axiom_graph::docs/pev-requests/git-aware-rename-detection) for details."
         assert _strip_docid_links(md) == "See Git rename for details."
 
     def test_relative_md_link_untouched(self):
@@ -48,7 +50,7 @@ class TestStripDocidLinks:
         assert _strip_docid_links(md) == md
 
     def test_multiple_links_mixed(self):
-        md = "[A](cortex::docs.consumer.foo) and [B](viz.md) and [C](https://x.io)."
+        md = "[A](cortex::docs/consumer/foo) and [B](viz.md) and [C](https://x.io)."
         assert _strip_docid_links(md) == "A and [B](viz.md) and [C](https://x.io)."
 
 
@@ -185,22 +187,22 @@ class TestSlimNav:
         """parse_show derives output paths and doc_ids from path stems.
 
         A leaf under a folder mirrors its source path 1:1 and carries the
-        nested doc-id (root prefix consumed by the ``::docs.`` head)."""
+        doc-id its publish boundary derives."""
         entries = parse_show(
             ["getting-started", {"features": {"show": ["staleness"]}}],
             project_id="axiom_graph",
-            prefix="consumer",
+            prefix=_root_to_prefix("docs/consumer"),
         )
         # top-level leaf
         leaf = entries[0]
         assert leaf.output_path == "getting-started.md"
-        assert leaf.doc_id == "axiom_graph::docs.consumer.getting-started"
+        assert leaf.doc_id == "axiom_graph::docs/consumer/getting-started"
         # nested folder + child
         folder = entries[1]
         assert folder.stem == "features"
         child = folder.children[0]
         assert child.output_path == "features/staleness.md"
-        assert child.doc_id == "axiom_graph::docs.consumer.features.staleness"
+        assert child.doc_id == "axiom_graph::docs/consumer/features/staleness"
 
     def test_validate_missing_required_keys(self):
         """Slim nav without site_name / root / show produces errors."""
@@ -302,8 +304,11 @@ def _seed_doc(
     ``features/staleness``).  Returns the derived doc_id.
     """
     db_path = mini_project / ".axiom_graph" / "graph.db"
-    prefix = ".".join(p for p in root.split("/") if p and p != "docs")
-    doc_id = f"{project_id}::docs.{prefix}.{rel_path.replace('/', '.')}"
+    # Seeded through the renderer's own reconstruction rather than a private
+    # copy of it: the fixture's whole job is to put in the index the identity
+    # the nav parser will look for, so a second spelling of the rule here is a
+    # fixture that can silently stop describing the code it feeds.
+    doc_id = _nav_doc_id(project_id, _root_to_prefix(root), rel_path)
     _setup_doc_in_db(db_path, doc_id, title, sections)
     if write_source:
         src = mini_project / root / f"{rel_path}.json"
@@ -394,7 +399,7 @@ class TestBuildSiteNested:
         build_site(mini_project, nav_path=nav_file, output_dir=out)
 
         manifest = json.loads((out / ".render-manifest.json").read_text(encoding="utf-8"))
-        assert manifest["features/viz.md"]["doc_id"] == "test::docs.consumer.features.viz"
+        assert manifest["features/viz.md"]["doc_id"] == "test::docs/consumer/features/viz"
 
     def test_warns_on_missing_doc(self, mini_project: Path):
         """A nav stem with no source on disk fails validation (unresolvable)."""
@@ -551,7 +556,7 @@ class TestLinksUnderNestedOutput:
                     "id": "intro",
                     "heading": "Intro",
                     "level": 2,
-                    "content": "See [viz](viz.md), [jump](#intro), and [req](axiom_graph::docs.foo).",
+                    "content": "See [viz](viz.md), [jump](#intro), and [req](axiom_graph::docs/foo).",
                 }
             ],
         )
@@ -562,7 +567,7 @@ class TestLinksUnderNestedOutput:
         md = (out / "features" / "staleness.md").read_text(encoding="utf-8")
         assert "[viz](viz.md)" in md  # relative .md link preserved
         assert "[jump](#intro)" in md  # intra-page anchor preserved
-        assert "axiom_graph::docs.foo" not in md  # doc-id link stripped
+        assert "axiom_graph::docs/foo" not in md  # doc-id link stripped
         assert "[req](" not in md
 
     @workflow(

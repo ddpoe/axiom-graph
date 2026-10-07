@@ -2,7 +2,7 @@
 
 Minimal Claude Code plugin-hook test harness. Install this when a plugin hook isn't firing and you need to isolate which variable is broken (matcher shape, env-var expansion, stdin JSON field presence, cross-platform path handling).
 
-**Recommended install alongside the [`pev`](../pev/) plugin** — step-by-step instructions in [`../pev/SETUP.md`](../pev/SETUP.md). `hook-spike` adds a 10-second smoke test (`/hs-heartbeat`) that's invaluable when debugging PEV issues: run it first to isolate "is the plugin-hook platform alive?" before assuming PEV-specific logic is at fault.
+**Recommended install alongside the [`pev`](../pev/) plugin** — step-by-step instructions in [`../pev/docs/setup.md`](../pev/docs/setup.md). `hook-spike` adds a 10-second smoke test (`/hs-heartbeat`) that's invaluable when debugging PEV issues: run it first to isolate "is the plugin-hook platform alive?" before assuming PEV-specific logic is at fault.
 
 ## What it provides
 

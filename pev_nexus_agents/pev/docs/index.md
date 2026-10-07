@@ -1,5 +1,5 @@
 # pev
 
 - [pev](readme.md)
-- [PEV Setup](setup.md)
-- [PEV User Guide](user-guide.md)
+- [PEV setup](setup.md)
+- [PEV user guide](user-guide.md)

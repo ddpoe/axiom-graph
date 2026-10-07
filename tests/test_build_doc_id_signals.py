@@ -18,6 +18,7 @@ import time
 from axiom_annotations import Step, workflow
 
 from axiom_graph.config import db_path_for
+from axiom_graph.index import doc_ids
 from axiom_graph.lifecycle import api as lifecycle_api
 
 from tests.fixtures import doc_trees
@@ -31,6 +32,47 @@ def _overlap_warnings(summary) -> list[str]:
 def _dotted_warnings(summary) -> list[str]:
     """Return warnings that advise on a dotted DocJSON filename."""
     return [w for w in summary.warnings if "dotted DocJSON filename" in w]
+
+
+def _live_overlap_groups(root_entry: str, rel_paths: tuple[str, ...]) -> dict[str, list[str]]:
+    """Group *rel_paths* by the doc id the scanner derives for them today.
+
+    Only groups of two or more come back -- those are the overlaps a build has
+    to report.  Derived rather than written out, because the advisory's
+    subject is the namespace the scanner *actually produces*: an expectation
+    spelled by hand pins whichever namespace was live when it was typed, and
+    an advisory reporting a namespace nothing produces is precisely the defect
+    being guarded against.
+
+    Args:
+        root_entry: The configured docs root the files live under.
+        rel_paths: POSIX paths within that root.
+
+    Returns:
+        Doc id -> repo-relative source paths, duplicate groups only.
+    """
+    groups: dict[str, list[str]] = {}
+    for rel in rel_paths:
+        groups.setdefault(doc_ids.derive_doc_id("proj", root_entry, rel), []).append(f"{root_entry}/{rel}")
+    return {doc_id: sources for doc_id, sources in groups.items() if len(sources) > 1}
+
+
+def _assert_overlaps_are_the_live_ones(summary, root_entry: str, rel_paths: tuple[str, ...]) -> None:
+    """Assert the build's overlap warnings are exactly the live duplicate groups.
+
+    Args:
+        summary: The build summary to read warnings from.
+        root_entry: The configured docs root the files live under.
+        rel_paths: POSIX paths within that root that might overlap.
+    """
+    expected = _live_overlap_groups(root_entry, rel_paths)
+    overlaps = _overlap_warnings(summary)
+    assert len(overlaps) == len(expected), summary.warnings
+    for doc_id, sources in expected.items():
+        named = [w for w in overlaps if doc_id in w]
+        assert len(named) == 1, summary.warnings
+        for source in sources:
+            assert source in named[0]
 
 
 def _build(root):
@@ -52,20 +94,27 @@ def _doc_ids(root) -> set[str]:
 
 
 @workflow(
-    purpose="Verify an incremental build reports a doc-id overlap even when one of the two colliding files is skipped by the mtime fast-pass",
+    purpose="Verify an incremental build's doc-id signals still name a file that the mtime fast-pass skipped, and report overlaps in the namespace the scanner derives",
 )
-def test_overlap_reported_when_one_colliding_file_is_mtime_skipped(tmp_path):
-    """A collision against an already-indexed, unchanged file still reports."""
+def test_signals_still_name_a_file_the_mtime_fast_pass_skipped(tmp_path):
+    """A signal about an already-indexed, unchanged file still reports.
+
+    The property is that the signals come from a walk of the whole doc tree
+    rather than from the set of files this build happened to read.  The dotted
+    advisory carries it here because it is a per-file finding: it can only
+    name the aged file if the aged file was enumerated.
+    """
     口 = Step(
         step_num=1,
-        name="Index a clean tree",
-        purpose="Build a project whose docs derive distinct ids so the first build is quiet",
+        name="Index a tree holding one dotted filename",
+        purpose="Build a project whose single document is the one the next build will skip",
     )
     root = tmp_path / "proj"
     doc_trees.write_toml(root, ["docs"])
-    doc_trees.write_doc(root, "docs/adrs/013-x.json", title="Nested ADR")
+    doc_trees.write_doc(root, "docs/adrs.013-x.json", title="Flat ADR")
     first = _build(root)
     assert not _overlap_warnings(first)
+    assert len(_dotted_warnings(first)) == 1, first.warnings
 
     口 = Step(
         step_num=2,
@@ -73,32 +122,35 @@ def test_overlap_reported_when_one_colliding_file_is_mtime_skipped(tmp_path):
         purpose="Leave the pre-existing file untouched so the next build skips reading it",
     )
     old = time.time() - 3600
-    os.utime(root / "docs" / "adrs" / "013-x.json", (old, old))
+    os.utime(root / "docs" / "adrs.013-x.json", (old, old))
 
     口 = Step(
         step_num=3,
-        name="Introduce a colliding sibling",
-        purpose="Add a dotted-path file that derives the same doc id as the skipped file",
+        name="Introduce a sibling at the path the dotted name imitates",
+        purpose="Give the build a freshly-walked file to work on beside the skipped one",
     )
-    doc_trees.write_doc(root, "docs/adrs.013-x.json", title="Flat ADR")
+    doc_trees.write_doc(root, "docs/adrs/013-x.json", title="Nested ADR")
 
     口 = Step(
         step_num=4,
-        name="Rebuild and assert the overlap is named",
+        name="Rebuild and assert the skipped file is still named",
         purpose="The signal must come from the whole tree, not the files walked this build",
     )
     second = _build(root)
     # The premise the test rests on: the aged file really was left unread.
     # Without this a build that had stopped skipping doc files would still
-    # produce the overlap warning and the test would pass for the wrong
-    # reason.  One doc file existed before this build and no Markdown does,
-    # so the count can only be that file.
+    # produce the warning and the test would pass for the wrong reason.  One
+    # doc file existed before this build and no Markdown does, so the count
+    # can only be that file.
     assert second.docs_skipped_mtime == 1, second
-    overlaps = _overlap_warnings(second)
-    assert len(overlaps) == 1, second.warnings
-    assert "proj::docs.adrs.013-x" in overlaps[0]
-    assert "docs/adrs/013-x.json" in overlaps[0]
-    assert "docs/adrs.013-x.json" in overlaps[0]
+    # Already advised on by the first build, so not repeated; but the
+    # whole-tree pass still enumerated the skipped file, which keeps it in
+    # the stored set rather than letting it drop out as if it were gone.
+    assert not _dotted_warnings(second), second.warnings
+    from axiom_graph.index import db
+
+    assert db.read_annotation_store(db_path_for(root)).dotted == ["docs/adrs.013-x.json"]
+    _assert_overlaps_are_the_live_ones(second, "docs", ("adrs/013-x.json", "adrs.013-x.json"))
 
 
 # ---------------------------------------------------------------------------
@@ -124,14 +176,23 @@ def test_dotted_filename_advisory_does_not_change_derived_id(tmp_path):
     assert len(advisories) == 1, summary.warnings
     assert "docs/release.2.1.notes.json" in advisories[0]
 
+    # Reported once: an unchanged rebuild stays quiet, and a second dotted
+    # file is the only one the next build names.
+    assert not _dotted_warnings(_build(dotted_root))
+    doc_trees.write_doc(dotted_root, "docs/plans.second.json", title="Second dotted")
+    third = _dotted_warnings(_build(dotted_root))
+    assert len(third) == 1, third
+    assert "docs/plans.second.json" in third[0]
+
     # The advisory is about the filename shape and nothing else: alone in a
     # project of its own, the same file derives a byte-identical doc id.
     solo_root = tmp_path / "solo"
     doc_trees.write_toml(solo_root, ["docs"])
     doc_trees.write_doc(solo_root, "docs/release.2.1.notes.json", title="Dotted")
     _build(solo_root)
-    assert "proj::docs.release.2.1.notes" in _doc_ids(solo_root)
-    assert "proj::docs.release.2.1.notes" in _doc_ids(dotted_root)
+    derived = doc_ids.derive_doc_id("proj", "docs", "release.2.1.notes.json")
+    assert derived in _doc_ids(solo_root)
+    assert derived in _doc_ids(dotted_root)
 
 
 @workflow(
@@ -145,11 +206,14 @@ def test_non_document_json_under_a_docs_root_produces_no_signal(tmp_path):
     assert not _overlap_warnings(summary), summary.warnings
     assert not _dotted_warnings(summary), summary.warnings
     # The real documents beside them still index normally.
-    assert {"proj::docs.real", "proj::docs.section-less"} <= _doc_ids(root)
+    assert {
+        doc_ids.derive_doc_id("proj", "docs", "real.json"),
+        doc_ids.derive_doc_id("proj", "docs", "section-less.json"),
+    } <= _doc_ids(root)
 
 
 @workflow(
-    purpose="Verify a doc-id overlap between two real documents is still reported when a non-document JSON file shares the same derived id",
+    purpose="Verify the doc-id overlaps a build reports are exactly the duplicate groups of the namespace the scanner derives, and are still reported beside non-document JSON that would derive the same id",
 )
 def test_document_overlap_is_still_reported_beside_non_documents(tmp_path):
     """Ignoring data files must not turn into ignoring the collision."""
@@ -158,11 +222,10 @@ def test_document_overlap_is_still_reported_beside_non_documents(tmp_path):
     doc_trees.write_doc(root, "docs/adrs.013-x.json", title="Flat ADR")
     summary = _build(root)
 
-    overlaps = _overlap_warnings(summary)
-    assert len(overlaps) == 1, summary.warnings
-    assert "proj::docs.adrs.013-x" in overlaps[0]
-    assert "docs/adrs/013-x.json" in overlaps[0]
-    assert "docs/adrs.013-x.json" in overlaps[0]
+    # The two data files -- docs/data/chart.json and docs/data.chart.json --
+    # are deliberately left out of the expectation: whatever id they derive
+    # between them, neither is a document and neither may be reported.
+    _assert_overlaps_are_the_live_ones(summary, "docs", ("adrs/013-x.json", "adrs.013-x.json"))
     # ...and the dotted advisory names the document, not the data file.
     assert [w for w in _dotted_warnings(summary) if "docs/data.chart.json" in w] == []
     assert len([w for w in _dotted_warnings(summary) if "docs/adrs.013-x.json" in w]) == 1

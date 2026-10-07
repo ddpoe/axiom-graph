@@ -2,8 +2,8 @@
 #
 # autodoc (MCP tools) and sphinx-click (CLI) both import the axiom_graph
 # package, so we install the base package + the `docs` dependency group via
-# Poetry -- but WITHOUT any optional extras. The heavy/deprecated extras
-# (semantic, viz, tree-sitter) live in [tool.poetry.extras] and are mocked via
+# Poetry -- but WITHOUT any optional extras. The heavy optional extras
+# (viz, tree-sitter) live in [tool.poetry.extras] and are mocked via
 # autodoc_mock_imports in userdocs/conf.py, so the import never needs them.
 #
 # RTD + Poetry: install Poetry in `post_create_environment` so it lands in the

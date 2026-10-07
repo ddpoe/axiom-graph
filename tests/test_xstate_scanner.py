@@ -350,6 +350,90 @@ export const m = setup({
     assert inv[0].to_id.endswith("::submitPipeline")
 
 
+_PARAM_EDITOR_MACHINE = "export function coerceAndValidate() { return Promise.resolve(); }\n"
+
+_VARIANT_MACHINE = """
+import { setup, fromPromise } from 'xstate';
+import { coerceAndValidate } from './paramEditor.machine';
+
+export const variant = setup({
+  actors: {
+    validate: fromPromise(coerceAndValidate),
+  },
+}).createMachine({
+  id: 'variant',
+  initial: 'validating',
+  states: {
+    validating: {
+      invoke: { src: 'validate' },
+    },
+  },
+});
+"""
+
+
+@workflow(purpose="An actor imported from a dotted filename resolves to its real module and function")
+def test_actor_imported_from_dotted_filename_resolves(tmp_path):
+    from axiom_graph.scanners.js_scanner import scan_js_module
+
+    (tmp_path / "paramEditor.machine.ts").write_text(_PARAM_EDITOR_MACHINE, encoding="utf-8")
+    _nodes, edges, _findings = _scan(tmp_path, _VARIANT_MACHINE, name="variant.machine.ts")
+
+    _js_nodes, js_edges = scan_js_module(tmp_path / "variant.machine.ts", tmp_path, "proj")
+    assert any(e.edge_type == "depends_on" and e.to_id == "proj::paramEditor.machine" for e in js_edges)
+    inv = [e for e in _delegates_to_edges(edges) if (e.meta or {}).get("via") == "invoke"]
+    assert [e.to_id for e in inv] == ["proj::paramEditor.machine::coerceAndValidate"]
+
+
+@workflow(
+    purpose="An index parsed by older scanners is re-parsed by the next build: a machine whose dotted-filename "
+    "import now resolves stays VERIFIED, and its dangling actor link stops reading BROKEN_LINK"
+)
+def test_build_reparses_an_index_from_older_scanners_and_the_new_edge_flags_nothing(tmp_path):
+    from click.testing import CliRunner
+
+    from axiom_graph.cli import main as cli
+    from axiom_graph.index import db
+    from axiom_graph.index.builder import SCAN_SCHEME, SCAN_SCHEME_META_KEY
+    from axiom_graph.lifecycle.api import compute_check_summary
+    from axiom_graph.lifecycle.mcp_tools import axiom_graph_mark_clean
+
+    口 = Step(step_num=1, name="Index a machine whose import has no target", purpose="Its actor link dangles")
+    (tmp_path / "axiom-graph.toml").write_text(
+        '[axiom_graph]\nproject_id = "proj"\n\n[axiom_graph.scan]\njs_paths = ["web/*.ts"]\n', encoding="utf-8"
+    )
+    web = tmp_path / "web"
+    web.mkdir()
+    (web / "variant.machine.ts").write_text(_VARIANT_MACHINE, encoding="utf-8")
+    assert CliRunner().invoke(cli, ["init", str(tmp_path)]).exit_code == 0
+    db_path = tmp_path / ".axiom_graph" / "graph.db"
+
+    def importer_statuses():
+        statuses = compute_check_summary(db_path, tmp_path).statuses
+        ids = [n.id for n in db.all_nodes(db_path) if n.location == "web/variant.machine.ts"]
+        return {nid: statuses[nid][:2] for nid in ids}
+
+    before = importer_statuses()
+    assert any(link == "BROKEN_LINK" for _own, link in before.values())
+    axiom_graph_mark_clean(str(tmp_path), "", "reviewed", node_ids=list(before))
+
+    口 = Step(
+        step_num=2,
+        name="Add the imported module under an index from older scanners",
+        purpose="The unchanged importer is parsed again only because the stored scan scheme is older",
+    )
+    (web / "paramEditor.machine.ts").write_text(_PARAM_EDITOR_MACHINE, encoding="utf-8")
+    db.set_index_meta(db_path, SCAN_SCHEME_META_KEY, "0")
+    result = CliRunner().invoke(cli, ["build", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert db.get_index_meta(db_path, SCAN_SCHEME_META_KEY) == SCAN_SCHEME
+
+    口 = Step(step_num=3, name="Assert the importer reads VERIFIED", purpose="A new edge alone flags nothing")
+    statuses = importer_statuses()
+    assert statuses
+    assert set(statuses.values()) == {("VERIFIED", "VERIFIED")}
+
+
 @workflow(purpose="US-4: spawn(importedMachine) emits composes between machine envelopes")
 def test_spawn_composes_between_machines(tmp_path):
     other = tmp_path / "other.ts"

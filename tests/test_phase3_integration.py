@@ -4,12 +4,11 @@ End-to-end tests that exercise the full build + check + workflow_detail
 path without the legacy ``.dflow/workflow.db`` cross-DB reader.
 
 Mapped to the Phase 3 pitch test-plan (cycle manifest
-``axiom_graph::docs.pev.cycles.pev-2026-04-21-phase3-axiom-annotations``).
+``axiom_graph::docs/pev/cycles/pev-2026-04-21-phase3-axiom-annotations``).
 """
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from axiom_annotations import Step, workflow
@@ -25,8 +24,7 @@ def _write(path: Path, text: str) -> Path:
 
 
 def _build(project_root: Path, discovery_only: bool = False) -> None:
-    """Run axiom-graph build with embeddings skipped."""
-    os.environ["AXIOM_GRAPH_SKIP_EMBEDDINGS"] = "1"
+    """Run axiom-graph build."""
     builder.build(project_root, project_id="proj", discovery_only=discovery_only)
 
 

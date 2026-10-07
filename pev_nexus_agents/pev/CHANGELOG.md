@@ -6,12 +6,17 @@ All notable changes to the **PEV** Claude Code plugin (and its sibling `hook-spi
 
 The PEV plugin drives the `axiom-graph` MCP server, so each plugin release has a minimum server version. Pin `axiom-graph` at or above the floor for your plugin version:
 
-| PEV plugin     | Requires axiom-graph |
-|----------------|----------------------|
-| 1.4.1 and up   | ≥ 2.3.0              |
-| 1.4.0          | ≥ 2.2.0              |
-| 1.2.0 – 1.3.0  | ≥ 2.1.0              |
-| 1.0.0 – 1.1.1  | 2.0.x                |
+| PEV plugin              | Requires axiom-graph |
+|-------------------------|----------------------|
+| 2.0.0                   | ≥ 3.0.0              |
+| 1.4.1                   | ≥ 2.3.0              |
+| 1.4.0                   | ≥ 2.2.0              |
+| 1.2.0 – 1.3.0           | ≥ 2.1.0              |
+| 1.0.0 – 1.1.1           | 2.0.x                |
+
+**Server-side migration required when you upgrade past the doc-ID namespace change.** axiom-graph 3.0.0 moves doc node ids from the flat `docs.` namespace to per-root, path-based ids (`{project}::docs/adrs/013-x`, `{project}::.pev/policy`, `{project}::docs/notes.md`). That is a **mandatory one-time migration for every consumer**, not an optional cleanup: run `axiom-graph doc-ids preview <root>` then `axiom-graph doc-ids execute <root>`. **Order matters, and both wrong orders are destructive** — the safe window is after upgrading the package and before the next build. Building first re-derives every document under the new rule while the index still holds the old ids, inserting the whole doc tree afresh and retiring its verification, history, and edges; migrating and then rolling the package back resurrects the identities just retired. A build in the first state now refuses and names the command rather than proceeding. Every PEV agent addresses documents by id — cycle manifests included — so run the migration before the next cycle, not during one. See the axiom-graph CHANGELOG for the full note.
+
+**Why 2.0.0 needs ≥ 3.0.0:** the skills use path-form doc ids, take a written doc's id from `axiom_graph_write_doc`'s `doc id` line, read `drift_query`'s labelled `via=` / `root=` fields, rely on `read_doc` returning child sections, call `axiom_graph_report(detail="condensed", max_chars=None)`, grant `axiom_graph_accept_doc_edits` and `axiom_graph_guide`, and pass `addresses=` to `axiom_graph_update_section` / `axiom_graph_patch_section` to clear a section's `LINKED_STALE` after an edit. The merge step also needs it: it settles main with `axiom_graph_carry_forward`: a dry run, then the real carry, which brings each verification across separately, so a node the worktree verified for its content but not yet for one of its links still carries what matches (a partial carry). `axiom_graph_carry_forward`, its dry run and partial carries all first ship in axiom-graph 3.0.0. Below 3.0.0 the merge step fails at its first carry, after the branch has already landed on main. All of these first ship in axiom-graph 3.0.0.
 
 **Why 1.4.1 needs ≥ 2.3.0:** the clean-action guidance now tells agents that reverifies compose — that working through a skipped dependent's named offenders clears it on the last one. That is only true from server 2.3.0; on 2.2.0 a dependent with two or more offenders can never be cleared by `reverify` in any order, so an agent following this guidance against a 2.2.0 server would reverify each offender in turn and never see the dependent clear. Nothing crashes — the failure is a wasted loop and a dependent left `LINKED_STALE` — but the guidance is wrong below 2.3.0, so the floor moves.
 
@@ -20,6 +25,221 @@ The PEV plugin drives the `axiom-graph` MCP server, so each plugin release has a
 **Why 1.4.0 needs ≥ 2.2.0:** the clean-action toolsets now include `axiom_graph_reverify`, an MCP tool first shipped by the server in 2.2.0. Running PEV 1.4.0 against a 2.1.x server will fail the moment the Auditor or dev-shard attempts a `reverify` call.
 
 **Why 1.2.0 needs ≥ 2.1.0:** the agents now call `axiom_graph_patch_section`, an MCP tool first shipped by the server in 2.1.0. Running PEV 1.2.0 against the public 2.0.x server will fail the moment an agent attempts a `patch_section` edit.
+
+### Claude Code session logs (efficiency analyzer)
+
+`scripts/analyze_pev_session.py` (run in `pev-cycle` Phase 8) reads Claude Code's session logs, a private format that changes without notice. The script does not pin a Claude Code version. It detects which layout a log uses and reads every layout listed here, falling back to the next one down. If none matches, the report keeps only per-agent totals and loses the per-tool breakdown; it does not fail. When a session comes from a Claude Code newer than the last-checked version, the script prints a warning. A missing breakdown at that point means the format changed, not that the agents did nothing: add a parser branch and a row here.
+
+| Layout | Where subagent tool calls are | Where per-agent totals are | Last checked on Claude Code | Analyzer support |
+|---|---|---|---|---|
+| Per-subagent transcripts | `<session>/subagents/agent-<id>.jsonl` plus `.meta.json` (`agentType`, `toolUseId`) | `<task-notification>` `<usage><subagent_tokens>…</usage>` | 2.1.287 | 2.0.0 and up |
+| Inline progress records | `progress` / `agent_progress` records in the main session log | `total_tokens:` / `subagent_tokens:` lines in the Agent tool result | before 2.1.286 (boundary not recorded) | all versions |
+
+The session log itself lives at `~/.claude/projects/<cwd-slug>/<session-id>.jsonl`. Claude Code relocates the file when the session changes directory (`relocated` and `worktree-state` records), so a session started in the main checkout can end up under a worktree's folder and the reverse, and the slug's drive-letter case varies (`C--…` and `c--…` both occur on Windows). `--find-cycle` therefore searches every project folder and reads each log in full. It matches a session only when the session dispatches a PEV agent (`pev-*`) for the cycle, and it keeps only the calls attributed to that cycle: a call that names a cycle id moves the session's current cycle to the id it names most, and a call that names none stays with the current one. Agent types are plugin-namespaced (`pev:pev-builder`) and are normalised to the bare name.
+
+## [2.0.0] — 2026-10-07
+
+> **Requires axiom-graph ≥ 3.0.0** (see [Compatibility](#compatibility)). Major: doc ids, document extensions and template names change, and consumers run axiom-graph's `doc-ids` migration before the first cycle on this version. Breaking changes are listed first.
+
+### Audit in the worktree, one shared merge step
+
+These entries need axiom-graph ≥ 3.0.0 for `axiom_graph_carry_forward` (see [Compatibility](#compatibility)).
+
+**Upgrade note:** the cycle `manifest` and `instance` templates gained a `baseline` section, and the cycle `review` template 1.1.0 gained a paragraph on sharded review. `scripts/pev-seed.sh` never overwrites a seeded file, so until you replace the old copies a new cycle stops at the manifest clone, and a new `/pev-instance` at the checkin clone, with `unknown in set_sections: baseline`. To upgrade:
+
+1. Delete `.pev/templates/cycle/manifest.docjson`, `.pev/templates/instance.docjson` and `.pev/templates/cycle/review.docjson`. The first two are required. The review template keeps the same single section, so an old copy still clones and sharded review still works from the skills' instructions; delete it too so its text matches them.
+2. Run the seed script from your project root, as in setup.md's "Seed PEV's files into your project" step: `bash "$PEV_DIR"/scripts/pev-seed.sh`, with `PEV_DIR` set to the plugin folder you run (setup.md shows how to find it), and `--axiom-graph "<command>"` when you run axiom-graph through a tool, e.g. `--axiom-graph "poetry run axiom-graph"`. It copies the current templates, builds the index and accepts the copied files.
+3. Commit `axiom-graph.toml` and `.pev/`.
+
+The diff covers more than the three templates:
+
+- The accept step re-stamps the seeded files it keeps: each of their sections gains an `axiom_stamp`. Commit them with the rest of `.pev/`.
+- On a project seeded before `frozen_tags` existed, the script adds `[axiom_graph.staleness] frozen_tags` to `axiom-graph.toml`. PEV's run records and closed requests then drop out of `check`'s counts, so the counts fall after the next build. That is expected: those docs are frozen.
+
+#### Changed
+
+- **Audit and doc review run in the cycle's worktree, before the merge.** After Review, `/pev-cycle` now runs: 6 Sync + Audit, 7 Doc Review, 8 Merge, 9 Complete.
+  - Phase 6 merges your local main into the cycle branch, in the worktree; it never rebases, and a conflict is a gate. The Auditor then runs with the worktree as its `project_root`, so it audits the tree that will land.
+  - Phase 7's Doc Reviewer runs in the same worktree. The proposed-links gate, the changes-summary (from the worktree's index) and the consumer-docs render follow there.
+  - Phase 8 commits the audit on the branch, then shows the merge gate. The gate approves one finished unit: code, tests, docs, audit and doc review.
+  - Main receives a `--no-ff` merge commit, whose message carries an `Auditor:` line, then one small `PEV complete: {cycle-id}` commit holding the run's manifest (with the final check) and its efficiency report. The separate `PEV audit:` commit on main is gone.
+  - The Auditor mutex and the state file on main are gone. The worktree's `.pev-state.json` serves every role, the hooks confine the Auditor and the Doc Reviewer to the worktree, and parallel cycles audit in parallel.
+  - A cycle started on the old order (merged first, audited on main) finishes on that order.
+- **One merge step lands a run and settles main with `axiom_graph_carry_forward`.** `/pev-cycle` and `/pev-instance` both follow `templates/merge-step-reference.md`:
+  - It runs the full suite in the worktree and leaves the worktree.
+  - When main moved since the sync, it merges main into the branch again (never a rebase) and re-runs the suite.
+  - It records main's stale node ids, lands the branch, builds, and carries the worktree's verifications to main: a dry run first, then the real carry.
+  - It compares main's stale ids with the recorded set. Only newly stale nodes are listed, by id, at one gate where you decide each node: clear it or record it for a follow-up. Nothing is cleared in bulk.
+  - It then makes the completion commit and the history checkpoint, and removes the worktree and the branch, with a fallback for Windows paths that are too long.
+  - `bgIsolation: "none"` now matters only for this step, the one time a background cycle writes main. A cycle that changes MCP tools needs `/mcp` restarted before it.
+- **`/pev-instance` works in its own worktree**, one task at a time. Each task gets a worktree from local HEAD, an index of its own, an entry check whose stale ids become the checkin's `baseline`, then the plan gate, the change and its doc updates, the commit, and the Reviewer and Doc Reviewer, all in that worktree. It lands through the same merge step before the next task starts, and its efficiency report goes in the completion commit. The uncommitted-changes gate is gone: your uncommitted work on main never mixes into the change. An open instance is resumed from its worktree.
+- **Gates have one shape and a resume point.** Every gate the orchestrator or an instance shows, and every Reviewer, Auditor or Doc Reviewer `NEEDS_INPUT`, gives the gate's name, the decisions to make with a recommendation for each, one yes/no question, and the content quoted from the docs. The cycle's `manifest::status` and the instance's checkin carry a `Resume at:` line, rewritten at every gate, naming where a fresh session picks the run up.
+- **Large cycles can split review across parallel Reviewer shards.** When the pitch lists `**Review shards:**`, each shard reviews its tasks into its own `review-shard-*` doc, and the orchestrator writes the combined verdict.
+- **Approved fix lists are saved** in the cycle's manifest, `manifest::fix-list.round-N`, before the fix dispatch; the fix Builder and the re-review cite items by number.
+- **The Doc Reviewer writes only `audit::doc-review`** and its subsections. The doc-scope hook let it write the whole `audit` doc before; with the Auditor in the same worktree it must not touch the impact report or the changes-summary.
+
+#### Added
+
+- `templates/merge-step-reference.md`, the merge step.
+- Cycle manifest template 1.1.0: `baseline` (the entry check's ids, main's context, main's pre-merge ids and the final check) and `fix-list`. Review template 1.1.0: shard mode. Instance template 1.2.0: a `baseline` section, `Worktree:`, `Branch:`, `Baseline SHA:` and `Main ...` lines in `meta`, and a `merging` status.
+
+### Cycle A1: a cycle is a directory
+
+Layout of a PEV cycle (cycle A1 of the 3.0 plan).
+
+#### Changed
+
+- **A cycle is a directory of seven docs.** `/pev-cycle` creates `docs/pev/cycles/{cycle-id}/` with seven `axiom_graph_clone_doc` calls from the project's seeded templates: `manifest`, `architect`, `decisions`, `builder`, `review`, `audit`, `friction`. Only the manifest carries the status tag (`in-progress`, `completed`). `.pev-state.json` records `layout: "directory"` and points `cycle_doc_id` at the manifest. If the templates aren't seeded, the orchestrator halts and names the seed command. Cycles created before this release stay single files and finish on the old layout.
+- **Each cycle doc has one owner, enforced by the doc-scope hook.** The Architect writes `architect` and `manifest::scope`; the Builder `builder`; the Reviewer `review` (with `review-shard-*` reserved); the Auditor `audit` (and the project's live docs outside the cycle); the Doc Reviewer `audit::doc-review`. Deny messages name the docs the agent may write.
+- **Decisions and friction are append-only, one subsection per entry.** Entries are added with `axiom_graph_add_section` (`decisions::d-N`, `friction::<agent>.<slug>`); the hook refuses `update_section` and `patch_section` on both logs, and allows friction entries only under the caller's own group. The old advice to append with `patch_section` is gone.
+- **The Builder brief is one task.** Every Builder dispatch, continuations included, inlines one `architect::tasks.task-N` and the decisions it cites, instead of the whole pitch. The Architect writes one `task-N` subsection per task, sized at about 60 Builder calls.
+- **The Builder and Reviewer write their own results.** The Builder records `builder::inc-N.task-M.{progress,manifest,checkpoint}`; the Reviewer adds `review::pass-N` per pass and writes `review::verdict`. Both return a short control envelope (`---ENVELOPE---`) instead of the full manifest or verdict, and the orchestrator no longer writes checkpoints.
+- **Phase 5 handles a Reviewer `CONTINUING`** with a continuation dispatch that resumes at the next pass (0–5, with 5a–5e).
+- **`clone_doc` is the orchestrator's alone.** It is in the doc-scope matcher and refused to every PEV subagent; no PEV agent lists `Agent` or `clone_doc` in its tools (a nested helper would escape the parent's tool budget). The Reviewer and Doc Reviewer gain `add_section`.
+- **The doc-scope hook checks batch edits.** An `update_section` or `patch_section` call with `edits=[...]` (axiom-graph ≥ 3.0.0; earlier versions have no batch mode) is checked item by item under the cycle's layout rules, and one out-of-scope item, or one without a `section_id`, refuses the whole call with a message naming it. A top-level `section_id` sent alongside `edits` is checked too.
+- **Readers accept both layouts.** The Phase 8 report excludes the cycle directory by prefix; the collision check and cycle-walking readers skip `docs/pev/cycles/efficiency/`.
+
+#### Added
+
+- **Template set** under `templates/`: `cycle/` (the seven cycle docs) plus `instance`, `request` and three audit templates, each with `meta.template_version`.
+- **`scripts/pev-seed.sh`** copies missing templates into `<project>/.pev/templates/`, stamps `meta.seeded_from`, and never overwrites a file.
+
+#### Removed
+
+- `templates/cycle-manifest-template.docjson` (replaced by `templates/cycle/`).
+
+### Cycle A2: running outside cortex, guardrails, honest records
+
+#### Runs outside cortex
+
+- **Agents take project facts from `axiom_graph_info`.** Every agent except `pev-spike` calls `axiom_graph_guide` and `axiom_graph_info(project_root)` before any other axiom-graph call, lists both in its `tools:`, and takes doc ids, paths and file extensions from their answers. `/pev-cycle`, `/pev-instance` and the three `/pev-audit-*` skills tell the orchestrating session the same. Every `axiom_graph::` example id in the skills and templates is now `{project_id}::`. The spike takes its manifest id from the `write_doc` result and checks for, and removes, leftovers using `info`'s `docs_dirs` and `docs_extensions`. Id-collision checks and SOP fallbacks name `info`'s `docs_extensions` instead of `.docjson`/`.json`. This needs an axiom-graph server that registers `axiom_graph_info`. `pev-spike` makes neither call: its smoke test counts tool calls exactly.
+- **Seeding makes `.pev` a docs root.** `scripts/pev-seed.sh` takes `--axiom-graph CMD` and checks `axiom-graph.toml` before copying templates: with no toml it creates one with the index's stored project id and `docs_dirs = ["docs", ".pev"]`; when `docs_dirs` lacks `.pev` it prints the exact edit and stops. `/pev-cycle`, `/pev-instance` and the audit skills halt at intake, naming the seed command, when `info`'s `docs_dirs` lacks `.pev` or a seeded template is missing.
+- **Runner-neutral commands.** Test, install and axiom-graph commands come from `.pev/sops.toml` `[commands]`, or are detected once per cycle; nothing assumes Poetry. Skills give single plain Bash commands, with helper scripts in `.pev-scratch/`. The spike installs dependencies only when the project declares an install command.
+- **`.pev-state.json` is git-excluded**, so it never lands in a commit or blocks worktree removal.
+
+#### Guardrails no longer trap agents
+
+- **Handing back is always allowed**, after the budget gate too, and is not counted. A hook input with no `agent_id` is neither counted nor gated; the audit dev-shard budget case is gone; `pev-cwd-test.sh` is removed.
+- **The Auditor may edit markdown** (never code; new `pev-doc-scope-md.sh` hook) and add links after its budget runs out.
+- **A Builder may write docs the approved pitch lists as deliverables** (`builder_docs` in `.pev-state.json`, set at the plan gate). The doc-scope hook knows the `/pev-instance` layout, and scopes `delete_section` like a section write.
+- **Agents may use the session scratchpad**, and the docjson guard ignores commit messages. `/pev-spike` checks the carve-out live: its new Test 8 writes into the session scratchpad and expects the write allowed (13 tests now).
+
+#### Honest records
+
+- **The merge commit is staged by path**, with no pre-written Auditor line and no hard-coded model name. A separate `PEV audit:` commit carries the audit's doc edits before the checkpoint.
+- **The Auditor runs a change-set doc pass, the link audit and the doc-topology pass on every cycle**, reports each section's before/after status, and stops rather than clearing items it has not read. The changes-summary is one condensed report per docs root plus one for code, rendered before the Doc Reviewer runs. The Doc Reviewer skips its generic passes for categories the topology already covers.
+- **Architect, Builder and Reviewer rules.** The Architect can pre-split the audit and route doc-side catalog and link work to the Auditor; the Builder writes tests first and stays inside the sketch's affected files; the Reviewer checks off-plan files and doc deliverables and says which source wins when they disagree. The cycle `builder` template drops `handoff`.
+- **Efficiency reports cover every run.** Each PEV run is one directory holding its docs and its efficiency reports (`docs/pev/cycles/{cycle-id}/efficiency`, and the same under `audits/` and `instances/`). `scripts/analyze_pev_session.py` reports each agent's startup and peak context and its task boundaries, counts usage once per API message, drops duplicate runs found in more than one session, and finds audit and instance runs with `--find-run {run-id}`. The three `/pev-audit-*` skills and `/pev-instance` now end with an efficiency step.
+
+#### `/pev-instance` gets an independent review
+
+- The checkin is cloned from `.pev/templates/instance` at the plan gate, with **Will touch / May touch** lists, and a clean stop fires when the work outgrows that plan. After the instance's commit, a Reviewer and a Doc Reviewer check it in parallel; their fixes get their own commit. The template gains `plan`, `review` and `doc-review` and drops `self-review`.
+
+#### Templates are cloned
+
+- The audit skills clone their manifests, and every skill that spawns a request clones `.pev/templates/request`, instead of writing the doc by hand.
+
+#### Docs
+
+- The plugin's `README.md`, `SETUP.md` and `USER_GUIDE.md` are removed in favour of the rendered consumer docs (`docs/readme.md`, `docs/setup.md`, `docs/user-guide.md`); links point there. `DESIGN.md` lists the current ten agents and hook roster.
+- A new test checks every `axiom_graph_*` name in the plugin against the server's tool registry, and that each agent's `tools:` holds the tools it is told to call first. Its `axiom_graph_info` case is a strict xfail until axiom-graph's `info` tool is on master; remove the xfail then.
+
+### Clean-machine test fixes
+
+These fix what a fresh-project run of setup, `/pev-spike`, `/pev-instance` and `/pev-cycle` found.
+
+- **The seed script completes the `axiom-graph.toml` that `axiom-graph init` writes.** `scripts/pev-seed.sh` appends a missing `[axiom_graph.scan]` table with `docs_dirs = ["docs", ".pev"]` instead of stopping and asking for a hand edit. A scan table whose `docs_dirs` lacks `.pev` still gets the exact edit printed and stops, and a missing toml is still created from the index's project id.
+- **PEV's run records and closed requests are frozen.** The seed script appends `[axiom_graph.staleness] frozen_tags = ["pev-cycle", "pev-instance", "pev-efficiency", "pev-audit-dev-docs", "pev-audit-consumer-docs", "pev-audit-annotations", "completed", "superseded", "archived"]` when the toml has no staleness table, so cycle, instance and audit docs, efficiency reports and requests closed as completed, superseded or archived never count in `check` (the orchestrator's brackets relied on this). An open request stays live, so it is flagged when the code it describes changes. A staleness table missing some of these tags gets a printed note and seeding goes on; the list is a default to edit freely.
+- **The seed script leaves dotted and inline toml keys alone.** Scan or staleness settings written as `scan.docs_dirs = ...` or `scan = { ... }` are never appended to, which would redefine the table: for scan, the script shows the lines and stops unless `docs_dirs` there lists `.pev`; for staleness, it notes any missing tags and goes on. A table header with a trailing comment is recognised. A failing `axiom-graph stamps accept --list` stops the script with its output.
+- **`analyze_pev_session.py` matches Git Bash and WSL project roots.** A `--project-root` given as `/c/...` or `/mnt/c/...` finds the `C--Users-...` session folders Claude Code writes on Windows.
+- **setup.md says where to point `PEV_DIR`** when `claude plugin list` reports another copy: a plugin loaded with `--plugin-dir`, or an older disabled install.
+- **The proposed-links gate text matches the Auditor's link rule:** neither the Auditor nor the Doc Reviewer applies a proposal, and the Auditor adds directly only the links the approved pitch asks for.
+- **No raw-edit warnings after setup.** The seed script also copies the `doc-topology` and `test-policy` SOPs into `.pev/` (and `review-criteria` with `--review-criteria`; its checks are examples, so it is opt-in), then runs `axiom-graph build .` and `axiom-graph stamps accept` on the sections of PEV's files that are still exactly as seeded. A file you edited is never accepted. `--no-build` skips this step and prints the commands. setup.md replaces the raw `cp` of the SOPs with the seed script and lists what to commit: `axiom-graph.toml`, `docs/agent-policy.docjson` and `.pev/`.
+- **`analyze_pev_session.py --find-run` / `--find-cycle` keep to this project.** A session counts only when the record that dispatches the run carries a `cwd` inside the project root or its `.claude/worktrees/` (records without `cwd` fall back to the project's session-folder slug), so another project that reused a run id no longer yields a report. `--project-root` picks the project; it defaults to `$CLAUDE_PROJECT_DIR`, else the current directory, with a worktree mapped to its main checkout.
+- **`/pev-cycle` no longer points git at main from inside the worktree**, which Claude Code refuses after `EnterWorktree`. Intake records the baseline SHA, main's branch name and main's untracked files before entering the worktree; the request re-diff at each gate runs `git diff {baseline_sha} {main_branch} -- <request>` in the worktree and reads main's copy for uncommitted edits.
+- **One build rule for the Builder.** The skill no longer forbids `axiom_graph_build`: like the agent file, it says to build in the worktree after a code edit and before reading that code through the index or writing a deliverable doc section about it, and that the `SubagentStop` hook rebuilds after return.
+- **One link rule for the Auditor.** Links the approved pitch asks for (a deliverable in `architect::required-artifacts` or an audit note in `architect::constraints`) are added directly and counted in `links_added`; every other add, repoint or drop is a `proposed_links` entry for the Phase 8 gate. The Auditor reference and link-audit reference say the same.
+- **The literal link shape is spelled out** where the Auditor and `/pev-instance` write new docs: `"links": [{"node_id": "<node id>"}]` or bare node-id strings, with no `type` or `target` field.
+- **`/pev-spike`'s dispatch template passes `project_root`** on its `axiom_graph_update_section` calls (Tests 4, 5 and 10).
+- **No more `/pev-setup`.** The orchestrator reference, `/pev-cycle` and the seed script's comments named a `/pev-setup` that doesn't exist as the writer of `.pev/sops.toml`. They now say you write the file by hand. setup.md documents it: what it is for, that it is optional (without it each run detects its commands), its `[commands]` keys and an example.
+- **The stale-template remedy names all three templates.** When a clone fails with `unknown in set_sections: baseline`, `/pev-instance` tells you to delete the seeded `instance`, `cycle/manifest` and `cycle/review` templates and re-seed, and points to the upgrade note. `/pev-cycle` now gives the same advice at its manifest clone, where it gave none.
+- **The upgrade note is complete.** It says how to run the seed script, to commit `axiom-graph.toml` and `.pev/`, that the re-seed re-stamps the seeded files it keeps, and that a project seeded before `frozen_tags` existed gains them, so run records drop out of `check`'s counts. It also says which templates gained a `baseline` section: the cycle `manifest` and the `instance`, not the `review`.
+- **The seed script's closing line matches setup.md:** `Next: commit axiom-graph.toml, .pev/ and, if axiom-graph init wrote it, docs/agent-policy.docjson.`
+- **setup.md lists a git identity as a prerequisite**, since PEV commits during every run, and suggests adding `.claude/worktrees/` to `.gitignore`, so a run's worktree doesn't show as `?? .claude/` on main.
+- **`scripts/pev-seed.sh` passes shellcheck.** Two frozen-tag checks expanded `$tag` right before a regex bracket, which shellcheck reads as an array subscript (SC1087); they now use `${tag}`. Behaviour is unchanged.
+
+### Doc ids, document extensions and template names
+
+#### Changed
+
+- **BREAKING — skills, agents and templates use the path-form doc ids of axiom-graph 3.0.0.** Cycle manifests are `{project_id}::docs/pev/cycles/{cycle-id}`, instance checkins `{project_id}::docs/pev/instances/{instance-id}`, audit manifests `{project_id}::docs/pev/audits/{audit-id}`, and SOPs under a `.pev` docs root `{project_id}::.pev/test-policy` and so on. Every statement that docs roots flatten into one `docs.` namespace is gone. Where a skill writes a document and then needs its id (the cycle manifest's `cycle_doc_id`, instance checkins, audit manifests), it now takes the id from the `doc id` line that `axiom_graph_write_doc` prints instead of rebuilding it from `project_id`. The `/pev-instance` scaffold's `id` is now the path slug `pev/instances/...`; the node-id form it used before is one `write_doc` rejects. Run `axiom-graph doc-ids execute` before the first cycle on this version.
+- **BREAKING — the SOP and cycle-manifest templates ship as `.docjson`.** `templates/doc-topology.json`, `test-policy.json`, `review-criteria.json` and `cycle-manifest-template.json` are now `templates/*.docjson`. The skills' fallback paths, the orchestrator reference, `SETUP.md` (whose `cp` commands copy the templates into `.pev/`), `USER_GUIDE.md` and `DESIGN.md` name the new files. A script or note of your own that copies a template by its old name breaks: use the `.docjson` name. Your project's own `.pev/` SOPs can stay `.json`; the skills read either.
+- **Document paths name the `.docjson` extension of axiom-graph 3.0.0.** `write_doc` now writes `.docjson`, so the skills, agents and templates name the documents PEV writes that way: cycle manifests, instance checkins, audit manifests, audit-spawned requests and new feature docs. The efficiency analyzer writes `{cycle-id}-efficiency.docjson`. Where a skill reads an SOP from `.pev/` it names `.docjson` first and `.json` as the alternative, so a project that has not renamed its documents keeps working. Slug collision checks look at both extensions. `SETUP.md` copies the SOP templates in as `.pev/*.docjson`.
+- **Every PEV agent calls `axiom_graph_guide` first.** The guide returns the axiom-graph tool families, usage patterns and one line per tool; subagents get no server instructions otherwise. Each agent's `tools:` list gains `mcp__axiom-graph__axiom_graph_guide` and its body opens with the call-first line; every role-specific rule (what the agent may write, gates, ordering) is unchanged. `pev-axiom-graph-scope.sh` lets the guide through without a `project_root`, which it does not take; every other axiom-graph call from a PEV agent still has to name the cycle worktree. `pev-spike` is left out on purpose: its hook smoke-test counts tool calls exactly.
+- **Cycle, instance and request documents carry one type tag plus one status tag.** The skills and templates now write the status vocabulary already used by `docs/pev-requests/` (`not-started`, `in-progress`, `completed`, `superseded`, `backlog`, `archived`). Audit manifests keep their `pev-audit-active` mutex tag for now.
+  - cycle manifests are created `pev-cycle` + `in-progress` and flipped to `completed` with `axiom_graph_update_doc_meta` during Phase 8 cleanup, instead of adding and later stripping `pev-active` (which also rewrote the whole manifest with `write_doc`); a failed cycle stays `in-progress`;
+  - instance checkins are `pev-instance` + `completed` (`in-progress` if escalated or continuing), without bare `pev`;
+  - audit-spawned requests are `pev-request` + `not-started` + `audit-spawned`, replacing the legacy `pev` + `request` pair;
+  - SOP templates drop bare `pev` (they gain no status tag; an SOP has no lifecycle).
+
+  Two emitters are deliberately exempt: the `/pev-spike` manifest stays `pev-cycle` + `pev-spike` (retyping it `pev-spike` would unfreeze it, since `pev-spike` is not in `frozen_tags`), and `scripts/analyze_pev_session.py` still writes `pev-efficiency` + `pev-cycle` on efficiency records — repo tooling rather than plugin surface, and it rides the request's core half.
+
+  Nothing becomes unfrozen: freezing keys on the type tags, and cycles and instances keep `pev-cycle` / `pev-instance`. Audit-spawned requests become frozen for the first time — the legacy `pev` + `request` pair was never in `frozen_tags`, and `pev-request` is. Existing documents keep their old tags until retagged; nothing reads `pev-active`.
+- **Every PEV agent logs script reads as friction.** Each skill's and agent's Friction log section now asks for a `script-read` entry whenever a document or index data is read with a script (`poetry run python`, `jq`, `grep`, raw SQL) instead of an axiom-graph tool. The entry names the tool that fell short and why. Script reads stay allowed; the entries are how gaps in the tools get found.
+- **Auditor and Doc Reviewer guidance no longer quotes a `drift_query` header that is out of date.** axiom-graph 3.0.0 labels the fields of `format="full"` rows (`id=`, `loc=`, `via=`, `root=`), so the skills stopped spelling out the header text. The Auditor skill now also tells agents what `root=` is for: it names the root offender to `reverify`. The Auditor's reconcile rule now reads `via=` as the list of direct offenders, not a single trigger node.
+- **Agents are told about the axiom-graph 3.0.0 tools that save calls.**
+  - `read_doc(outline=True)` finds section ids and sizes before an edit.
+  - `read_doc` returns child sections, and `section_ids` reads several sections in one call. The Reviewer and orchestrator reference used to make one call per section.
+  - `patch_section`'s result shows the edited region, so no re-read is needed.
+  - `reverify(node_ids=[...])` clears dependents held only by the batch's sources in one call.
+  These are mentioned in the Auditor, Instance, Reviewer and dev-docs skills.
+- **The Auditor, dev-docs shards and `/pev-instance` say which offenders a doc edit reconciles.** From axiom-graph 3.0.0 a doc write (`update_section`, `patch_section`, `add_section`, `write_doc`, `accept_doc_edits`) verifies only the text it writes and never clears `LINKED_STALE`. The agents now pass `addresses=[...]` to `update_section` / `patch_section`, naming the offenders (the `via=` ids) the edit reconciles, and the section clears once every offender is named; otherwise they follow the edit with `mark_clean`, or `reverify` the source. The Auditor skill, agent and reference protocol list `addresses=` as the third clean action next to `mark_clean` and `reverify`. Dev-docs plan entries for `update_section` carry an `addresses` list, which the execute step passes. Accepting a raw edit verifies its text only. Guidance that expected an edit to clear a section would leave it `LINKED_STALE` on 3.0.0.
+- **jq is a stated requirement.** README and SETUP list bash (Git Bash on Windows) and jq with per-OS install commands. `/pev-cycle` and `/pev-instance` check for jq before starting, and `/pev-spike` checks it as step 0 instead of reporting seven unexplained failures. SETUP no longer implies `/hs-heartbeat` covers PEV's hooks — hook-spike doesn't use jq.
+- **The annotations-markers skill says how to place an `AutoStep`.** A new *Placing an AutoStep* section: one call directly under the marker; nested calls split so the delegated call stands alone on its line; a returned call assigned first, then returned; inside a `try`, `if` or loop, the marker inside the block; guard clauses and helper lines above the marker; a conditional expression turned into an `if` block; a plain `Step(name, purpose)` for a call with no `@task`/`@workflow`. Three rows join *Common Mistakes*.
+
+#### Removed
+
+- **The `semantic-sweep` doc-topology fallback** (deprecated in 1.3.0, which targeted removal for 1.5; it lands in the next major instead). Skills and templates now read only the `link-audit` section of `.pev/doc-topology.json`. **Breaking** for a customized topology still using the pre-1.3 section id: rename that section's `id` from `semantic-sweep` to `link-audit`.
+
+#### Added
+
+- **`pev-docjson-guard.sh` watches raw edits of `*.docjson` documents.** A PreToolUse hook on Write, Edit, MultiEdit, NotebookEdit, Bash, Read and Grep detects edits to any path ending in `.docjson`. The environment variable `PEV_DOCJSON_GUARD` picks the response; detection is the same in every mode:
+  - **`warn` (default).** Unset, `warn` or any unknown value. The write goes through with a note naming the axiom-graph doc tools to use instead, and `axiom_graph_accept_doc_edits` for an edit that already landed. The note is `additionalContext` only: the hook never answers `allow`, so your own permission rules and prompts still apply.
+  - **`block`.** The write is denied, with the same tool list as the reason.
+  - **`off`.** The hook is silent.
+
+  For a strict mode that does not depend on an environment variable, add your own permission deny rules for the write tools on `**/*.docjson` paths (for example `Edit(**/*.docjson)` and `Write(**/*.docjson)` under `permissions.deny`). The plugin ships no permission rules.
+
+  **Once-per-session read hint.** In `warn` and `block` mode, the first raw read of a `.docjson` in a session gets one line pointing at `axiom_graph_read_doc` (`outline=true`, then `section_ids`) and `axiom_graph_search` (a quoted phrase, `scope="docs"`). A raw read is a Read of a document, a Grep whose `path` or `glob` names one, or a Bash command naming one that doesn't write it. A marker file in `${TMPDIR:-/tmp}`, named from the session id, keeps the hint to once per session; with no session id it fires every time. This guard never denies a read, in any mode, with or without `jq`, for PEV agents too. Without `jq`, other PEV hooks such as `pev-tool-gate.sh` still fail closed for PEV agents (see below).
+
+  For Bash the guard catches redirection (`>`, `>>`, `>|`, including quoted targets containing spaces), `tee`, `dd of=`, `truncate`, in-place `sed`/`perl` (both `-i` and GNU `--in-place`), `cp`/`mv`/`install` onto a document, `touch`/`rm`, and interpreter one-liners (`python -c`, `node -e`) that write. A one-liner counts as writing when its program shows a write marker, such as a `'w'` or `'a'` open mode or a `write`, `dump` or `rename` call. `cat`, `grep`, `git diff`, and scripts or one-liners that only read a document count as reads, not writes. `git mv`, the sanctioned rename (see axiom-graph's `doc-ids rename-extension`), is neither: it is left silent. A write the guard misses, or lets through in warn mode, is still reported afterwards as a raw DocJSON edit. Unlike the other PEV hooks it applies to every session, not just PEV subagents. Unlike them, it also does not go inert without `jq`: it runs the same write checks over the raw tool payload and answers per the mode, while Read and Grep exit before the shared jq check, so reads always pass (the read hint needs `jq`). It does nothing until a project's documents use the `.docjson` extension (axiom-graph 3.0.0).
+- **The efficiency analyzer ships with the plugin** at `scripts/analyze_pev_session.py` (stdlib-only Python). `pev-cycle` Phase 8 and the orchestrator reference call it via `${CLAUDE_PLUGIN_ROOT}`. It reads the current Claude Code session-log layout, with a per-tool breakdown for every subagent, and warns on unchecked Claude Code versions (see Compatibility). With `--docjson` the script stages the report in the system temp folder and prints the `axiom_graph_write_doc(doc_file=...)` call that writes it; Phase 8 makes that call, so the report lands at `docs/pev/cycles/efficiency/{cycle-id}-efficiency.docjson` indexed and verified instead of as a raw DocJSON edit the build flags. `--output-dir` picks another staging folder (`--yes` creates it if missing) and `--doc-folder` another docs-tree folder. Earlier reports stay in `docs/pev-cycles/`: doc ids are path-based, so moving them would orphan their history.
+
+- **Unattended cycles no longer stall on deletion prompts.** Two pieces:
+  - `pev-cycle` Phase 1 creates `.pev-scratch/` in each worktree. It holds a `.gitignore` of `*`, so it ignores itself and is never committed, and it goes away with the worktree. Builders put scratch files there and don't need to delete them.
+  - A new PreToolUse hook, `hooks/pev-worktree-rm.sh`, answers **allow** for a PEV subagent's plain `rm` of relative paths run inside its own cycle worktree. "Plain" means one `rm` with no `..`, absolute or drive paths, globs or chained commands. A single leading `cd <dir> &&` is accepted when `<dir>` resolves inside the worktree. Anything else gets no opinion, and non-PEV sessions are never affected, so the consumer's own permission rules decide. When `pev-docjson-guard.sh` runs in `block` mode, its deny of an `rm` of a `.docjson` still wins; in the default `warn` mode the `rm` is allowed and the guard only adds its note. The Reviewer's reverse mapping catches a deletion the pitch didn't authorize.
+
+  Before this, a Builder that made and removed helper files waited on a permission prompt for every `rm`; one unattended cycle spent about five hours waiting.
+
+- **The Auditor and dev-docs shard can accept raw DocJSON edits.** Both agents are granted `axiom_graph_accept_doc_edits`, which is also on the Auditor's over-budget allowlist. The shard's execute actions gain `accept_edits`. Sections flagged as raw DocJSON edits (`RAW_DOCJSON_EDIT`) clear when accepted this way or when re-applied with a doc tool; `mark_clean` leaves them flagged. Accepting verifies the section's text only: a section that is also `LINKED_STALE` still needs `addresses=` on an edit, or `mark_clean`. A build reports them only once, so the Auditor's Step 2 and the dev-docs shard's plan step now run `accept_doc_edits(dry_run=True)`. `pev-docjson-guard.sh`'s note (or deny, in block mode) names the tool for an edit that already landed.
+
+#### Fixed
+
+- **The audit changes-summary is no longer cut short.** `pev-cycle` Phase 8 and the orchestrator reference rendered `axiom_graph_report(..., verbose=True)`. axiom-graph 3.0.0 deprecates `verbose` and cuts report output at 40,000 characters, so a large audit's ledger was truncated in the manifest. They now call `detail="condensed", max_chars=None`. Condensed keeps every hand-made row (doc section edits, `mark_clean` / `reverify`, link adds and removals) verbatim and aggregates the build's own staleness and link churn by container; `detail="full"` lists every row and ran past 200,000 characters on a real cycle.
+- **Append-only sections are appended, not rewritten.** `decisions`, every `*.friction` log, the audit `friction` sections and the consumer-audit findings sections used to be written by reading the section and calling `update_section` with the old content plus the new entry. Two agents writing between that read and write lose an entry. Skills, agents and the cycle-manifest template now append in one locked write with `axiom_graph_patch_section`. (Superseded later in this release: log entries are now their own subsections, added with `axiom_graph_add_section`.)
+- **`workflow_list` is called with `has_steps=true`.** The `pev-instance` and `pev-reviewer` skills, `DESIGN.md`, `USER_GUIDE.md` and `AGENTS.md` wrote `steps=true`, a parameter the tool doesn't have. The core-mechanism scope check therefore listed every workflow, not just those with step markers.
+- **The changes-summary leaves out the manifest's own writes.** The Phase 8 report passes `exclude_node_pattern="{cycle_doc_id}*"`. The Doc Reviewer's fallback report and the Auditor's `AGENT_VERIFIED` re-check now pass a `detail`, because the default summary is only two lines. The Doc Reviewer skips `[DOC_SECTION_LONG]` advisory rows in its `filter="all"` survey.
+- **The efficiency analyzer counts every doc and staleness write.** `patch_section`, `delete_link`, `update_doc_meta`, `reverify`, `accept_doc_edits` and `purge_node` are now implementation calls. Its call summaries also cover `read_doc`'s `section_ids`, `doc_ids` and `outline` calls; these used to show as `?`. `update_section` and `patch_section` are summarised by `section_id`.
+- **The Builder's over-budget list includes `patch_section`**, which the tool gate already allowed.
+- **`pev-docjson-guard.sh` no longer blocks commands that only mention `.docjson` inside a longer name.** Its patterns matched `.docjson` with nothing required after it. So a `sed -i`, `perl -i` or writing `python -c` whose text held the module path `axiom_graph.docjson.api` was denied as a raw DocJSON edit, and so was any write to a file such as `notes.docjson.bak`. A document name must now be followed by a quote, whitespace, a shell operator or the end of the command. Real targets followed by `;`, `&&` or `|` are still caught, and the no-jq fallback uses the same patterns.
+- **The dev-docs shard receives the `location_glob` its execute step uses.** The execute prompt told the shard to query `drift_query(location_glob=YOUR_SLICE_GLOB)`, but the plan dispatch never gave it a glob. The dispatch now passes a `Slice glob`, and the skill notes that `*` stays within one directory and `**` crosses them.
+- **`pev-cycle` Phase 8 no longer runs a script consumers don't have.** It called `python scripts/analyze_pev_session.py`, which existed only in the plugin's development repo, so the efficiency step failed in every other project. The step also named an output folder (`docs/pev/cycles/`) the script never wrote to; it wrote to `docs/pev-cycles/`.
+- **The efficiency analyzer reports every subagent again.** Current Claude Code writes subagent transcripts to separate files, reports background-agent totals in task notifications, and namespaces agent types, so the analyzer found zero subagent tool calls. Its flags now match the roles: the Doc Reviewer gets its own section instead of being counted as a Builder; the "handoff gap" (calls before the first write) is flagged for Builders only, because the Architect, Auditor and Doc Reviewer read before writing by design; the "no context bundle" flag is removed, since Builders now read source on demand through axiom-graph; and file paths are shortened relative to the worktree or current repo instead of a hardcoded folder name.
+
+- **`pev-doc-scope.sh` refuses `axiom_graph_write_doc` from scoped PEV subagents with a message naming the section tools.** It compared the `id` in `doc_json`, which is a path slug, with the manifest's doc id, so the check could never pass and every call was blocked with a misleading "doc-scope violation" or "could not extract doc_id". The manifest already exists before any scoped agent runs, and rewriting it whole would clobber other phases' sections, so the call is now refused deliberately. The Auditor stays exempt.
+- **PEV hooks no longer fail open without jq.** Every wired hook read its input with `jq` and swallowed the error, so on a machine without jq the agent-type gate fell through to "not a PEV agent" and every scope and budget guardrail silently allowed everything. A shared preamble (`hooks/lib/pev-hook-common.sh`) now detects a missing jq and, for PEV subagents only, denies every PreToolUse call with an install hint, and the SubagentStop hook shows the same hint to the user when the subagent returns. Other sessions are left alone, since the `.*` matchers run these hooks on every tool call and failing closed there would lock the user out of Claude Code. `pev-docjson-guard.sh` is the one exception: it matches a fixed tool list rather than `.*`, so without jq it runs its write checks over the raw payload instead of going inert, and it never denies a read itself (a Read, a Grep, or a Bash call that writes no document); only a write tool by a PEV agent gets the install hint from it. The agent-type `jq` read no longer discards its stderr.
+- **Worktree provisioning example no longer installs the removed `semantic` extra** (`templates/pev-orchestrator-reference.md`), nor the non-existent `test` extra. On an axiom-graph 3.x checkout the old line fails with an unknown-extra error.
+- **`analyze_pev_session.py --find-cycle` reports the cycle's own sessions, and only their calls for that cycle.** It read only the first 200 lines of each log, so an orchestrator session that did other work before `/pev-cycle` started was missed. It also matched every session that mentioned the cycle id, so a sibling cycle's session whose prompt cited it produced a report named for the sibling cycle and holding all of that session's dispatches. It now reads each log in full, matches a session only when it dispatches a PEV agent for the cycle, keeps only the calls attributed to the cycle (see [Compatibility](#compatibility)), and labels every report with the requested id. `--cycle` on a single log filters the same way. Matched sessions are listed oldest first, so the `-s1`, `-s2` reports of a multi-session cycle are numbered in order. The analyzer is now checked against Claude Code 2.1.287.
 
 ## [1.4.1] — 2026-08-11
 

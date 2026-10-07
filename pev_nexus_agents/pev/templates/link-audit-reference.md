@@ -1,6 +1,6 @@
 # PEV Link Audit Reference
 
-The shared, change-scoped procedure for keeping the `documents` graph's edges deliberate. All three doc-review roles — the cycle **Auditor**, the cycle **Doc Reviewer**, and `/pev-instance` — run this same audit and read this reference; each skill adds only its role's gate-and-apply wiring (see [Disposition by role](#disposition-by-role)). The one project-specific knob, `Scope`, lives in the project's `.pev/doc-topology.json` (`link-audit` section); everything else is here.
+The shared, change-scoped procedure for keeping the `documents` graph's edges deliberate. All three doc-review roles — the cycle **Auditor**, the cycle **Doc Reviewer**, and `/pev-instance` — run this same audit and read this reference; each skill adds only its role's gate-and-apply wiring (see [Disposition by role](#disposition-by-role)). The one project-specific knob, `Scope`, lives in the project's `.pev/doc-topology.docjson` (`link-audit` section); everything else is here.
 
 ## What it is
 
@@ -20,7 +20,7 @@ Every finding is an **add**, a **repoint**, or a **drop**:
 
 ## Proposing & the gate
 
-**All three are proposed, never auto-applied — and rejection is a normal outcome.** Each proposal records the section, the target node, the verb, the section's *existing* links (so redundancy and granularity are visible), and a one-line rationale (a `repoint` also names the edge it `replaces`). The lone exception is a link a change *mechanically moved* (its target renamed/relocated): that's repointed directly as reconciliation, not gated. Unreviewed bulk edits dilute LINKED_STALE into noise — every add/repoint/drop is a deliberate signal. Content fixes (drifted prose, gaps) need no gate.
+**All three are proposed, never auto-applied — and rejection is a normal outcome.** Each proposal records the section, the target node, the verb, the section's *existing* links (so redundancy and granularity are visible), and a one-line rationale (a `repoint` also names the edge it `replaces`). Two exceptions: a link a change *mechanically moved* (its target renamed/relocated) is repointed directly as reconciliation, and a link the approved pitch asks for (a stated deliverable in `architect::required-artifacts`, or an audit note in `architect::constraints` naming the link) is part of the approved change, so the role doing the change adds it and lists it in its report. Neither is gated. Unreviewed bulk edits dilute LINKED_STALE into noise — every add/repoint/drop is a deliberate signal. Content fixes (drifted prose, gaps) need no gate.
 
 ## Disposition by role
 
@@ -29,7 +29,7 @@ Detection is identical for every role; only what you *do* with a finding differs
 | Role | What to do with each finding |
 |---|---|
 | `/pev-instance` (single agent) | Present the verb-tagged list conversationally; apply approved items inline — `add` → `add_link`, `repoint` → `delete_link`+`add_link`, `drop` → `delete_link`. |
-| Cycle **Auditor** | Write each as a verb-tagged `proposed_links` entry (section, target, `existing_links`, rationale; `replaces` for a repoint) for the orchestrator's Phase-8 gate. Patch content fixes (drifted prose, gaps) directly. |
+| Cycle **Auditor** | Add links the approved pitch asks for directly (counted in `links_added`). Write every other finding as a verb-tagged `proposed_links` entry (section, target, `existing_links`, rationale; `replaces` for a repoint) for the orchestrator's Phase-8 gate. Patch content fixes (drifted prose, gaps) directly. |
 | Cycle **Doc Reviewer** | Flag-only — record under `findings.semantic_drift` + `proposed_links`. You hold no link-mutation tools; the orchestrator applies. |
 | Cycle **Orchestrator** (Phase-8 proposed-links gate) | Human-gate the combined list; apply approved per verb (`add_link` / `delete_link`+`add_link` / `delete_link`); record per-proposal decisions in the manifest. |
 
@@ -47,6 +47,10 @@ What a `repoint` audits against — and the rule to apply when adding a link.
 
 The vocabularies the `add` search looks for. The **standing system vocabulary** is constant across projects — PEV runs on axiom-graph: staleness statuses (`VERIFIED`, `CONTENT_UPDATED`, `DESC_UPDATED`, `RENAMED`, `NOT_FOUND`, `LINKED_STALE`, `BROKEN_LINK`), history change_types (`LINK_ADDED`, `LINK_REMOVED`, `DELETED`, `AGENT_VERIFIED`, …), edge types (`documents`, `validates`, `composes`, `annotates`, `delegates_to`, …), MCP tool names (`axiom_graph_*`), CLI subcommands. Plus, **per change**, derive 2–4 families from the cycle itself: the mechanism name the change coins (from the Architect's pitch) and the changed function / tool / command names.
 
+When the change alters behaviour, add a family for the old behaviour's wording as well: the phrases a doc would use to state the rule as it was. A living section that still states it is drift: fix or flag it, as well as weighing an edge.
+
+A cycle with no stale nodes still runs this audit: the docs it looks for have no edge to the change, so they never go stale.
+
 ## Scope
 
-Which doc trees are audited is project-specific — read it from the project's `.pev/doc-topology.json` `link-audit` section (`Scope`: living trees that get audited vs frozen/historical trees that are skipped). A pre-1.3 topology may name that section `semantic-sweep` — treat it as the same section. If the project has no `.pev/doc-topology.json`, audit the living current-state doc trees and skip frozen records (cycle/instance/audit manifests, request docs, plans, devlogs, release notes).
+Which doc trees are audited is project-specific — read it from the project's `.pev/doc-topology.docjson` `link-audit` section (`Scope`: living trees that get audited vs frozen/historical trees that are skipped). If the project has no `.pev/doc-topology` doc (under any extension in `info`'s `docs_extensions`), audit the living current-state doc trees and skip frozen records (cycle/instance/audit manifests, request docs, plans, devlogs, release notes).

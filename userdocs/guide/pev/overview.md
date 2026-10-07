@@ -1,103 +1,63 @@
-<!-- generated from axiom_graph::docs.consumer.pev.overview @ a482f1d215df; do not edit -->
+<!-- generated from axiom_graph::docs/consumer/pev/overview @ 19b3c6b0e21f; do not edit -->
 
 # PEV Agent Nexus
 
 ## What the PEV Agent Nexus is
 
-The **PEV Agent Nexus** is the flagship application built *on* axiom-graph. It is not a core primitive of the graph itself - it is a [Claude Code](https://docs.claude.com/en/docs/claude-code) plugin that drives structured code changes through explicit **Plan -> Execute -> Validate** cycles, with a human approval gate between every phase.
+The PEV Agent Nexus (PEV: Plan, Execute, Validate) is a Claude Code plugin that runs a code change through separate agents. One plans the change, one builds it, one reviews it, and one updates the docs the change made stale. You approve the plan, the review result and the merge before the cycle moves on.
 
-Where axiom-graph gives an agent a typed mesh of code and docs to read against, PEV is the proof that an agent can *consume* that mesh to do real engineering work: plan against the codebase, implement with tests, review the diff, and update the docs the change made stale - all coordinated through axiom-graph's MCP tools.
+Use it when you want an agent's approach approved before any code is written, the result checked against that plan, and the docs brought up to date in the same cycle.
 
-PEV ships as its own plugin, separate from the axiom-graph package, so its full guides travel with the plugin - in the source repo under `pev_nexus_agents/pev/`, not on this site: `README.md` (landing + quick start), `SETUP.md` (first-install checklist and migration), `USER_GUIDE.md` (invoking the cycles, the approval gates, the `.pev/` SOPs), and `DESIGN.md` (architecture, tool-permission matrix, hook model). Open those in the source tree when you need step-by-step how-to.
-
-This page is the orientation that stands on its own: *why PEV exists*, *how it leans on the mesh*, and enough of the shape - the agents, the gates, the two cycle modes - to picture a first cycle without leaving the site. It deliberately does not duplicate the plugin guides.
-
-## The problem it solves
-
-AI-assisted development usually runs as a single undifferentiated pass: one agent plans, codes, documents, and verifies inside one context window. Three failure modes follow:
-
-- **No planning gate** - the agent starts coding before a human approves the approach, so wrong approaches burn compute and context before anyone can object.
-- **Invisible deviations** - when the agent diverges from the plan, the change is buried in chat with no structured "I did Y instead of X because Z, and it affects W" artifact.
-- **Documentation drift** - after the code lands, docs are skipped or bolted on without a consistency check, and [staleness](../concepts/staleness.md) accumulates silently.
-
-PEV answers each one by splitting development into structurally distinct phases with their own tool permissions, recording every plan and deviation in a persistent manifest, and closing the loop with a validation phase that reads axiom-graph's staleness signal to find exactly the docs the change disturbed.
+PEV runs on axiom-graph. Its agents read the code through the MCP tools, and the Auditor uses the [staleness check](../concepts/staleness.md) to find the docs a change affected. The plugin is installed separately and carries its own docs: the [readme](https://github.com/ddpoe/axiom-graph/blob/HEAD/pev_nexus_agents/pev/docs/readme.md), [setup guide](https://github.com/ddpoe/axiom-graph/blob/HEAD/pev_nexus_agents/pev/docs/setup.md) and [user guide](https://github.com/ddpoe/axiom-graph/blob/HEAD/pev_nexus_agents/pev/docs/user-guide.md).
 
 ## The agents and the cycle
 
-`/pev-cycle` orchestrates five specialized agents in sequence, each with a runtime-enforced tool allowlist. The orchestrator owns phase transitions, the human gates, and the lifecycle of the cycle manifest.
+`/pev-cycle` runs five agents in turn and records their work in the cycle docs, a small set of DocJSON docs kept together in one folder for that cycle.
 
 | Agent | Phase | What it does |
 |---|---|---|
-| **Architect** | Plan | Explores the codebase through axiom-graph, optionally asks clarifying questions, writes a Shape Up-style pitch (problem, user stories, solution sketch, constraints, test plan). No code writes. |
-| **Builder** | Execute | Reads the pitch, decomposes it into tasks, implements with TDD in an isolated worktree, commits on the worktree branch. |
-| **Reviewer** | Validate (code) | Read-only scrutiny of the Builder's diff against the pitch - six passes covering tests, source-doc cross-check, spec compliance, functionality preservation, code quality, and PEV-specific checks. |
-| **Auditor** | Validate (docs) | Runs on `main` after merge. Reviews every stale node, updates graph-linked docs, and applies project doc rules from `.pev/doc-topology.json`. Writes an Impact Report. |
-| **Doc Reviewer** | Validate (docs) | A narrow safety net - verifies the Auditor's doc updates and scans for drift in categories the Auditor may have missed. |
+| Architect | Plan | Reads the codebase through axiom-graph, asks you questions if it needs to, and writes a pitch: problem, user stories, solution sketch, constraints and test plan. |
+| Builder | Execute | Implements the pitch test-first in a separate git worktree. |
+| Reviewer | Validate | Runs the test suite and checks the diff against the pitch: every change authorized, every user story implemented, existing callers unaffected. Changes no code. |
+| Auditor | Validate | Runs in the worktree, on the tree that will land, before the merge. Updates the docs the change made stale, marks them clean, and writes an impact report. |
+| Doc Reviewer | Validate | Also in the worktree. Checks the Auditor's updates and looks for drift in docs that are not linked to code. |
 
-The load-bearing invariant across the whole matrix: **no single agent can both write code and update live feature docs.** The Builder cannot see doc-write tools; the Architect cannot see code-write tools; only the Auditor can mark nodes clean and clear staleness. Permissions are structural, not prompt-based, so a phase cannot quietly overstep its role.
+Each agent gets only the tools its phase needs, and the plugin's hooks hold it to them. Only the Builder edits code, and only the Auditor edits project docs or clears drift. The other agents write only to the cycle docs, and each writes only the docs that are its own.
 
-A human gate sits after planning, after review, before merge, and after doc review. Nothing reaches `main` until you approve at the merge gate.
+You confirm the cycle name, approve the plan and the review result, and approve the finished cycle, audit included, once. Nothing is merged into main before that last approval. A shared merge step then lands the branch and copies the doc verifications made in the worktree onto main, so the docs are not audited twice. The plugin's [user guide](https://github.com/ddpoe/axiom-graph/blob/HEAD/pev_nexus_agents/pev/docs/user-guide.md) lists every gate.
 
 ## Two cycle shapes
 
-PEV exposes two user-invocable entry points so the ceremony matches the size of the work.
+| Command | Use it for | How it runs |
+|---|---|---|
+| `/pev-cycle <task>` | Changes that span several systems, change a public API, or need a design decision | Five agents, a separate worktree, your approval between phases |
+| `/pev-instance <task>` | A small change to a few files that still affects docs | One agent in a worktree of its own for each task: a mini-pitch for your approval, the change, doc updates, an independent review and a checkin doc, then the same merge step as `/pev-cycle` |
 
-**`/pev-cycle`** is the full multi-agent workflow for a **cross-cutting change that fans out across several core systems at once** — e.g. a new config knob every layer has to honor, or a field threaded from ingestion through storage, the API, and the UI. It runs in an isolated git worktree, walks all five agents, and gates each phase.
+`/pev-instance` suggests switching to `/pev-cycle` when a task turns out larger than it looked, for example when it would change a function that has [step markers](../concepts/annotations.md). If you are not sure which to use, start with `/pev-instance`.
 
-*Example — a real cycle:*
+## How PEV uses axiom-graph
 
-```
-/pev-cycle add configurable doc-scan dirs + a db-path key, plumbed through the builder, CLI, MCP, renderers, diff, and viz
-```
+PEV needs axiom-graph 3.0.0 or later, an index of your project, and the MCP server [connected to Claude Code](../get-started/connect-your-agent.md). It uses axiom-graph in three ways:
 
-**`/pev-instance`** is the slim single-agent mode for a **localized change with a small blast radius** — one subsystem, a handful of files, but still a real change with doc impact (not a one-line typo or docstring; any agent can do those).
+- Reading code. The agents navigate with `axiom_graph_search`, `axiom_graph_graph` and `axiom_graph_source` instead of reading whole files. The Reviewer uses the graph to find the callers of each changed function.
+- Finding stale docs. Once the branch has main merged into it, the worktree's index is rebuilt, and the Auditor works through the doc sections `axiom_graph_drift_query` lists as stale. Editing a section does not clear its stale flag by itself, so for each one the Auditor names the code changes its edit accounts for, or marks the section clean once it has checked it.
+- Keeping a record. A cycle's docs are written to the folder `docs/pev/cycles/<cycle-id>/` with the axiom-graph doc tools. They hold the pitch, the build plan, the review, the decisions, the Builder's deviations from the plan, and the impact report. `/pev-instance` writes a shorter checkin doc to `docs/pev/instances/<instance-id>/`. Both are indexed, so `axiom_graph_search` finds past work.
 
-*Example — a real instance:*
+## Audit skills
 
-```
-/pev-instance auto-register a worktree as a viz project on checkout so it shows up in the project picker
-```
+Three more skills clean up drift across a whole category of docs, rather than after a single change. Each one shows you what it proposes to change before it changes anything.
 
-It runs in your working tree with no worktree isolation and no separate Reviewer: mini-pitch -> human gate -> implement -> structured self-review -> a searchable checkin doc. It plays Builder, Reviewer, *and Auditor* itself, so it still does the doc-honesty pass — updating the docs its change affects and recording an impact note — just without dispatching a separate Auditor. It shares the *spine* (user-story framing, human gate, self-review against your SOPs) but not the machinery, and it will proactively escalate to `/pev-cycle` if the task turns out bigger than scoped — e.g. if it touches a function the project has declared a core mechanism via [workflow markers](../concepts/annotations.md).
-
-When in doubt, start with `/pev-instance` and let it escalate. The full decision table lives in the plugin USER_GUIDE.
-
-## How it is built on axiom-graph
-
-PEV's dependence on axiom-graph is total and deliberate - it is the clearest demonstration of an agent treating [the mesh](../concepts/the-mesh.md) as its working surface. Three distinct uses:
-
-- **Codebase reads.** During planning and review the agents navigate the code through `axiom_graph_search`, `axiom_graph_graph`, and `axiom_graph_source` rather than grepping and reading whole files. The Reviewer traces callers of a changed function via the graph to check functionality preservation; the Architect orients at module level without loading the repo. This is context reduction in practice - the agent pulls exactly the linked nodes it needs.
-- **The doc graph and the staleness engine.** After merge the Auditor runs `axiom_graph_build` + `axiom_graph_check` and reads which nodes went stale. Drift is not a side feature here - it is the engine that tells the validation phase *exactly* which docs the change disturbed, so the Auditor updates those and nothing else. The same mesh that provided context during planning now reports drift during validation; they are two reads against one structure.
-- **Cycle-manifest persistence.** Every cycle's pitch, build plan, review findings, and Impact Report live in a single DocJSON manifest (`docs/pev/cycles/<cycle-id>.json`), written incrementally through the doc-editing MCP tools. Because the manifest is itself a doc node, `axiom_graph_search` finds cycle and instance history alongside everything else, and partial work survives an interrupted session.
-
-PEV could in principle run without axiom-graph (SOPs as an abstraction layer, `Read`/`Grep` as code-read fallbacks), but that portability is explicitly out of scope - the value of the integration in practice outweighs it. The MCP server is the integration surface: PEV is an MCP client, and connecting it is the same one-time step as [connecting any agent](../get-started/connect-your-agent.md).
-
-## The cycle manifest and keeping docs honest
-
-The cycle manifest is the central artifact - and it is also why PEV produces docs that stay honest rather than docs that rot. Because all documentation is DocJSON written exclusively through axiom-graph's tools, the plan, the deviations, and the doc updates are all nodes in the same mesh:
-
-- **Decisions** record what was chosen and why - a durable design log for the next cycle.
-- **Deviations** capture the Builder-vs-plan delta ("plan said X, I did Y, because Z"), feeding the Reviewer's check on divergence.
-- **Friction logs** let each agent append in-the-moment observations when something pinches; their value compounds across cycles as `axiom_graph_search` surfaces recurring tags.
-
-The payoff is the validation loop: feature docs are the ground truth for what *exists*, updated in place by the Auditor after each change, while plans live in the cycle manifest. When the Builder's code drifts from a doc, the staleness engine flags it, the Auditor updates it, and `mark_clean` clears the signal once the doc is verified against the new code. That is the same [docs-honesty loop](../examples/docs-honesty-loop.md) axiom-graph uses to keep its own published documentation trustworthy - PEV runs it on every cycle.
-
-## The /pev-audit-* skill family
-
-Alongside the per-change cycles, PEV ships a family of standalone audit skills for backlog-style sweeps when accumulated drift has grown past what an in-cycle Auditor can address:
-
-| Skill | Sweeps |
+| Skill | What it checks |
 |---|---|
-| `/pev-audit-dev-docs` | Graph-staleness drift across dev docs (feature docs, ADRs, plans) - sequential feature-shard dispatch. |
-| `/pev-audit-annotations` | Annotation-rule violations (duplicate step numbers, sequence gaps, undecorated targets) and prose drift in summaries. |
-| `/pev-audit-consumer-docs` | A pre-release sweep of user-facing prose, stress-testing each consumer doc's claims against current dev reality. |
+| `/pev-audit-dev-docs` | Drift between code and dev docs: feature docs, ADRs, plans |
+| `/pev-audit-annotations` | Annotation rule violations, such as duplicate step numbers or gaps in a sequence, and docstrings or summaries that no longer match the code |
+| `/pev-audit-consumer-docs` | User-facing docs, checked against recent code and dev-doc changes; run it before a release |
 
-Each is its own orchestration with a human gate before any change lands; they are mentioned here for completeness rather than detailed - reach for them when an entire doc category needs a pass, not when a single change has just merged. The consumer-docs sweep, in particular, is what guards the same published prose you are reading now.
+## Install and next steps
 
-## Where to go next
+```bash
+claude plugin marketplace add ddpoe/axiom-graph
+claude plugin install pev@axiom-graph
+```
 
-**Running it, in short.** PEV installs as a Claude Code plugin and points at an axiom-graph project you have already indexed - connecting it is the same one-time MCP step as [connecting any agent](../get-started/connect-your-agent.md). From there you drive it with two commands: `/pev-cycle <task>` for a full multi-agent cycle and `/pev-instance <task>` for a small, single-agent change (see [the two cycle shapes](#two-cycle-shapes)). Per-project behavior is tuned through three optional DocJSON SOPs in `<your-project>/.pev/` - doc taxonomy, test policy, review criteria - with plugin-shipped fallbacks if you omit them.
-
-**The full guides** travel with the plugin, in the source repo under `pev_nexus_agents/pev/`: `SETUP.md` to install and verify, `USER_GUIDE.md` for the per-phase walkthrough and gate-by-gate reference, `DESIGN.md` for the architecture and tool-permission matrix. Open them in the source tree when you need the step-by-step.
-
-New to the substrate PEV is built on? Start with [the mesh](../concepts/the-mesh.md), then [connect your own agent](../get-started/connect-your-agent.md) - PEV is one agent doing exactly that, at scale.
+Then follow the plugin's [setup guide](https://github.com/ddpoe/axiom-graph/blob/HEAD/pev_nexus_agents/pev/docs/setup.md) to check the requirements (axiom-graph 3.0.0 or later, bash, jq), copy the optional `.pev/` config files and test the install. The [user guide](https://github.com/ddpoe/axiom-graph/blob/HEAD/pev_nexus_agents/pev/docs/user-guide.md) covers running cycles, the approval gates and customization.

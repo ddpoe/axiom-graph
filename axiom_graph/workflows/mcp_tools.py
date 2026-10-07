@@ -9,18 +9,23 @@ Tools:
                                    envelopes with filters
     axiom_graph_workflow_detail -- show ordered steps for a workflow / task
                                    or state tree for a state machine
+    axiom_graph_workflow_export -- write workflows and their code to one
+                                   shareable HTML page or JSON bundle
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 
 from axiom_graph.workflows.api import (
     StateMachineDetail,
+    WorkflowExportError,
     workflow_detail as _api_workflow_detail,
     workflow_detail_to_dict as _api_workflow_detail_to_dict,
     workflow_list as _api_workflow_list,
+    write_workflow_export as _api_write_workflow_export,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,8 +40,7 @@ def axiom_graph_workflow_list(
     max_results: int = 30,
     offset: int = 0,
 ) -> str:
-    """List workflow envelopes: annotation-based workflow / task functions and xstate
-    state machines.
+    """List workflows, tasks and state machines, with their purpose and location.
 
     Returns one line per envelope: name, role (``workflow``, ``task``, or
     ``state_machine``), purpose summary, file location, and the
@@ -174,6 +178,56 @@ def axiom_graph_workflow_detail(
             parts.append(f"  - {target}")
 
     return "\n".join(parts)
+
+
+def axiom_graph_workflow_export(
+    project_root: str,
+    workflow_ids: list[str] | None = None,
+    files: list[str] | None = None,
+    output_path: str | None = None,
+    format: str = "html",
+) -> str:
+    """Write workflows and their source code to one shareable HTML page or JSON bundle.
+
+    The page is self-contained: the outline of each workflow, every step,
+    and the source of every file a step or its delegate target is written
+    in, with no external references, so it opens offline and can be sent to
+    someone without the repository.  It is the same page the dashboard's
+    export button opens and ``axiom-graph workflows export`` writes.  The
+    tool writes the file and returns its path and counts, not the page.
+
+    Args:
+        project_root: Absolute path to the indexed project.
+        workflow_ids: Workflow or task names, or node IDs from
+            ``axiom_graph_workflow_list``.  Workflows and tasks can be mixed.
+        files: Source files, relative to the project root, whose every
+            workflow and task is exported.
+        output_path: File to write.  A relative path resolves against
+            *project_root*.  Default: ``workflow-export.html`` (or
+            ``.json``) in *project_root*.
+        format: ``"html"`` (the default) for the page, ``"json"`` for the
+            bundle.
+
+    Returns:
+        ``Wrote <path>: N workflows · M files``, or an ``ERROR:`` line
+        naming every id or file that matched nothing.  Nothing is written
+        on error.
+    """
+    root = Path(project_root)
+    out = Path(output_path) if output_path else Path(f"workflow-export.{format}")
+    if not out.is_absolute():
+        out = root / out
+    try:
+        summary = _api_write_workflow_export(
+            root,
+            out,
+            workflow_ids=workflow_ids or (),
+            files=files or (),
+            format=format,
+        )
+    except WorkflowExportError as exc:
+        return f"ERROR: {exc}"
+    return f"Wrote {summary.path}: {summary.label}"
 
 
 def _format_state_machine_detail(detail: StateMachineDetail, *, verbose: bool) -> str:

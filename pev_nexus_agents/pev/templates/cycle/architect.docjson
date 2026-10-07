@@ -1,0 +1,61 @@
+{
+  "title": "Template: PEV Cycle Architect Plan",
+  "tags": [
+    "pev-cycle"
+  ],
+  "meta": {
+    "template_version": "1.0.0"
+  },
+  "sections": [
+    {
+      "id": "problem",
+      "heading": "Problem",
+      "content": "**Filled by:** Architect — this whole doc is the Architect's Shape Up-style pitch: orientation and boundaries for the Builder, not a prescriptive implementation spec. Only the Architect writes it.\n\nWhat is being solved and why. 2-3 sentences. Ground it in the actual codebase — reference specific current behavior that's insufficient.\n\n(Architect replaces this with the problem statement.)"
+    },
+    {
+      "id": "user-stories",
+      "heading": "User Stories",
+      "content": "3-5 coarse outcomes that define \"done\" for this cycle. Format: \"As a [role], I want [action], so that [value].\" These are the acceptance criteria — when these things work, the cycle is done. Not a fine-grained capabilities checklist.\n\n(Architect replaces this with scoped user stories.)"
+    },
+    {
+      "id": "solution-sketch",
+      "heading": "Solution Sketch",
+      "content": "Fat-marker description of the approach at module level. Enough to show feasibility and orient the Builder on roughly WHERE and WHAT, but not enough to dictate HOW. If you're specifying function signatures, parameter names, or code snippets — you've gone too far.\n\n(Architect replaces this with the solution sketch.)"
+    },
+    {
+      "id": "constraints",
+      "heading": "Constraints",
+      "content": "Rabbit holes (don't go here), no-gos (explicitly out of scope), trade-offs accepted, test budget guidance (5-10 focused tests per subsystem change). This section sets boundaries the Builder must respect.\n\n(Architect replaces this with constraints and trade-offs.)"
+    },
+    {
+      "id": "affected-nodes",
+      "heading": "Affected Nodes",
+      "content": "axiom-graph node IDs and file paths that this cycle expects to touch. Used by the Auditor to distinguish expected vs collateral staleness.\n\n(Architect replaces this with the affected node table.)"
+    },
+    {
+      "id": "tasks",
+      "heading": "Tasks",
+      "content": "Ordered implementation task list for the Builder. **One subsection per task**, added with `axiom_graph_add_section(parent_id=\"tasks\", section_id=\"task-1\", ...)`, `task-2`, and so on (slug ids, no dots). Size each task at about 60 Builder tool calls; split anything larger. Each task names the axiom-graph node IDs to read or modify, the user story it satisfies, the `decisions::d-N` entries it depends on, and a one-line hint. The orchestrator briefs each Builder with exactly one `architect::tasks.task-N` plus the decisions it cites, so a task must stand on its own.\n\n(Architect replaces this paragraph with a one-line overview, and adds the `task-N` subsections.)"
+    },
+    {
+      "id": "required-artifacts",
+      "heading": "Required Artifacts",
+      "content": "Concrete deliverables this cycle must produce — what the Reviewer checks against the Builder's output.\n\n(Architect replaces this with concrete deliverables.)"
+    },
+    {
+      "id": "test-plan",
+      "heading": "Test Plan",
+      "content": "Architect-proposed Tier 2 and Tier 3 tests linked to user stories. Table format: User Story | Tier | Scenario | Proves. Tier 1 tests are the Builder's domain. The Builder uses this as guidance (may deviate with justification). The Reviewer checks actual tests against this table.\n\n(Architect replaces this with proposed Tier 2/3 tests.)"
+    },
+    {
+      "id": "changelog-draft",
+      "heading": "Changelog Draft",
+      "content": "Draft changelog entry summarizing what changed from the user's perspective.\n\n(Architect replaces this with a draft changelog entry.)"
+    },
+    {
+      "id": "source-documents",
+      "heading": "Source Documents",
+      "content": "List every ADR, PRD, design spec, prior cycle doc, or issue that informed this pitch. For each, include: (1) the axiom-graph doc ID or file path, (2) a one-line summary of what constraint or requirement it contributes. The Reviewer uses this list to cross-check the pitch against upstream intent. If no source documents exist (greenfield work), state \"None — greenfield.\"\n\n(Architect replaces this with the source documents.)"
+    }
+  ]
+}

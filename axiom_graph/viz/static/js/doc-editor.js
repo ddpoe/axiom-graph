@@ -97,7 +97,11 @@ export function localSlug(fullId) {
         return '';
     const afterNs = fullId.includes('::') ? fullId.split('::').pop() : fullId;
     const parts = afterNs.split('.');
-    return parts[parts.length - 1];
+    const last = parts[parts.length - 1];
+    // A section's dot-path never contains "/", but a *document* id's body does:
+    // handed "{project}::docs/adrs/015" the dot-split above returns the whole
+    // path, so the trailing path segment is taken here.
+    return last.includes('/') ? last.slice(last.lastIndexOf('/') + 1) : last;
 }
 function replaceLocalSlug(fullId, newLocal) {
     if (!fullId || !fullId.includes('::'))

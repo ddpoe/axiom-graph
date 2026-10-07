@@ -1,98 +1,123 @@
-<!-- generated from axiom_graph::docs.consumer.concepts.history @ c4bdd98e97cb; do not edit -->
+<!-- generated from axiom_graph::docs/consumer/concepts/history @ 0dc80010a27f; do not edit -->
 
-# History: the append-only spine under drift, diffs, and time travel
+# Change history, diffs, and reports
 
-## Another read on the same mesh
+## What axiom-graph records
 
-axiom-graph tracks three kinds of state for every node: its current content (hashes), its current [staleness](staleness.md) (the `own_status` / `link_status` snapshot), and its verification status (who vouched for it, and when). The first two are **overwritten on every build** — a check recomputes them from disk and the previous values are gone. That is fine for answering "what needs attention right now," but it cannot answer "how did we get here."
+axiom-graph keeps a change history for every node in the index: functions, modules, tests, docs, doc sections and the rest (see [the mesh](the-mesh.md)). Each entry has a date, an event type, the git commit at the time when one is known, and details such as a verification reason or the target of a link.
 
-The **history log** closes that gap. It is a single append-only table, `node_history`, with one row per meaningful change to a node. Nothing ever overwrites a row; events are only ever appended. That one table is the spine under every time-aware feature in axiom-graph — drift transitions, the "changed since" filter, diffs, time-travel reference points, the verification gate, and ghost nodes for deleted code. **Each of those is just a read or a write against `node_history`**, not a separate subsystem.
+Entries are added as you work. `build` records new nodes and deleted files. Status changes are recorded whenever statuses are refreshed: by `build`, `check`, and the MCP tools that refresh what they show or write. Adding or removing a link, verifying a node or dropping a checkpoint each add an entry. Entries are never edited. Re-running `axiom-graph init` deletes the index, history included.
 
-It is the same idea as [staleness](staleness.md): history is another *read on the mesh*. Rows are keyed by `node_id` — the very same [mesh](the-mesh.md) nodes you traverse for context — so "what changed in this node, and when" obeys the same context-reduction discipline: pull one node's log, or only the events since a reference point, never rescanning the whole project.
+## Event types
 
-| Table | Role | Write pattern |
-|---|---|---|
-| `nodes.own_status` / `link_status` | Computed snapshot — what needs attention now | Overwritten every build / check |
-| `node_verification` | Live verification state — is the current sign-off still valid | Upserted on verify |
-| `node_history` | Audit trail — what happened over time | **Append-only**, never recomputed |
+Each entry has one of these event types. The status names are explained in [staleness](staleness.md).
 
-History and verification are written together in the same transaction, so the record of *what happened* and the record of *what is currently vouched for* can never drift apart.
-
-## What a history row records
-
-Every row is small and flat. The columns answer who, what, when, and against which commit:
-
-| Column | What it holds |
+| Event | Recorded when |
 |---|---|
-| `node_id` | The mesh node this event is about. |
-| `change_type` | Which event fired — one of roughly a dozen types, grouped into the five families below. |
-| `scanned_at` | ISO-8601 timestamp of when the event was recorded. |
-| `git_sha` | The repository HEAD at the time, when known. This is what makes a row usable as a time-travel reference point. |
-| `meta` | A JSON blob with the event's detail: the `from` / `to` statuses of a transition, a verification reason, the source and target of a link event, or the snapshot of a deleted node. |
-| `preserved` | `1` marks the row exempt from pruning; `0` rows are subject to the per-node cap (see *What survives and the verification table*, below). |
+| `INITIAL` | A build indexes the node for the first time. |
+| `BECAME_CONTENT_UPDATED`, `BECAME_DESC_UPDATED` | An edit makes the node drift from the version last verified. Further edits add no entry while it stays stale. |
+| `BECAME_RENAMED`, `BECAME_NOT_FOUND` | The node was renamed or moved, or it disappeared. |
+| `BECAME_LINKED_STALE`, `BECAME_BROKEN_LINK` | Something the node links to changed or no longer exists. The entry names that node. |
+| `BECAME_VERIFIED`, `LINK_BECAME_VERIFIED` | The node's status, or its link status, returns to `VERIFIED`. |
+| `AGENT_VERIFIED` | An agent verified the node with `axiom_graph_mark_clean` or `axiom_graph_reverify`, or saved a doc section through the doc tools. The entry carries the reason. |
+| `MANUAL_VERIFIED` | A person verified the node with `axiom-graph mark-clean` or from the dashboard. |
+| `LINK_ADDED`, `LINK_REMOVED` | A link from this node was added or removed. The entry names the target. |
+| `CHECKPOINT` | Someone ran `axiom-graph history checkpoint`. The entry carries the commit. |
+| `DELETED` | The node's file or doc was deleted, or the node was purged. The entry keeps its last title, type and location. |
+| `RAW_DOCJSON_EDIT` | A doc section was edited outside the doc tools. `axiom_graph_accept_doc_edits` accepts the edit. |
+| `RENAME_SCORING_SKIPPED` | A node went missing and rename detection could not check it, so its `NOT_FOUND` may be a rename. `axiom-graph rename apply` links the old and new ids. |
 
-Recording is automatic. Whenever the scanner's `upsert_node` step detects that a node's content or descriptor hash changed, it inserts a row in the same write — there is no separate "start tracking" step. The primary key is an autoincrementing `id`, and rows are never edited after the fact: the log is append-only by construction.
+`axiom-graph carry-forward` (see [staleness](staleness.md#after-merging-a-worktree)) copies verifications made in a worktree. Each one is recorded as `AGENT_VERIFIED` or `MANUAL_VERIFIED`, matching who last verified the node in the worktree (a doc tool's save counts), and its reason names the branch and commit. When only part of a node carried, the entry's detail says whether it was the node's own text or the checks of some of its links:
 
-## The five change-type families
-
-Every `change_type` belongs to one of five families. The family tells you who wrote the row and what kind of question it answers.
-
-| Family | Change types | Written by | Fires when |
-|---|---|---|---|
-| **Content** | `INITIAL`, `CONTENT_ONLY`, `DESC_ONLY`, `CONTENT_AND_DESC` | the scanner, during `build` | a node's content or descriptor hash differs from the stored baseline. The names are content-centric on purpose — `CONTENT_ONLY` means a function body *or* a doc section's prose changed. |
-| **State** | `BECAME_CONTENT_UPDATED`, `BECAME_DESC_UPDATED`, `BECAME_LINKED_STALE`, `BECAME_NOT_FOUND`, `BECAME_VERIFIED` (plus link-dimension counterparts) | `record_staleness` | a node's `own_status` or `link_status` transitions. These capture *how the staleness engine read the change*, emitted per dimension. |
-| **Structural** | `LINK_ADDED`, `LINK_REMOVED` | edge-modifying code (add-link, `write_doc` link arrays, rebuild) | an edge is created or removed. The row is recorded on the source node; `meta` carries both endpoints and the actor. |
-| **Lifecycle** | `DELETED` (`preserved=1`) | the purge pass | a node's source file leaves disk. The row snapshots the node's last-known title, type, location, and tags before the node is cascade-deleted. |
-| **Actor** | `AGENT_VERIFIED`, `MANUAL_VERIFIED`, `CHECKPOINT` (`preserved=1`) | a human or an agent | someone makes a judgment call — vouching for a node, or dropping a named marker. |
-
-Two distinctions are worth keeping straight. `BECAME_VERIFIED` (a State event) means the hashes *re-aligned on their own* — a revert, or code and prose organically matching again — with nobody reviewing anything; `AGENT_VERIFIED` / `MANUAL_VERIFIED` (Actor events) mean someone actually looked. And Content events answer "what physically changed," while State events answer "how did that change move the node's status" — a single edit usually writes one of each.
-
-## What survives and the verification table
-
-History is append-only, and there is no user command that deletes it. The one pruning mechanism is a silent safety valve: a **per-node cap of 100 rows** (`_HISTORY_ROW_LIMIT`). When a high-churn node accumulates more than 100 rows, the oldest non-preserved ones are dropped. There is deliberately no `--keep` / `--older-than` pruning command — history rows are tiny, and deleting them would destroy the ability to answer "how long was this stale six months ago."
-
-The `preserved` flag is what survives that cap. **Actor and Lifecycle events set `preserved=1`** and are never pruned, which keeps three things permanently legible:
-
-- the **verification trail** — so `history agent-verified` can always list what an agent vouched for but a human has not yet reviewed;
-- **checkpoint markers** — so a named reference point is never silently lost;
-- **`DELETED` tombstones** — so a node that no longer exists can still be surfaced as a ghost (see *What the history log powers*, below).
-
-### The verification table
-
-`node_history` answers "what happened." Its companion table, `node_verification`, answers "is the current sign-off still valid." It holds one row per node: `status`, `verified_at`, `verified_by` (`human`, `agent`, or `agent:model-name`), an optional `reason`, and two hash columns — `code_hash_at` and `desc_hash_at`. Those hashes are the expiry mechanism: a verification only counts while the stored hashes still match the node's current content. The moment the code or prose changes, the snapshot no longer matches and the node falls back to stale. The two tables are written in the same transaction, so they cannot diverge.
-
-## What the history log powers
-
-Each family of rows is the substrate for a feature you already use. Read the log one way and you get drift history; read it another way and you get time travel.
-
-**Drift transitions and sticky LINKED_STALE.** State events are the audit trail behind [staleness](staleness.md). Because every transition is recorded, the log can answer "when did this become stale, and how long has it been that way" — not just "is it stale now." It is also why `LINKED_STALE` is *sticky*: a State event records that a node went stale, and only an **Actor event on that same node** (a verification snapshot) clears it. Editing the prose, or even verifying the upstream code, does not — the clearing event has to land on the node itself.
-
-**The verification gate.** `history agent-verified` reads the preserved Actor events to build the pre-push sign-off queue: every node an agent marked verified with no later human verification. A person scans that list before the work lands. It is the human-in-the-loop checkpoint of the [docs-honesty loop](../examples/docs-honesty-loop.md).
-
-**Time travel and the "changed since" filter.** Any row carrying a `git_sha` is a usable reference point; `CHECKPOINT` rows are explicit, named ones ("this release matters"). Resolution checks checkpoints first, then falls back to any row matching a SHA prefix, so the filter works even right after `init`. Give it a reference point and you get back every node that changed after it — which powers both the impact report and the viz [Changed Since](../viz.md) filter. For the viz filter, "changed" is a true **net state-diff** of the current index against the baseline: a node edited and then reverted within the window *cancels* and never appears, and each changed node is labelled by kind (added, content, descriptor, content+descriptor, renamed, deleted). The history log still anchors the reference point — but membership is the net state, not a replay of every event row. See the [reporting pipeline](../examples/reporting-pipeline.md) for the end-to-end flow.
-
-**Diffs.** History also supplies the *baseline* for a diff. To show what changed in a node, the diff subsystem reads `git show {sha}:{file}` where `{sha}` comes from the node's own history — its most recent verified or checkpoint row, falling back to the oldest `INITIAL`. No source snapshots are stored in the database; the log just remembers which commit to compare against.
-
-**Ghost nodes.** A `DELETED` tombstone keeps a removed node visible. When the "changed since" filter spans a deletion, the viz synthesizes a dimmed, struck-through [ghost row](../viz.md) from the preserved snapshot, so a node disappearing is itself a visible event rather than a silent gap. The tombstone also preserves the node's source span and the commit it was deleted at, so the ghost's baseline source can be recovered straight from git for inspection.
-
-## How you reach it
-
-The same log is exposed on all three surfaces.
-
-**CLI.** Two `history` subcommands ([use the CLI](../get-started/use-the-cli.md)):
-
-```bash
-axiom-graph history checkpoint .                      # drop a named reference point
-axiom-graph history checkpoint --message 'v2.1 baseline' .
-axiom-graph history agent-verified .                 # the human sign-off queue
+```
+2026-10-04  MANUAL_VERIFIED   manually verified — "[carry_forward:feat@ae1de6054c70] verified by human: encoding added"
 ```
 
-`checkpoint` only marks — it never prunes. `agent-verified` lists what is still awaiting human review.
+## See a node's history
 
-**MCP.** Agents reach the log through three tools ([connect your agent](../get-started/connect-your-agent.md)):
+Agents call `axiom_graph_history` with a `node_id`, or `node_ids` for several nodes. Entries come newest first, 10 at a time; `max_results` raises that to at most 100 and `offset` pages back.
 
-- `axiom_graph_history` — a node's change log, annotated with how long any stale window has been open;
-- `axiom_graph_report` — the impact report: everything that changed since a checkpoint, SHA, or date, ordered by urgency;
-- `axiom_graph_diff` — the structured per-node diff against a baseline commit.
+```
+history for myproject::src.payments::charge
+[4 of 4 entries]
+────────────────────────────────────────────────────────────
+2026-10-02  AGENT_VERIFIED    agent verified — "refund path checked against the new signature"
+2026-10-01  BECAME_CONTENT_UPDATED  became CONTENT_UPDATED
+2026-09-23  CHECKPOINT        git:ba9edf7fd551  (earlier history: git log --follow)
+2026-09-20  INITIAL           first scan
+```
 
-**Viz.** On a node's detail drawer the **History** tab shows the change log with clickable SHAs — click one to diff that commit against the current source. The sidebar **Changed Since** filter and its ghost nodes are the same since-query, rendered. See [the visualization guide](../viz.md).
+In the dashboard, a node's detail panel has a **History** tab with the same entries (without checkpoints), its last verification and any renames. Each entry's SHA is a button that opens the node's source diffed against that commit. See [the dashboard guide](../viz.md).
+
+From the terminal, `axiom-graph history agent-verified .` lists the nodes whose latest entry is an agent's verification, so a person can review them before you push:
+
+```
+AGENT-VERIFIED NODES (not yet human-reviewed)
+--------------------------------------------------
+myproject::src.payments::charge    verified 2026-10-02  "refund path checked against the new signature"
+
+1 node(s) pending human review.
+```
+
+## Diff a node against an earlier commit
+
+`axiom_graph_diff` (CLI: `axiom-graph diff`) returns a node's source, or a doc section's heading and text, at an earlier commit next to its current version. Run it on a stale node to see what changed since it was last checked.
+
+```bash
+axiom-graph diff myproject::src.payments::charge . --summary
+axiom-graph diff myproject::src.payments::charge . --baseline HEAD~3
+```
+
+```json
+{
+  "node_id": "myproject::src.payments::charge",
+  "baseline_sha": "ba9edf7fd551a3c09e4b2f0d1c7e8a6b5d4c3b2a",
+  "baseline_date": "2026-09-23T14:02:11+00:00",
+  "baseline_reason": "last commit recorded before the node went CONTENT_UPDATED at 2026-09-24T09:15:40+00:00",
+  "path": "src/payments.py",
+  "baseline_path": "src/payments.py",
+  "summary": "+4 / -1 lines in body",
+  "lines_added": 4,
+  "lines_removed": 1
+}
+```
+
+That is the `--summary` form (MCP: `summary_only=true`). Without it, the result carries `old_content` and `new_content` in place of the line counts.
+
+By default, a stale node is compared with the last commit recorded before it went stale, so the diff shows the change that flagged it. If the node wasn't committed yet when it was indexed, that commit doesn't hold it, so the diff uses the newest commit that holds the node as it was before the change. Any other node is compared with the latest commit recorded at a verification or checkpoint, or, when there is none, the commit where it was first indexed. `baseline_reason` says which of these the diff used. `--baseline` (MCP: `baseline_sha`) takes any commit: a SHA, a tag or an expression such as `HEAD~3`.
+
+The node is found by name in both versions, so code that moved around it does not show as a change, and a file renamed or moved since the baseline is read from its old path (`baseline_path`). A node added since the baseline has an empty `old_content`. When a diff can't be built, the result is an `error` and a `reason` instead, for example `no_baseline` when the node's history holds no commit, or no commit holds a stale node as it was before its change. Several node ids give one result each; the CLI separates them with `---` and exits 1 if any failed.
+
+## Reports and reference points
+
+A **reference point** is where a report starts. Any commit recorded in the history can be one. A **checkpoint** is a reference point you mark on purpose, for example at a release; the PEV plugin drops one after each cycle's audit.
+
+```bash
+axiom-graph history checkpoint --message "v2.1 release" .
+```
+
+`axiom_graph_list_reference_points` (CLI: `axiom-graph report . --list-refs`) lists checkpoints, then the other recorded commits, newest first in each group:
+
+```
+  ba9edf7fd551  checkpoint   2026-09-23  (7748 rows)  "v2.1 release"
+  e7c429fa29d8  build        2026-10-02  (574 rows)
+```
+
+`axiom_graph_report` (CLI: `axiom-graph report`) summarizes what was recorded after a reference point: content changes, status changes, link changes and verifications. Every report opens with a `reference:` line that names what it was measured against:
+
+```
+reference: ba9edf7fd551 — checkpoint at 2026-09-23T14:02:11+00:00
+12 nodes changed, 31 became stale, 40 verified (40 agent-only), 9 links modified
+```
+
+Choose the start with `since_sha` (CLI: `--since-sha`), a SHA prefix of at least 4 characters, or `since_timestamp` (CLI: `--since`), an ISO-8601 time. A commit the index never recorded but git knows resolves to its commit time. A SHA that neither knows, or that matches more than one commit, is an error, never a report over a different window:
+
+```
+ERROR: since_sha 'deadbeef' is not in node_history and is not a commit in this repository
+```
+
+With neither option, the report starts at the latest checkpoint, or at the latest recorded commit if there is no checkpoint.
+
+The MCP tool returns only the reference and headline by default; `detail="condensed"` groups entries by module or doc, and `detail="full"` lists every entry. MCP output is capped at 40,000 characters (`max_chars`). The CLI's `--format` is `text` (every entry), `condensed` or `json`. Both narrow the report: `change_type_pattern` and `node_pattern` take globs and `node_type` a node type (CLI: `--change-type`, `--node`, `--node-type`), and `exclude_node_pattern` (CLI: `--exclude-node`, repeatable) leaves nodes out. [Use the CLI](../get-started/use-the-cli.md) lists every flag, and the [reporting pipeline](../examples/reporting-pipeline.md) walks through a change and its report.
+
+The dashboard's **Changed Since** filter works from the same reference points: pick a checkpoint, a commit or the last 24 hours, and it shows the nodes that differ from that point, with deleted nodes as dimmed ghost rows. See [the dashboard guide](../viz.md).

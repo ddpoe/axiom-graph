@@ -74,8 +74,8 @@ def test_mark_clean_envelope_inherited_no_direct_effect(mini_project: Path, db_p
     _drift(code_path)
     builder.build(mini_project, project_id="proj", discovery_only=False)
 
-    envelope_id = "proj::docs.spec"
-    section_id = "proj::docs.spec::overview"
+    envelope_id = "proj::docs/spec"
+    section_id = "proj::docs/spec::overview"
 
     # Sanity: the section carries the own signal; the envelope inherits.
     stale_map = _get_linked_stale_ids(db_path)
@@ -140,8 +140,8 @@ def test_mark_clean_nested_section_parent_inherited(mini_project: Path, db_path:
     _drift(code_path)
     builder.build(mini_project, project_id="proj", discovery_only=False)
 
-    parent_id = "proj::docs.arch::parent"
-    child_id = "proj::docs.arch::parent.child"
+    parent_id = "proj::docs/arch::parent"
+    child_id = "proj::docs/arch::parent.child"
 
     stale_map = _get_linked_stale_ids(db_path)
     assert child_id in stale_map
@@ -210,8 +210,8 @@ def test_mark_clean_mixed_own_cleared_inherited_remains(mini_project: Path, db_p
     code_y.write_text("def bar():\n    return 1\n", encoding="utf-8")
     builder.build(mini_project, project_id="proj", discovery_only=False)
 
-    parent_id = "proj::docs.guide::parent"
-    child_id = "proj::docs.guide::parent.child"
+    parent_id = "proj::docs/guide::parent"
+    child_id = "proj::docs/guide::parent.child"
 
     stale_map = _get_linked_stale_ids(db_path)
     assert parent_id in stale_map
@@ -264,7 +264,7 @@ def test_mark_clean_ordinary_node_keeps_plain_shape(mini_project: Path, db_path:
     _drift(code_path)
     builder.build(mini_project, project_id="proj", discovery_only=False)
 
-    section_id = "proj::docs.spec::overview"
+    section_id = "proj::docs/spec::overview"
 
     time.sleep(0.05)
     result = mark_clean_nodes(
@@ -321,7 +321,7 @@ def _setup_inherited_envelope(mini_project: Path) -> tuple[str, str]:
     builder.build(mini_project, project_id="proj", discovery_only=False)
     _drift(code_path)
     builder.build(mini_project, project_id="proj", discovery_only=False)
-    return "proj::docs.spec", "proj::docs.spec::overview"
+    return "proj::docs/spec", "proj::docs/spec::overview"
 
 
 def _setup_mixed_parent(mini_project: Path) -> tuple[str, str]:
@@ -366,7 +366,7 @@ def _setup_mixed_parent(mini_project: Path) -> tuple[str, str]:
     code_x.write_text("def foo():\n    return 1\n", encoding="utf-8")
     code_y.write_text("def bar():\n    return 1\n", encoding="utf-8")
     builder.build(mini_project, project_id="proj", discovery_only=False)
-    return "proj::docs.guide::parent", "proj::docs.guide::parent.child"
+    return "proj::docs/guide::parent", "proj::docs/guide::parent.child"
 
 
 def test_cli_mark_clean_inherited_renders_warning_and_descendants(mini_project: Path):

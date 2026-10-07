@@ -1,94 +1,138 @@
-<!-- generated from axiom_graph::docs.consumer.viz @ f73300a2980b; do not edit -->
+<!-- generated from axiom_graph::docs/consumer/viz @ 6ad4a8c3b485; do not edit -->
 
-# The Viz Dashboard
+# The viz dashboard
 
-## A human window onto the mesh
+## Overview
 
-The viz dashboard is a local web app for browsing your project's [mesh](concepts/the-mesh.md) by eye. It is a convenience layer, not the main interface: agents read the mesh through the [MCP server](get-started/connect-your-agent.md) and most maintenance happens at the [CLI](get-started/use-the-cli.md). The dashboard exists for the moments a human wants to *see* the graph - to spot where staleness is spreading, trace how a function connects to its docs, or edit a DocJSON section in a rich editor.
-
-It reads the same indexed database the rest of axiom-graph reads (`.axiom_graph/graph.db`), so nothing it shows is computed specially for the UI. The graph, the staleness rings, the node details - all of it is the persisted mesh, rendered. Run `axiom-graph build` at least once before launching so there is an index to read.
+The viz dashboard is a local web app for looking at your project's index: a graph of its nodes and edges, a sortable list, a DocJSON editor, and views of your annotated workflows and tests. It reads the same index as the [CLI](get-started/use-the-cli.md) and the [MCP server](get-started/connect-your-agent.md), and shows each node's drift status (see [staleness](concepts/staleness.md)), re-checking the files you changed when it loads. Nodes and edges are explained in [the mesh](concepts/the-mesh.md).
 
 ## Launch it
 
-Start the dashboard from a terminal, pointing at a project root:
+Install the `viz` extra, then start the dashboard on an indexed project:
 
 ```bash
-axiom-graph viz /path/to/your/project
+pip install "axiom-graph[viz]"
+axiom-graph viz /path/to/project
 ```
 
-The server starts on port 8080 and opens your browser automatically. Override the port or suppress the browser as needed:
+The server runs at `http://127.0.0.1:8080` and opens a browser tab. `--port` changes the port and `--no-browser` skips the tab:
 
 ```bash
-axiom-graph viz /path/to/your/project --port 9090
-axiom-graph viz /path/to/your/project --no-browser
+axiom-graph viz /path/to/project --port 9090 --no-browser
 ```
 
-Then visit `http://127.0.0.1:8080` (or your chosen port). The dashboard requires the viz extras:
+Stop it with Ctrl+C. If the project has no index yet, `viz` stops with `No index found at ...`; index it first (see [use the CLI](get-started/use-the-cli.md)).
 
-```bash
-pip install axiom-graph[viz]
-```
-
-It is a local, single-user tool - no authentication, no remote deployment. Launching auto-registers the project in `~/.axiom_graph/projects.json`, which is what makes the project switcher (below) work across sessions and across git worktrees of the same repo.
+The dashboard is for one person on one machine: it listens only on `127.0.0.1` and has no login. The page loads its graph, editor and diagram libraries from public CDNs, so the browser needs internet access.
 
 ## The five tabs
 
-The header has five tabs, each a different view of the same mesh:
-
-| Tab | What it is for |
+| Tab | Use it to |
 |---|---|
-| **Graph** | Interactive dependency graph (Cytoscape.js). Best for understanding how components relate. |
-| **List** | Sortable, filterable table of every indexed node, with a source preview panel. Best for triaging staleness or browsing the full inventory. |
-| **Docs** | Full DocJSON document manager: folder tree, section editor, link picker, Mermaid diagrams. |
-| **Workflows** | The annotated orchestration highways - `@workflow` / `@task` definitions with their named step sequences. |
-| **Tests** | Test functions with tier badges and the code nodes each one validates. |
+| **Graph** | see how nodes connect and where drift is |
+| **List** | sort, filter and verify nodes, and read their source |
+| **Workflows** | read `@workflow` and `@task` functions step by step |
+| **Tests** | see test functions, how they are annotated, and what they validate |
+| **Docs** | browse and edit DocJSON docs |
 
-The active tab is remembered for the session. The Graph and List views share one set of sidebar filters, so a filter set in one carries into the other.
+The dashboard reopens on the tab you last used in that browser session.
 
-## Graph and List: two views, shared filters
+## Graph view and sidebar filters
 
-**Graph view** renders nodes and intent-typed edges (`composes`, `delegates_to`, `depends_on`, `validates`, `documents`, `consumes`) as a node-link diagram. Nodes are colored by subtype - function (green), module (blue), docjson (orange), test (red), entity (purple), external package (grey) - and config nodes pulled from `.claude/` get their own distinct color so agent-config files stand out. Staleness shows as a colored border ring, so drift is visible at a glance rather than something you have to query for.
+The sidebar filters apply to both Graph and List; the other tabs have their own filter panels.
 
-Five layouts are available (Force is the default; also Hierarchy, BFS, Grid, Concentric). Click a node to enter **focus mode** - a neighborhood-depth slider (1-4 hops) narrows the view to a local ego-network instead of the whole graph, which is the context-reduction idea applied visually: see exactly the connected nodes, not everything. Edge-type toggles and a "hide isolated nodes" checkbox trim the rest. For very large projects the dashboard starts in List view and offers to load the full graph on demand.
+- **Staleness**: the summary at the top counts nodes per drift status. Click a count, or pick a status below it, to show only those nodes.
+- **Tags**: search for tags and pick them; a node must carry every selected tag.
+- **Subtypes** and **Node Types**: untick an entry to hide it.
+- **Changed Since**: see [Search and Changed Since](#search-and-changed-since).
 
-**List view** is the same nodes as a table (Name, Type, Location, Staleness, Tags) with sortable columns, a column-visibility menu, and five grouping modes (Type, Subtype, Module/File, Staleness, Tag). The shared sidebar filters by node type, subtype, staleness status, and tag, plus visibility toggles for private (`_`) functions and test files (both hidden by default). Markdown config files render an inline preview. Click a row to open the **source preview**: code nodes show in a Monaco editor with the relevant lines highlighted; a **diff toggle** compares the current source against a previous commit. Checkboxes drive bulk operations - select several nodes and "Verify Selected" to mark them reviewed, or "View in Graph" to jump to them in focus mode.
+In the graph, a node's color shows its subtype and its ring shows its drift status. These controls apply to the graph only:
+
+- **Edge Types**: one checkbox per edge type in your index, plus **Hide isolated nodes** (on by default).
+- **Layout**: Force (the default), Hierarchy, BFS, Grid or Concentric.
+- **Neighborhood depth** (1 to 4): how far the **Expand N hops** button in the detail drawer reaches when it adds a node's neighbors to the view.
+
+Click a node to center it and open the [detail drawer](#the-detail-drawer). Edges that a workflow step follows are labelled with the step number.
+
+A project with more than 400 nodes opens in List view. **Load full graph anyway** draws the whole graph; otherwise, selecting a node draws only its neighborhood.
+
+## List view
+
+The list shows the filtered nodes as a table with Name, Type, Location, Staleness and Tags columns. Click a header to sort, use **Columns** to hide columns, and use **Group By** to group rows by Module / File (the default), Type, Subtype, Staleness or Tag. Private (`_`) functions and files under your `test_paths` stay hidden until you tick them under **Visibility**.
+
+Click a row to open it in the side panel:
+
+- Code shows the whole file with the node's lines highlighted. **Focus** shows only the node's lines.
+- A DocJSON section shows rendered, with a breadcrumb, **Up** and **Down** to move to the parent or first child section, **Full Doc** for the whole doc, and **Edit in Docs** to open it in the Docs tab.
+- A Markdown file from your config folders, such as `.claude/`, shows rendered.
+
+The **···** button beside a name opens the detail drawer, and the location link opens the file in VS Code.
+
+To work through drift from the list:
+
+- Click a stale status badge to see why the node is stale.
+- Click ✓ on a stale row to verify it, with an optional reason. This is the same as `axiom-graph mark-clean`.
+- Tick rows and click **Verify Selected** to verify them together.
+- **Run Check** does the same as the header's **Check** button (see [Refreshing and switching projects](#refreshing-and-switching-projects)).
+- **View in Graph** draws the ticked rows, or every listed row if none are ticked, in the Graph tab.
 
 ## The detail drawer
 
-Clicking a node in either Graph or List opens a detail drawer with five tabs:
+Clicking a node in the graph, or **···** in the list, opens a drawer with five tabs:
 
-- **Overview** - type, subtype, staleness status, ID, location, tags, one-line summary. If the node is stale, a *Staleness Cause* block says why (content changed, description changed, a linked node went stale, or a broken link). A *Mark Verified* button records that you reviewed it.
-- **Docs** - the node's description (Level 1) and detailed documentation (Level 2).
-- **API** - interface info, docstring, and the node's annotated step sequence if it has one. *View Source* jumps to the source panel.
-- **Relationships** - inbound and outbound edges grouped by type, plus test-coverage links. Click any to navigate there.
-- **History** - the change log with commit SHAs and dates; click a SHA for a diff of that commit against the current source.
-
-The Staleness Cause block is worth dwelling on: it is the same drift signal the rest of the system runs on, made legible (drift is a [read on the mesh](concepts/staleness.md)), and *Mark Verified* is how you tell the mesh a node is fine again. The drawer also shows verification attribution (who verified, when, and any reason).
+- **Overview**: type, drift status, id and location (with copy buttons), tags and summary. For a stale node it says why, links to the stale nodes behind the status, and offers **Mark Verified** with an optional reason (the same as `axiom-graph mark-clean`). A verified node shows who verified it, when and why.
+- **Docs**: the node's one-line description and its longer documentation.
+- **API**: parameters, return values and exceptions from the docstring, the docstring itself, and the node's annotated steps. **View Source** opens the node's source in the List tab's side panel.
+- **Relationships**: the tests that validate the node, then its inbound and outbound edges grouped by type. Click a node to open it.
+- **History**: the latest verification, any renames, and the node's change log. Click a commit to diff the node at that commit against its current source, in the List tab's side panel.
 
 ## Editing docs in the browser
 
-The Docs tab is a full manager for the DocJSON files in every configured docs root (`[axiom_graph.scan] docs_dirs`, which defaults to just `docs/`). A folder tree on the left organizes documents, with each configured root as its own top-level folder; a filter panel narrows the tree by tag. Opening a doc from the List view's preview jumps straight to it here, with its folder expanded. Because each [DocJSON](concepts/docjson.md) section is its own node, the editor works at section granularity:
+The Docs tab shows every DocJSON doc in your docs folders (`docs_dirs` under `[axiom_graph.scan]`, `docs/` by default) as a folder tree, one top-level folder per docs folder. The tag panel narrows the tree. **+** creates a doc in the first docs folder, the buttons on a folder create a doc or subfolder inside it, and **↻** reloads docs that changed on disk.
 
-- **Edit a section** in a rich-text editor (headings, bold, lists, tables, code blocks); changes save back to the file on disk.
-- **Manage sections** - add sections and sub-sections, reorder with the move up/down buttons, rename headings and slugs inline, delete. A table-of-contents sidebar tracks scroll position.
-- **Attach links** - a link picker searches for nodes and attaches them as provenance links, the typed edges that bind a section to the code it documents.
-- **Render Mermaid** diagrams from section content, with a dedicated Monaco diagram editor and live preview.
-- **Raw mode** toggles between the rich editor and the underlying JSON.
+Open a doc to read it rendered, with a **Contents** list beside it. To change it:
 
-This is the same editing surface used to maintain the docs you are reading - the [docs-honesty loop](concepts/staleness.md) in practice.
+- Click **Edit** on a section, change it in the rich-text editor, and click **Apply**.
+- Click a heading to rename it, or a section id to change the id.
+- Move sections up or down, remove them, add a section, or add a sub-section under a top-level section.
+- Add or remove tags on the doc and on each section.
+- Search for a node and add it to a section's links, so the section is flagged when that node changes.
+- **Diagram** opens a Mermaid editor with a live preview.
+- **{ } Source** switches to the raw JSON.
+
+Nothing is written until you click **Save**. Save writes the file directly rather than through the `axiom_graph_*` doc tools, so axiom-graph treats the change as a hand edit (see [DocJSON](concepts/docjson.md)); `axiom-graph stamps accept` keeps it and marks it verified.
 
 ## Workflows and tests
 
-**Workflows** surfaces the semantic layer - the annotated [orchestration highways](concepts/the-mesh.md). If your code uses `@workflow` / `@task` decorators, the tab lists every discovered workflow and task; selecting one shows its step sequence with step numbers, names, purposes, inputs, outputs, and critical-path flags. Where an `AutoStep` delegates into another annotated function, that function's steps are expanded inline and renumbered (`2.3.1.3.1`), indented one level per delegation hop — so a short function backed by a deep call chain reads as the whole flow rather than a handful of markers. An `AutoStep` has no purpose of its own, so its row shows the purpose declared on the function it calls. Filters narrow by module or show only items with steps, critical steps, or linked nodes. A Monaco viewer highlights the step lines in source. This is deliberately not a full call graph - it is the intentional highways through your orchestration, with their step names attached.
+The **Workflows** tab lists functions marked with [`@workflow` or `@task`](concepts/annotations.md); the **Workflows** / **Tasks** toggle switches between them. Filter by module, or show only items that have steps, have a critical step, or are linked to a graph node. Select one to see its steps (number, name, purpose, inputs, outputs and any critical note) with its source beside them. Where an `AutoStep` calls another annotated function, that function's steps are listed under it with longer numbers such as `2.3.1`, and the `AutoStep` row shows the called function's purpose. Click a step to jump to its line in the source; **Graph** and **Source** open the function it calls.
 
-**Tests** lists every indexed test function with a tier badge (T1 unit, T2 integration, T3 end-to-end) and shows which code nodes each test `validates`. Filter by module, tier, or step annotations; selecting a test opens its source with relevant lines highlighted, and fixture relationships appear when available.
+The export button (⇩) opens a picker. Tick workflows, or every workflow in a file, and click **Export HTML** to open one standalone page with their steps and the source files behind them. `axiom-graph workflows export` and the `axiom_graph_workflow_export` MCP tool write the same page without the dashboard; [Share a workflow and its code](examples/share-a-workflow.md) walks through all three. The refresh button reruns the build to pick up new workflows.
 
-## Search, time travel, and project switching
+The **Tests** tab lists test functions with a tier badge that shows how each is annotated:
 
-**Search** - the header search bar does keyword full-text matching, filtering both Graph and List to the matching nodes at once.
+- **T3**: `@workflow` with `Step` markers
+- **T2**: `@workflow` without steps
+- **T1**: no annotation
 
-**Changed Since** - the sidebar narrows the display to nodes that changed after a reference point. Quick presets cover *Last Checkpoint*, *Last Commit*, and *24h*; for finer control, *Browse...* opens a commit picker that lists recent commits - pick one to filter since that point, or check two to define a range. "Changed" is a true **net diff** of the current index against that point: a node you edited and then reverted within the window cancels out and won't show up. Each changed row carries a **change-kind badge** - *added*, *content*, *descriptor*, *content+descriptor*, *renamed*, or *deleted* - and a kind filter lets you narrow to just one kind (e.g. only renames). The net kinds are on by default; a *link* toggle is shown but disabled (links/tags net-membership is deferred). Deleted nodes appear as **ghost nodes**: dimmed, struck-through rows synthesized from preserved history, so a node disappearing is itself visible rather than silent - and their pre-deletion source is recovered from git so you can still inspect what was removed. Both the since-query and those ghost rows are reads against the [history log](concepts/history.md).
+Filter by module or annotation, and group by module or tier. Select a test to see its steps, the code nodes it validates, its fixtures and its source.
 
-**Check and Rescan** - two header buttons. *Check* recomputes staleness for all nodes and writes it back, without re-indexing. *Rescan* runs a full `axiom-graph build` to pick up new or changed files. (Staleness shown in the UI reflects the last build or check, not live disk state - *Check* is how you refresh it on demand.)
+## Search and Changed Since
 
-**Project switching** - the project name in the top-left is a dropdown. Switch between registered projects without restarting the server, or register a new one by entering its path. Projects auto-register the first time you launch `axiom-graph viz` against them - including separate git worktrees of the same repo, which register independently - so the switcher fills in as you work.
+**Search.** Type in the header search box to find nodes whose name, id, summary or documentation contains the text, ignoring case. The results open in the List tab, and the sidebar filters still apply. Clear the box to go back.
+
+**Changed Since.** This sidebar filter narrows Graph and List to the nodes that changed after a point in history:
+
+- **Last Checkpoint**: since the last checkpoint (`axiom-graph history checkpoint`).
+- **Last Commit**: since the current HEAD commit.
+- **24h**: in the last 24 hours.
+- **Browse...**: pick from recent commits. Click a commit to filter since it, or tick two for a range. You can search commit messages and filter by date. Commits the index never recorded are faded but still work.
+
+A node counts as changed if it differs between that point and the current index, so an edit you made and then reverted does not show (see [history](concepts/history.md)). Each changed row has a badge: `added`, `content`, `desc` (description changed), `content+desc`, `renamed` or `deleted`. The **Kinds** toggles hide or show each kind. Deleted nodes appear as dimmed, struck-through rows; click one to see its source as it was at the starting point.
+
+While the filter is on, the side panel's **Diff** button compares a node with its version at the starting point: side by side for code, word by word for each doc section. If the index was built before the latest commit, a banner says how many commits behind it is; run `axiom-graph build` to catch up.
+
+## Refreshing and switching projects
+
+**Check** in the header re-checks the files that changed, like `axiom-graph check`, without re-indexing. The dashboard does the same each time it loads the graph, so a function you edited shows as changed without a build. To turn that off, set `refresh_before_read = "off"` in [configuration](get-started/configuration.md). Functions and sections the index has not seen yet need `axiom-graph build`; run it and reload the page. The refresh buttons on the Workflows and Tests tabs also rebuild.
+
+The project name at the top left opens the project switcher. It lists your registered projects with their paths; click one to switch without restarting the server. To add a project, enter its path; the project must already be indexed. Projects are kept in `~/.axiom_graph/projects.json` and are added when you launch `viz` on them, switch to or add them, or copy an index into a worktree with `axiom-graph checkout`. A git worktree is listed separately, with `[wt: <folder>]` after its name. Projects whose folders no longer exist drop off the list.

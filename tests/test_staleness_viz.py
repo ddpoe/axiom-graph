@@ -286,7 +286,7 @@ def test_linked_stale_doc_section_when_code_changes(project: Path):
 
     # Insert a doc section that documents the function (later updated_at)
     section = _node(
-        "proj::docs.arch::overview",
+        "proj::docs/arch::overview",
         subtype="docjson",
         code_hash="sec_hash",
         desc_hash="heading_hash",
@@ -295,7 +295,7 @@ def test_linked_stale_doc_section_when_code_changes(project: Path):
     db.upsert_node(db_file, section, discovery_only=False)
 
     # Create the documents edge
-    db.upsert_edge(db_file, _edge("proj::docs.arch::overview", "documents", "proj::mod::foo"))
+    db.upsert_edge(db_file, _edge("proj::docs/arch::overview", "documents", "proj::mod::foo"))
 
     # Create docs + doc_sections rows (needed by get_stale_doc_sections)
     from axiom_graph.index.db import _connect
@@ -304,13 +304,13 @@ def test_linked_stale_doc_section_when_code_changes(project: Path):
     with _connect(db_file) as conn:
         section_updated_at = conn.execute(
             "SELECT updated_at FROM nodes WHERE id = ?",
-            ("proj::docs.arch::overview",),
+            ("proj::docs/arch::overview",),
         ).fetchone()[0]
         conn.execute(
             "INSERT OR REPLACE INTO docs (id, title, file_path, desc_hash, updated_at) VALUES (?, ?, ?, ?, ?)",
-            ("proj::docs.arch", "Architecture", "docs/arch.json", "x", section_updated_at),
+            ("proj::docs/arch", "Architecture", "docs/arch.json", "x", section_updated_at),
         )
-        seed_section_tuple(conn, ("proj::docs.arch::overview", "proj::docs.arch", "Overview", 2, 0, section_updated_at))
+        seed_section_tuple(conn, ("proj::docs/arch::overview", "proj::docs/arch", "Overview", 2, 0, section_updated_at))
 
     time.sleep(0.02)
 
@@ -335,11 +335,11 @@ def test_linked_stale_doc_section_when_code_changes(project: Path):
     # Give the section a matching file_mtime so mtime fast-pass fires
     mtime = (docs_dir / "arch.json").stat().st_mtime
     with _connect(db_file) as conn:
-        conn.execute("UPDATE nodes SET file_mtime = ? WHERE id = ?", (mtime, "proj::docs.arch::overview"))
+        conn.execute("UPDATE nodes SET file_mtime = ? WHERE id = ?", (mtime, "proj::docs/arch::overview"))
 
     nodes = db.all_nodes(db_file)
     statuses = compute_staleness(db_file, project, nodes)
-    assert statuses["proj::docs.arch::overview"][1] == "LINKED_STALE"
+    assert statuses["proj::docs/arch::overview"][1] == "LINKED_STALE"
 
 
 def test_primary_stale_takes_precedence_over_linked(project: Path):
@@ -354,14 +354,14 @@ def test_primary_stale_takes_precedence_over_linked(project: Path):
 
     # Section with a stale code_hash (will be CONTENT_UPDATED via own-content check)
     section = _node(
-        "proj::docs.arch::overview",
+        "proj::docs/arch::overview",
         subtype="docjson",
         code_hash="stale_hash",
         desc_hash="heading_hash",
         location="src/mod.py",  # points at a .py file so staleness engine re-parses it
     )
     db.upsert_node(db_file, section, discovery_only=False)
-    db.upsert_edge(db_file, _edge("proj::docs.arch::overview", "documents", "proj::mod::foo"))
+    db.upsert_edge(db_file, _edge("proj::docs/arch::overview", "documents", "proj::mod::foo"))
 
     # Create docs + doc_sections rows
     from axiom_graph.index.db import _connect
@@ -369,13 +369,13 @@ def test_primary_stale_takes_precedence_over_linked(project: Path):
     with _connect(db_file) as conn:
         section_updated_at = conn.execute(
             "SELECT updated_at FROM nodes WHERE id = ?",
-            ("proj::docs.arch::overview",),
+            ("proj::docs/arch::overview",),
         ).fetchone()[0]
         conn.execute(
             "INSERT OR REPLACE INTO docs (id, title, file_path, desc_hash, updated_at) VALUES (?, ?, ?, ?, ?)",
-            ("proj::docs.arch", "Architecture", "src/mod.py", "x", section_updated_at),
+            ("proj::docs/arch", "Architecture", "src/mod.py", "x", section_updated_at),
         )
-        seed_section_tuple(conn, ("proj::docs.arch::overview", "proj::docs.arch", "Overview", 2, 0, section_updated_at))
+        seed_section_tuple(conn, ("proj::docs/arch::overview", "proj::docs/arch", "Overview", 2, 0, section_updated_at))
 
     time.sleep(0.02)
 
@@ -386,7 +386,7 @@ def test_primary_stale_takes_precedence_over_linked(project: Path):
     # The section should be CONTENT_UPDATED (own-content), not downgraded to LINKED_STALE
     nodes = db.all_nodes(db_file)
     statuses = compute_staleness(db_file, project, nodes)
-    section_status = statuses.get("proj::docs.arch::overview")
+    section_status = statuses.get("proj::docs/arch::overview")
     # Primary staleness (CONTENT_UPDATED) is severity 3, LINKED_STALE is severity 2.
     # The engine only upgrades CLEAN → LINKED_STALE, so CONTENT_UPDATED is preserved.
     assert section_status[0] in ("CONTENT_UPDATED", "NOT_FOUND"), (

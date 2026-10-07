@@ -6,7 +6,7 @@ preservation, minor-step-outside-loop WARNING, and AutoStep-without-task
 negative case.
 
 Mapped to user stories US-1, US-2, US-4 in
-``axiom_graph::docs.pev.cycles.pev-2026-04-21-phase3-axiom-annotations``.
+``axiom_graph::docs/pev/cycles/pev-2026-04-21-phase3-axiom-annotations``.
 """
 
 from __future__ import annotations

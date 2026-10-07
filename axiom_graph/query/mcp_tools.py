@@ -59,7 +59,7 @@ def axiom_graph_render(
     max_results: int = 60,
     offset: int = 0,
 ) -> str:
-    """Render nodes from the index at a given detail level.
+    """Render one node, or a page of nodes, as text at a chosen detail level.
 
     Passing ``node_id`` renders that single node; cap and offset are ignored.
     Omitting ``node_id`` renders all nodes capped at ``max_results`` (default
@@ -187,20 +187,25 @@ def axiom_graph_graph(
     node_ids: list[str] | None = None,
     offset: int = 0,
 ) -> str:
-    """Traverse and render the edge graph for a node.
+    """Show a node's edges: its module, imported modules, tests and docs.
 
-    **To find all callers or construction sites of a symbol**, use
-    ``direction="in"`` -- this returns every node that calls or depends on
-    the given node.  The recommended pattern for a usage search is:
-    ``axiom_graph_search(symbol_name)`` -> get the node ID from the results ->
-    ``axiom_graph_graph(node_id, direction="in")`` to see callers, then follow
-    with ``grep_search`` for literal call sites that may not be indexed.
+    The edges are ``composes`` (module to its functions and classes),
+    ``depends_on`` (a function to each *module* it imports from),
+    ``validates`` (test to the code it tests), ``documents`` (doc section to
+    code), ``annotates`` and ``delegates_to`` (workflow markers).  There are
+    **no function-to-function call edges**: ``direction="in"`` on a function
+    shows the tests and docs that point at it and its module, not the
+    functions that call it.  To find call sites, ``grep`` for the name;
+    ``axiom_graph_search(symbol_name)`` -> ``axiom_graph_graph(node_id,
+    direction="in")`` then tells you which tests and docs cover it.
 
     Args:
         project_root: Absolute path to the indexed project.
         node_id: ID of the starting node.
-        direction: ``"out"`` -- nodes this node depends on.
-            ``"in"`` -- nodes that depend on / call this node.
+        direction: ``"out"`` -- edges from this node (what it composes,
+            depends on, validates or documents).
+            ``"in"`` -- edges into this node (its module, the tests that
+            validate it, the docs that document it).
             ``"both"`` -- full neighbourhood.
         depth: Number of hops to traverse.
         max_results: Maximum number of edges to return (default 40).  When
@@ -218,20 +223,25 @@ def axiom_graph_graph(
     if node_ids is not None:
         if not node_ids:
             return "ERROR: node_ids list is empty"
-        parts: list[str] = []
-        for nid in node_ids:
-            try:
-                result = axiom_graph_graph(
-                    project_root,
-                    node_id=nid,
-                    direction=direction,
-                    depth=depth,
-                    max_results=max_results,
-                    offset=offset,
-                )
-            except Exception as exc:
-                result = f"ERROR ({nid}): {exc}"
-            parts.append(result)
+        logger.debug("axiom_graph_graph: batch of %d node_ids, direction=%s, depth=%d", len(node_ids), direction, depth)
+        # One connection and one refresh for the whole batch (the no-index error is raised once).
+        db_path = require_db(project_root)
+        items = _api.fetch_graph_batch(
+            db_path,
+            list(node_ids),
+            direction=direction,
+            depth=depth,
+            max_results=max_results,
+            offset=offset,
+            with_locations=True,
+            root=Path(project_root).resolve(),
+        )
+        parts = [
+            f"ERROR ({item.node_id}): {item.error}"
+            if item.error is not None
+            else _format_graph(item.node_id, item.result)
+            for item in items
+        ]
         return "\n\n---\n\n".join(parts)
 
     logger.debug("axiom_graph_graph: node_id=%s, direction=%s, depth=%d", node_id, direction, depth)
@@ -245,7 +255,13 @@ def axiom_graph_graph(
         max_results=max_results,
         offset=offset,
         with_locations=True,
+        root=Path(project_root).resolve(),
     )
+    return _format_graph(node_id, result)
+
+
+def _format_graph(node_id: str, result: _api.GraphResult) -> str:
+    """Format one graph result: the not-found error, or the edge-count header and the rendered tree."""
     if result.not_found:
         return f"ERROR: Node '{node_id}' not found."
 
@@ -266,13 +282,11 @@ def axiom_graph_search(
     level: int | None = None,
     max_results: int = 20,
     node_type: str | None = None,
-    mode: str = "keyword",
     scope: str = "all",
     tag: str | None = None,
     offset: int = 0,
-    _embedder_thread=None,
 ) -> str:
-    """Full-text search over node level_1 and level_2 fields.
+    """Full-text search over node names and summaries, in code and docs.
 
     Returns one line per match: ``{node_id}  {level_1 summary}``.
     A header line always reports how many results were returned and the total
@@ -285,18 +299,18 @@ def axiom_graph_search(
     The efficient pattern is:
 
     1. ``axiom_graph_search(project_root, "SymbolName")`` -- locate the node ID.
-    2. ``axiom_graph_graph(project_root, node_id, direction="in")`` -- find callers
-       and dependents from the index.
-    3. ``grep_search`` for literal call sites (construction, imports) that
-       may not be captured as edges in the index.
+    2. ``grep_search`` for its call sites -- the index has no
+       function-to-function call edges.
+    3. ``axiom_graph_graph(project_root, node_id, direction="in")`` -- the
+       tests that validate it and the docs that document it.
 
     This is significantly cheaper in context than calling ``axiom_graph_list``
     (which dumps every node) and more targeted than reading full files.
 
     **How the query is interpreted**
 
-    In ``keyword`` mode (default), the search runs through three stages,
-    stopping as soon as any stage returns results:
+    The search runs through three stages, stopping as soon as any stage
+    returns results:
 
     1. **FTS (ranked)** -- SQLite FTS5 full-text index, BM25-ranked.  A single
        word finds every node containing that word, ordered by relevance.
@@ -317,12 +331,6 @@ def axiom_graph_search(
        If this stage fires it usually means the query terms are too common or
        unrelated -- a more specific single term will return better-ranked
        results from stage 1.
-
-    In ``semantic`` mode, the query is converted to an embedding vector and
-    matched against stored node embeddings via cosine similarity. This finds
-    conceptually related nodes even when the exact words differ. Requires
-    embeddings to have been generated during ``axiom_graph_build``. Falls back to
-    keyword mode if embeddings are unavailable.
 
     Args:
         project_root: Absolute path to the indexed project.
@@ -347,10 +355,6 @@ def axiom_graph_search(
             empty result.  This is a structural type, not a source filter --
             docs are *not* ``node_type="doc"``; use ``scope="docs"`` to
             restrict results to documentation.
-        mode: Search mode: ``"keyword"`` (default) uses FTS5 full-text
-            matching. ``"semantic"`` uses embedding-based vector similarity
-            search (deprecated as of 2.1.0; slated for removal in 3.0 --
-            use keyword search).
         scope: Filter results by source: ``"code"`` returns only code nodes,
             ``"docs"`` returns only doc section nodes, ``"all"`` (default)
             returns both.
@@ -360,9 +364,8 @@ def axiom_graph_search(
             result set.
     """
     logger.debug(
-        "axiom_graph_search: query=%r, mode=%s, max_results=%d, offset=%d",
+        "axiom_graph_search: query=%r, max_results=%d, offset=%d",
         query,
-        mode,
         max_results,
         offset,
     )
@@ -375,11 +378,10 @@ def axiom_graph_search(
         level=level,
         max_results=max_results,
         node_type=node_type,
-        mode=mode,
         scope=scope,
         tag=tag,
         offset=offset,
-        embedder_thread=_embedder_thread,
+        root=Path(project_root).resolve(),
     )
 
 
@@ -420,15 +422,20 @@ def axiom_graph_source(
     if node_ids is not None:
         if not node_ids:
             return "ERROR: node_ids list is empty"
+        logger.debug("axiom_graph_source: batch of %d node_ids", len(node_ids))
+        # One connection and one refresh for the whole batch (the no-index error is raised once).
+        db_path = require_db(project_root)
+        root = Path(project_root).resolve()
+        items = _api.fetch_source_batch(db_path, root, list(node_ids))
         parts: list[str] = []
         char_count = 0
         separator = "\n\n---\n\n"
         omitted: list[str] = []
-        for i, nid in enumerate(node_ids):
-            try:
-                result = axiom_graph_source(project_root, node_id=nid, max_chars=None)
-            except Exception as exc:
-                result = f"ERROR ({nid}): {exc}"
+        for i, item in enumerate(items):
+            if item.error is not None:
+                result = f"ERROR ({item.node_id}): {item.error}"
+            else:
+                result = _format_source(item.node_id, item.result, root)
             chunk_cost = len(result) + (len(separator) if parts else 0)
             if max_chars is not None and char_count + chunk_cost > max_chars and parts:
                 omitted = list(node_ids[i:])
@@ -447,7 +454,11 @@ def axiom_graph_source(
 
     db_path = require_db(project_root)
     root = Path(project_root).resolve()
-    result = _api.fetch_source(db_path, root, node_id)
+    return _format_source(node_id, _api.fetch_source(db_path, root, node_id), root)
+
+
+def _format_source(node_id: str, result: _api.NodeSource, root: Path) -> str:
+    """Format one source result: its error line (not found, no location, file missing) or its text."""
     if result.not_found:
         return f"ERROR: Node '{node_id}' not found."
     if result.no_location:
@@ -502,7 +513,7 @@ def axiom_graph_list_undocumented(
     max_results: int = 60,
     offset: int = 0,
 ) -> str:
-    """List all nodes that have no inbound 'documents' edge.
+    """List nodes that no doc section links to.
 
     These nodes exist in the index but are not referenced by any doc section.
     Output always starts with a ``[N of M undocumented nodes]`` count header.
@@ -549,7 +560,7 @@ def axiom_graph_drift_query(
     limit: int = 100,
     include_frozen: bool = False,
 ) -> str:
-    """Filtered/grouped/paginated projection over the persisted staleness inventory.
+    """List stale nodes with their status and cause; filter, group and page them.
 
     This is the read-only companion to ``axiom_graph_check``.  ``check``
     answers "how much drift is there?" in one summary line; this answers
@@ -562,14 +573,21 @@ def axiom_graph_drift_query(
         filter: Status filter.  ``None`` (all own + link problem
             statuses), ``"staleness"`` (own + LINKED_STALE only),
             ``"links"`` (LINKED_STALE + BROKEN_LINK), ``"all"`` (every
-            own + link problem status), or any individual status name
+            own + link problem status, plus ``DOC_SECTION_LONG``
+            advisory rows, labelled ``[DOC_SECTION_LONG]`` in ``full``
+            rows), ``"doc_quality"`` / ``"DOC_SECTION_LONG"`` (advisory
+            rows only), or any individual status name
             (``CONTENT_UPDATED``, ``DESC_UPDATED``, ``RENAMED``,
-            ``NOT_FOUND``, ``LINKED_STALE``, ``BROKEN_LINK``).  The ``DOC_SECTION_LONG``
-            advisory is not addressable here -- it lives on a different
-            table and is summarised by ``axiom_graph_check``.
-        location_glob: fnmatch-style path glob (``**`` for recursive)
-            applied to ``nodes.level_3_location`` (falling back to
-            ``location``).  E.g. ``"axiom_graph/viz/**"``.  Filters
+            ``NOT_FOUND``, ``LINKED_STALE``, ``BROKEN_LINK``).
+            ``"VERIFIED"`` is rejected -- it is not drift.
+        location_glob: Path glob applied to ``nodes.level_3_location``
+            (falling back to ``location``).  ``*`` and ``?`` stay within
+            one path segment, ``**`` crosses directories (``a/**/b.py``
+            also matches ``a/b.py``), and ``[abc]`` / ``[!abc]`` /
+            ``{a,b}`` are supported; a malformed glob raises.  A glob
+            matches the whole location or its path part before a
+            ``#Lx-Ly`` fragment, so ``"tests/*.py"`` selects functions
+            and tests in ``tests/`` but not ``tests/sub/``.  Filters
             BEFORE grouping; grouped counts reflect the post-filter
             slice.
         group_by: Optional grouping axis.  One of:
@@ -577,18 +595,31 @@ def axiom_graph_drift_query(
             - ``None`` -- flat row list (paginated).
             - ``"status"`` -- group by ``own/link`` status pair.
             - ``"location_prefix"`` -- group by 2-component path prefix
-              (``axiom_graph/viz``, ``axiom_graph/index``, ...).
+              (``axiom_graph/viz``, ``axiom_graph/index``, ...).  Test
+              functions group by their file (``tests/test_x.py``).
             - ``"feature"`` -- group by inbound ``documents``-edge
-              feature ancestor (``docs.features.{X}`` in the doc tree).
+              feature ancestor (``docs/features/{X}`` in the doc tree).
               Nodes with no inbound ``documents`` edge bucket as
               ``(undocumented)``; never silently dropped.
+            - ``"node_kind"`` -- split into ``code``, ``test`` and
+              ``doc``.  ``doc`` is a doc section; ``test`` is anything
+              under the configured ``scan.test_paths`` (helpers and
+              test modules included) or a test function; ``code`` is
+              the rest.
 
         format: Projection.  ``None`` (the default) resolves to
             ``"full"`` when ungrouped and ``"counts"`` when ``group_by``
             is set -- so an aggregate call returns a compact distribution
             rather than dumping every full row.  Explicit values:
 
-            - ``"full"`` -- ``id, own_status, link_status, location, via``.
+            - ``"full"`` -- one labelled row per node:
+              ``id=<node_id>  <own>/<link>  loc=<location>  via=...
+              root=...``.  For LINKED_STALE rows ``via`` lists the
+              direct offenders from the computed staleness attribution
+              and ``root`` the leaf root offenders (the same ones
+              ``axiom_graph_reverify`` resolves), shown only when they
+              differ from ``via``.  Each list shows up to 10 ids, then
+              ``(+N more)``.
             - ``"ids"`` -- newline-delimited IDs (or ``{group, ids}`` per
               group when ``group_by`` is set).
             - ``"counts"`` -- ``{group, count}`` per group.  Only valid
@@ -601,10 +632,13 @@ def axiom_graph_drift_query(
             span page boundaries.  ``counts`` is a bounded distribution and
             is never paginated.
         limit: Page size (default 100).
-        include_frozen: When ``False`` (the default), rows under docs
-            tagged in ``config.staleness.frozen_tags`` are excluded
-            from output, except BROKEN_LINK rows which are retained
-            with a ``[frozen-source]`` postfix on ``format='full'``.
+        include_frozen: When ``False`` (the default), the rows of a doc
+            tagged in ``config.staleness.frozen_tags``, its doc node
+            (the envelope) included, are excluded
+            from output, except BROKEN_LINK rows, which are retained
+            and counted in every format (``full``, ``ids``,
+            ``counts``) — with a ``[frozen-source]`` postfix on
+            ``format='full'`` — matching ``axiom_graph_check``.
             When ``True`` all rows are returned, with a ``[frozen]``
             postfix on frozen rows in ``format='full'``.  Markers
             never appear on ``format='ids'`` or ``format='counts'``.
@@ -617,7 +651,7 @@ def axiom_graph_drift_query(
         matching the sibling paginated tools.  Shapes:
 
         - flat full: count header, ``#`` column header, then
-          ``id  own/link  location  via=...`` per line.
+          ``id=...  own/link  loc=...  via=...  root=...`` per line.
         - flat ids: count header, then bare node IDs.
         - grouped counts: ``group  count`` per line (no header; unpaginated).
         - grouped ids: count header, then ``[group]`` + indented IDs.
@@ -630,8 +664,9 @@ def axiom_graph_drift_query(
         ``full``/``ids`` paths).
 
     Raises:
-        ValueError: invalid ``filter``, ``group_by``, ``format``, or
-            ``format='counts'`` without ``group_by``.
+        ValueError: invalid ``filter`` (including ``"VERIFIED"``),
+            malformed ``location_glob``, invalid ``group_by`` or
+            ``format``, or ``format='counts'`` without ``group_by``.
     """
     db_path = require_db(project_root)
     root = Path(project_root).resolve()

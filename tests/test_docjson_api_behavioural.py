@@ -15,12 +15,15 @@ from pathlib import Path
 
 import pytest
 
+from axiom_annotations import workflow
+
 from axiom_graph.docjson.api import (
     axiom_graph_add_link,
     axiom_graph_add_section,
     axiom_graph_delete_doc,
     axiom_graph_delete_link,
     axiom_graph_delete_section,
+    axiom_graph_patch_section,
     axiom_graph_read_doc,
     axiom_graph_update_doc_meta,
     axiom_graph_update_section,
@@ -28,8 +31,13 @@ from axiom_graph.docjson.api import (
     parse_section_id,
     save_and_reindex,
 )
+from axiom_graph.docjson import parse as json_doc_scanner
 from axiom_graph.index import builder, db
+from axiom_graph.index.doc_ids import derive_doc_id
 from axiom_graph.index.paths import db_path as _db_path
+from axiom_graph.lifecycle.api import build_index, compute_check_summary
+
+from tests.fixtures import doc_trees
 
 
 @pytest.fixture
@@ -46,7 +54,7 @@ def project(tmp_path: Path) -> Path:
 
 
 def _write_arch_doc(project: Path) -> str:
-    """Helper: write a fresh `proj::docs.arch` doc and return its node id."""
+    """Helper: write a fresh `proj::docs/arch` doc and return its node id."""
     doc = {
         "id": "arch",
         "title": "Architecture",
@@ -57,7 +65,7 @@ def _write_arch_doc(project: Path) -> str:
     }
     res = axiom_graph_write_doc(str(project), doc)
     assert "Wrote" in res, res
-    return "proj::docs.arch"
+    return "proj::docs/arch"
 
 
 def test_us5_write_then_read_roundtrip(project: Path) -> None:
@@ -159,7 +167,7 @@ def test_us5_delete_doc_removes_file_and_rows(project: Path) -> None:
     doc_id = _write_arch_doc(project)
     res = axiom_graph_delete_doc(str(project), doc_id)
     assert "Deleted" in res
-    json_file = project / "docs" / "arch.json"
+    json_file = project / "docs" / "arch.docjson"
     assert not json_file.exists()
     db_p = _db_path(str(project))
     assert db.get_node(db_p, doc_id) is None
@@ -180,7 +188,7 @@ def test_us3_save_and_reindex_callable_from_api(project: Path, tmp_path: Path) -
     """save_and_reindex is now exported from docjson.api (US-3)."""
     doc_id = _write_arch_doc(project)
     db_p = _db_path(str(project))
-    json_file = project / "docs" / "arch.json"
+    json_file = project / "docs" / "arch.docjson"
     data = json.loads(json_file.read_text(encoding="utf-8"))
     data["sections"].append({"id": "extra", "heading": "Extra"})
     save_and_reindex(data, json_file, db_p, project, "proj")
@@ -190,18 +198,118 @@ def test_us3_save_and_reindex_callable_from_api(project: Path, tmp_path: Path) -
 
 def test_parse_section_id_round_trip() -> None:
     """parse_section_id splits a fully-qualified id into the four parts."""
-    parsed = parse_section_id("proj::docs.arch::overview")
-    assert parsed == ("proj", "arch", "overview", "proj::docs.arch")
+    doc_id = derive_doc_id("proj", "docs", "arch.json")
+    parsed = parse_section_id(f"{doc_id}::overview", ["docs"])
+    assert parsed == ("proj", "arch", "overview", doc_id)
+
+
+@workflow(
+    purpose="A document ID holds exactly one '::' and its section IDs exactly two however deep the document sits, and a nested dot-path still resolves",
+)
+def test_deep_document_id_grammar_and_nested_section_resolution(tmp_path: Path) -> None:
+    """Deep paths keep the ``::`` arity and nested dot-paths still resolve."""
+    doc_trees.write_toml(tmp_path, ["docs"])
+    doc_trees.write_doc(
+        tmp_path,
+        "docs/a/b/c/deep.json",
+        title="Deep",
+        sections=[
+            {
+                "id": "parent",
+                "heading": "Parent",
+                "content": "Top.",
+                "sections": [{"id": "child", "heading": "Child", "content": "Nested."}],
+            }
+        ],
+    )
+    builder.build(tmp_path)
+
+    doc_id = derive_doc_id("proj", "docs", "a/b/c/deep.json")
+    assert doc_id.count("::") == 1
+    section_id = f"{doc_id}::parent.child"
+    assert section_id.count("::") == 2
+
+    parsed = parse_section_id(section_id, ["docs"])
+    assert not isinstance(parsed, str), parsed
+    assert parsed[3] == doc_id
+    assert parsed[2] == "parent.child"
+
+    res = axiom_graph_update_section(str(tmp_path), section_id, content="Rewritten.")
+    assert "Updated" in res, res
+    assert "Rewritten." in axiom_graph_read_doc(str(tmp_path), doc_id, section="child")
+
+
+@workflow(purpose="A code node's id is refused as a section id rather than being misread as a document")
+def test_parse_section_id_rejects_a_code_node_id() -> None:
+    """A code-node ID has the same ``::`` arity but names no document."""
+    parsed = parse_section_id("proj::axiom_graph.docjson.api::parse_section_id", ["docs", ".pev"])
+    assert isinstance(parsed, str)
+    assert parsed.startswith("ERROR")
+
+
+@workflow(
+    purpose="Update, patch, add, and delete resolve a section id whose document lives under a non-primary docs root",
+)
+def test_section_operations_resolve_under_a_non_primary_docs_root(tmp_path: Path) -> None:
+    """Every section-mutating entry point works outside the primary root."""
+    doc_trees.write_toml(tmp_path, ["docs", ".pev"])
+    (tmp_path / "docs").mkdir(exist_ok=True)
+    builder.build(tmp_path)
+
+    doc = {
+        "title": "Policy",
+        "sections": [{"id": "overview", "heading": "Overview", "content": "Initial."}],
+    }
+    assert "Wrote" in axiom_graph_write_doc(str(tmp_path), doc, docs_root=".pev")
+    doc_id = derive_doc_id("proj", ".pev", "policy.json")
+    assert db.get_node(_db_path(str(tmp_path)), doc_id) is not None
+
+    assert "Updated" in axiom_graph_update_section(str(tmp_path), f"{doc_id}::overview", content="Body.")
+    assert "Patched" in axiom_graph_patch_section(str(tmp_path), f"{doc_id}::overview", "More.", anchor="$")
+    assert "Added" in axiom_graph_add_section(str(tmp_path), doc_id, "extra", heading="Extra")
+    assert "Deleted" in axiom_graph_delete_section(str(tmp_path), f"{doc_id}::extra")
+
+    md = axiom_graph_read_doc(str(tmp_path), doc_id)
+    assert "Body." in md
+    assert "More." in md
+    assert "Extra" not in md
+
+
+@workflow(purpose="write_doc reports the doc id it wrote, and that id is the one the index holds")
+@pytest.mark.parametrize(
+    ("docs_root", "slug", "expected"),
+    [
+        (None, "adrs/016-nested", "proj::docs/adrs/016-nested"),
+        (".pev", "cycles/c-1", "proj::.pev/cycles/c-1"),
+    ],
+)
+def test_write_doc_reports_the_doc_id_it_wrote(tmp_path: Path, docs_root: str | None, slug: str, expected: str) -> None:
+    """A caller can take the canonical doc id from the result instead of rebuilding it."""
+    doc_trees.write_toml(tmp_path, ["docs", ".pev"])
+    (tmp_path / "docs").mkdir(exist_ok=True)
+    builder.build(tmp_path)
+
+    doc = {
+        "id": slug,
+        "title": "Reported",
+        "sections": [{"id": "overview", "heading": "Overview", "content": "Body."}],
+    }
+    res = axiom_graph_write_doc(str(tmp_path), doc, docs_root=docs_root)
+
+    reported = [line.split(":", 1)[1].strip() for line in res.splitlines() if line.strip().startswith("doc id")]
+    assert reported == [expected], res
+    assert db.get_node(_db_path(str(tmp_path)), expected) is not None
+    assert "Updated" in axiom_graph_update_section(str(tmp_path), f"{reported[0]}::overview", content="Edited.")
 
 
 # ---------------------------------------------------------------------------
-# Cycle pev-2026-05-02: auto-mark on docjson write tools.
+# Auto-mark on docjson write tools.
 #
-# Behavioural tests for the writer-is-verifier semantic added in
-# save_and_reindex.  When an existing node's hash changes as a result of a
-# docjson write tool call, the writer is implicitly the verifier -- an
-# AGENT_VERIFIED history row + node_verification snapshot is recorded for
-# that node.  Newly-created and deleted nodes are not candidates.
+# Behavioural tests for the writer-is-verifier semantic in save_and_reindex.
+# When a docjson write tool creates a node, or changes a node's content, the
+# writer is implicitly the verifier -- an AGENT_VERIFIED history row +
+# node_verification snapshot is recorded for that node.  Untouched nodes and
+# link-only changes are not candidates.
 # ---------------------------------------------------------------------------
 
 
@@ -236,10 +344,11 @@ def test_update_section_content_emits_agent_verified(project: Path) -> None:
     section_id = f"{doc_id}::overview"
     db_p = _db_path(str(project))
 
-    # Pre-state: section node exists, has only INITIAL history (from write_doc).
+    # Pre-state: write_doc created the section and, as its writer, verified it.
     pre_hist = _history_change_types(db_p, section_id)
-    assert pre_hist == ["INITIAL"], pre_hist
-    assert _verifications(db_p, section_id) == []
+    assert pre_hist == ["INITIAL", "AGENT_VERIFIED"], pre_hist
+    pre_node = db.get_node(db_p, section_id)
+    assert _verifications(db_p, section_id)[-1][1] == pre_node.code_hash
 
     # Act: update content.
     res = axiom_graph_update_section(str(project), section_id, content="Updated.")
@@ -254,7 +363,7 @@ def test_update_section_content_emits_agent_verified(project: Path) -> None:
     # it resets the baseline to the new hash and the section appears VERIFIED
     # immediately.  History shows: INITIAL (from write_doc) -> AGENT_VERIFIED.
     post_hist = _history_change_types(db_p, section_id)
-    assert "AGENT_VERIFIED" in post_hist, post_hist
+    assert post_hist.count("AGENT_VERIFIED") == 2, post_hist
     assert post_hist[-1] == "AGENT_VERIFIED", post_hist
 
     # Verification snapshot recorded under verified_by='agent' at the new hash.
@@ -262,6 +371,7 @@ def test_update_section_content_emits_agent_verified(project: Path) -> None:
     assert verifs and verifs[-1][0] == "agent"
     node = db.get_node(db_p, section_id)
     assert verifs[-1][1] == node.code_hash
+    assert node.code_hash != pre_node.code_hash
 
 
 def test_update_section_heading_only_does_not_stale_section_or_siblings(project: Path) -> None:
@@ -278,37 +388,46 @@ def test_update_section_heading_only_does_not_stale_section_or_siblings(project:
     sibling_id = f"{doc_id}::api"
     db_p = _db_path(str(project))
 
+    sec_before = _history_change_types(db_p, section_id)
+    sibling_before = _history_change_types(db_p, sibling_id)
+    doc_before = _history_change_types(db_p, doc_id)
+
     res = axiom_graph_update_section(str(project), section_id, heading="Overview v2")
     assert "Updated" in res
 
-    # Section atomic never went stale, so no AGENT_VERIFIED row.
-    sec_hist = _history_change_types(db_p, section_id)
-    assert "AGENT_VERIFIED" not in sec_hist, sec_hist
+    # Section atomic never went stale, so no new AGENT_VERIFIED row.
+    assert _history_change_types(db_p, section_id) == sec_before
     # Sibling untouched.
-    sibling_hist = _history_change_types(db_p, sibling_id)
-    assert "AGENT_VERIFIED" not in sibling_hist, sibling_hist
+    assert _history_change_types(db_p, sibling_id) == sibling_before
     # File-level composite gets auto-marked clean (its bytes changed).
     doc_hist = _history_change_types(db_p, doc_id)
-    assert "AGENT_VERIFIED" in doc_hist, doc_hist
+    assert doc_hist.count("AGENT_VERIFIED") == doc_before.count("AGENT_VERIFIED") + 1, doc_hist
 
 
 def test_add_link_does_not_emit_agent_verified(project: Path) -> None:
-    """US-2/D-1: add_link must not auto-mark; only LINK_ADDED is recorded."""
+    """US-2/D-1: add_link must not auto-mark: no AGENT_VERIFIED, no new verification.  The link names a node the
+    index lacks, so the write's closing refresh records the section's BROKEN_LINK now, as ``check --full`` would."""
+    from tests.fixtures.full_recompute import assert_matches_full_recompute
+
     doc_id = _write_arch_doc(project)
     section_id = f"{doc_id}::overview"
     db_p = _db_path(str(project))
+
+    pre_hist = _history_change_types(db_p, section_id)
+    pre_verifs = _verifications(db_p, section_id)
 
     res = axiom_graph_add_link(str(project), section_id, node_id="proj::some.module")
     assert "Added" in res
 
     post_hist = _history_change_types(db_p, section_id)
-    assert "AGENT_VERIFIED" not in post_hist, post_hist
-    assert "LINK_ADDED" in post_hist, post_hist
-    assert _verifications(db_p, section_id) == []
+    assert post_hist == [*pre_hist, "BECAME_BROKEN_LINK", "LINK_ADDED"], post_hist
+    assert "AGENT_VERIFIED" not in post_hist[len(pre_hist) :]
+    assert _verifications(db_p, section_id) == pre_verifs
+    assert_matches_full_recompute(db_p, project, [section_id])
 
 
-def test_add_section_does_not_emit_agent_verified(project: Path) -> None:
-    """US-2/D-5: add_section creates a new INITIAL node; no AGENT_VERIFIED."""
+def test_add_section_emits_agent_verified_for_the_new_section(project: Path) -> None:
+    """add_section creates a new node and, as its writer, verifies it at its hash."""
     doc_id = _write_arch_doc(project)
     db_p = _db_path(str(project))
 
@@ -324,8 +443,10 @@ def test_add_section_does_not_emit_agent_verified(project: Path) -> None:
 
     new_section_id = f"{doc_id}::api.tables"
     post_hist = _history_change_types(db_p, new_section_id)
-    assert post_hist == ["INITIAL"], post_hist
-    assert _verifications(db_p, new_section_id) == []
+    assert post_hist == ["INITIAL", "AGENT_VERIFIED"], post_hist
+    verifs = _verifications(db_p, new_section_id)
+    assert verifs and verifs[-1][0] == "agent"
+    assert verifs[-1][1] == db.get_node(db_p, new_section_id).code_hash
 
 
 def test_update_doc_meta_title_change_emits_agent_verified(project: Path) -> None:
@@ -410,3 +531,211 @@ def test_update_section_then_human_mark_clean_preserves_sequence(project: Path) 
     # preserves both stamps in order -- already asserted above.
     verifs = _verifications(db_p, section_id)
     assert verifs and verifs[-1][0] == "human", verifs
+
+
+def test_write_doc_reads_a_bare_string_link_as_a_link_object(project: Path) -> None:
+    """A ``links`` entry given as a node-id string is written as ``{"node_id": ...}`` and registered."""
+    doc = {
+        "id": "linked",
+        "title": "Linked",
+        "sections": [{"id": "overview", "heading": "Overview", "content": "Body.", "links": ["proj::docs/other"]}],
+    }
+
+    res = axiom_graph_write_doc(str(project), doc)
+
+    assert "Wrote" in res, res
+    saved = json.loads((project / "docs" / "linked.docjson").read_text(encoding="utf-8"))
+    assert saved["sections"][0]["links"] == [{"node_id": "proj::docs/other"}]
+    edges = db.all_edges(_db_path(str(project)))
+    assert any(e.from_id == "proj::docs/linked::overview" and e.to_id == "proj::docs/other" for e in edges)
+
+
+_X = "proj::docs/other"
+
+
+@pytest.mark.parametrize(
+    ("links", "named"),
+    [
+        pytest.param([42], "42", id="number"),
+        pytest.param([{"node_id": 7}], '{"node_id": 7}', id="non-string-id"),
+        pytest.param(_X, "links must be a list", id="not-a-list"),
+        pytest.param({}, "links must be a list", id="empty-dict"),
+        pytest.param([{"target": _X, "type": "documents"}], '"target"', id="target-key"),
+        pytest.param([{}], "{}", id="empty-entry"),
+        pytest.param([{"id": _X}], '{"id"', id="id-key"),
+        pytest.param([{"node_id": ""}], '{"node_id": ""}', id="empty-node-id"),
+        pytest.param([{"node_id": "  "}], '{"node_id": "  "}', id="blank-node-id"),
+        pytest.param([""], '""', id="empty-string"),
+        pytest.param([None], "null", id="null-entry"),
+        pytest.param([[_X]], f'["{_X}"]', id="nested-list"),
+        pytest.param([_X, {"target": _X}], '"target"', id="good-then-bad"),
+    ],
+)
+def test_write_doc_refuses_a_malformed_link_and_writes_nothing(project: Path, links: object, named: str) -> None:
+    """A ``links`` value of any other shape is an error naming the section, the entry and the accepted shapes."""
+    doc = {
+        "id": "bad-links",
+        "title": "Bad",
+        "sections": [{"id": "overview", "heading": "Overview", "content": "Body.", "links": links}],
+    }
+
+    res = axiom_graph_write_doc(str(project), doc)
+
+    assert res.startswith("ERROR:"), res
+    assert "'overview'" in res and named in res, res
+    assert '{"node_id": "<id>"} or a node-id string' in res
+    if isinstance(links, list) and any(isinstance(e, dict) and "node_id" not in e for e in links):
+        assert 'use "node_id"; the link type is always documents' in res, res
+    assert "nothing was written" in res
+    assert not (project / "docs" / "bad-links.docjson").exists()
+    assert db.get_node(_db_path(str(project)), "proj::docs/bad-links") is None
+
+
+def test_overwrite_with_a_malformed_link_leaves_the_file_unchanged(project: Path) -> None:
+    """Overwriting a doc with a bad link entry is refused and the existing bytes stay as they were."""
+    _write_arch_doc(project)
+    arch = project / "docs" / "arch.docjson"
+    before = arch.read_bytes()
+    doc = {"id": "arch", "title": "Architecture", "sections": [{"id": "overview", "heading": "O", "links": [{}]}]}
+
+    res = axiom_graph_write_doc(str(project), doc)
+
+    assert res.startswith("ERROR:"), res
+    assert arch.read_bytes() == before
+
+
+def test_malformed_link_in_a_nested_section_is_named_by_dot_path(project: Path) -> None:
+    """The error locates a bad entry in a nested section by its full dot-path and points at the ``node_id`` key."""
+    doc = {
+        "id": "nested",
+        "title": "Nested",
+        "sections": [
+            {"id": "parent", "heading": "P", "sections": [{"id": "child", "heading": "C", "links": [{"to": _X}]}]}
+        ],
+    }
+
+    res = axiom_graph_write_doc(str(project), doc)
+
+    assert res.startswith("ERROR:"), res
+    assert "'parent.child'" in res, res
+    assert 'use "node_id"; the link type is always documents' in res, res
+
+
+def _hand_written(project: Path, name: str, links: list) -> Path:
+    """Write a DocJSON file directly (not through a doc tool) with one linked section and one plain one."""
+    doc = {
+        "title": name.title(),
+        "sections": [
+            {"id": "overview", "heading": "Overview", "content": "Body.", "links": links},
+            {"id": "plain", "heading": "Plain", "content": "No links."},
+        ],
+    }
+    path = project / "docs" / f"{name}.docjson"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    return path
+
+
+def test_link_tools_refuse_a_section_holding_a_malformed_link(project: Path) -> None:
+    """add_link and delete_link on a section whose file holds a bad entry are refused and write nothing."""
+    path = _hand_written(project, "hand", [_X, {"target": "proj::docs/third"}])
+    builder.build(project)
+    before = path.read_bytes()
+
+    added = axiom_graph_add_link(str(project), "proj::docs/hand::overview", node_id="proj::docs/fourth")
+    removed = axiom_graph_delete_link(str(project), "proj::docs/hand::overview", node_id=_X)
+
+    for res in (added, removed):
+        assert res.startswith("ERROR:"), res
+        assert '"target"' in res and "nothing was written" in res, res
+    assert path.read_bytes() == before
+
+
+@workflow(
+    purpose="A hand-edited DocJSON file with malformed links entries is indexed whole: only the bad entries are "
+    "dropped, each with a build warning naming the file, section and entry, and the good link keeps its edge; a "
+    "document that does not parse is named in a warning, a JSON data file is not"
+)
+def test_build_skips_only_the_malformed_link_entries_and_warns(project: Path) -> None:
+    _hand_written(project, "hand", [_X, {"target": "proj::docs/third", "type": "documents"}, {"node_id": 123}])
+    (project / "docs" / "broken.docjson").write_text('{"title": "Broken", "sections": [', encoding="utf-8")
+    (project / "docs" / "legacy.json").write_text('{"title": "Legacy", "sections": [', encoding="utf-8")
+    (project / "docs" / "layout.json").write_text('{"columns": 3}', encoding="utf-8")
+
+    db_path = _db_path(str(project))
+    summary = build_index(db_path, project)
+
+    for nid in ("proj::docs/hand", "proj::docs/hand::overview", "proj::docs/hand::plain"):
+        assert db.get_node(db_path, nid) is not None, nid
+    from_overview = [e.to_id for e in db.all_edges(db_path) if e.from_id == "proj::docs/hand::overview"]
+    assert from_overview == [_X]
+    link_warnings = [w for w in summary.warnings if "docs/hand.docjson" in w and "links entry" in w]
+    assert len(link_warnings) == 2, summary.warnings
+    assert any("'overview'" in w and '"target"' in w for w in link_warnings), link_warnings
+    assert any("'overview'" in w and '{"node_id": 123}' in w for w in link_warnings), link_warnings
+    # A document that does not parse is named, with either extension; a JSON data file beside the docs is not.
+    assert any("docs/broken.docjson was not indexed" in w for w in summary.warnings), summary.warnings
+    assert any("docs/legacy.json was not indexed" in w for w in summary.warnings), summary.warnings
+    assert not [w for w in summary.warnings if "layout.json" in w], summary.warnings
+
+
+def test_indexed_doc_that_gains_a_malformed_link_by_hand_stays_found(project: Path) -> None:
+    """A bad links entry added to an indexed doc by hand does not turn its sections NOT_FOUND on check."""
+    path = _hand_written(project, "hand", [_X])
+    builder.build(project)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["sections"][0]["links"].append({"node_id": 123})
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    statuses = compute_check_summary(_db_path(str(project)), project).statuses
+
+    for nid in ("proj::docs/hand", "proj::docs/hand::overview", "proj::docs/hand::plain"):
+        assert statuses[nid][0] != "NOT_FOUND", (nid, statuses[nid])
+
+
+def test_section_edit_on_a_doc_holding_a_non_string_node_id_succeeds(project: Path) -> None:
+    """Editing another section of a doc whose links hold ``{"node_id": 123}`` by hand is not broken by that entry."""
+    path = _hand_written(project, "hand", [_X])
+    builder.build(project)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["sections"][0]["links"].append({"node_id": 123})
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    res = axiom_graph_update_section(str(project), "proj::docs/hand::plain", content="Edited.")
+
+    assert "Updated" in res, res
+    assert json.loads(path.read_text(encoding="utf-8"))["sections"][1]["content"] == "Edited."
+
+
+def test_normalize_links_strict_raises_and_lenient_drops_and_reports() -> None:
+    """Strict mode raises on a bad entry; lenient mode drops just that entry and reports it, keeping extra keys."""
+    links = [_X, {"node_id": _X, "relationship": "documents"}, {"target": _X}, {"node_id": " "}]
+
+    with pytest.raises(json_doc_scanner.MalformedLinkError, match='"target"'):
+        json_doc_scanner.normalize_links(links, "section 'a'")
+    dropped: list[str] = []
+    kept = json_doc_scanner.normalize_links(links, "section 'a'", dropped=dropped)
+
+    assert kept == [{"node_id": _X}, {"node_id": _X, "relationship": "documents"}]
+    assert len(dropped) == 2 and '"target"' in dropped[0] and '{"node_id": " "}' in dropped[1], dropped
+    assert json_doc_scanner.normalize_links(None, "x") == [] and json_doc_scanner.normalize_links([], "x") == []
+    with pytest.raises(json_doc_scanner.MalformedLinkError):
+        json_doc_scanner.normalize_links(0, "x")
+
+
+def test_bare_string_link_written_by_hand_is_indexed_and_editable(project: Path) -> None:
+    """A doc file whose ``links`` holds a node-id string indexes the link, and the link tools still edit it."""
+    doc = {"title": "Hand", "sections": [{"id": "overview", "heading": "Overview", "links": ["proj::docs/other"]}]}
+    (project / "docs" / "hand.docjson").write_text(json.dumps(doc), encoding="utf-8")
+    builder.build(project)
+    db_path = _db_path(str(project))
+    assert any(
+        e.from_id == "proj::docs/hand::overview" and e.to_id == "proj::docs/other" for e in db.all_edges(db_path)
+    )
+
+    added = axiom_graph_add_link(str(project), "proj::docs/hand::overview", node_id="proj::docs/third")
+    removed = axiom_graph_delete_link(str(project), "proj::docs/hand::overview", node_id="proj::docs/other")
+
+    assert not added.startswith("ERROR"), added
+    assert not removed.startswith("ERROR") and "No matching" not in removed, removed
+    saved = json.loads((project / "docs" / "hand.docjson").read_text(encoding="utf-8"))
+    assert [lk["node_id"] for lk in saved["sections"][0]["links"]] == ["proj::docs/third"]

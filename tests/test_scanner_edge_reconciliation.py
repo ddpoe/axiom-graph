@@ -178,13 +178,13 @@ def test_delegate_links_survive_on_a_source_the_build_did_not_walk(mini_project,
 
 
 @workflow(
-    purpose="Reconciliation is scoped to delegate links; other edge types leaving the same source survive",
+    purpose="Reconciliation is scoped to delegate and validates links; other edge types leaving the same source survive",
 )
 def test_non_delegate_edges_on_a_reconciled_source_are_preserved(mini_project, db_path):
     _write_pipeline(mini_project, "first_helper()")
     builder.build(mini_project, project_id="proj", discovery_only=False)
 
-    for edge_type, target in (("validates", FIRST_HELPER), ("composes", SECOND_HELPER)):
+    for edge_type, target in (("depends_on", FIRST_HELPER), ("composes", SECOND_HELPER)):
         _inject_edge(db_path, STEP_ID, edge_type, target)
 
     builder.build(mini_project, project_id="proj", discovery_only=False)
@@ -192,11 +192,11 @@ def test_non_delegate_edges_on_a_reconciled_source_are_preserved(mini_project, d
     assert _outbound_delegates(db_path, STEP_ID) == {FIRST_HELPER}
     with db._connect(db_path) as conn:
         survivors = conn.execute(
-            "SELECT edge_type, to_id FROM edges WHERE from_id = ? AND edge_type IN ('validates', 'composes')",
+            "SELECT edge_type, to_id FROM edges WHERE from_id = ? AND edge_type IN ('depends_on', 'composes')",
             (STEP_ID,),
         ).fetchall()
     pairs = {(r["edge_type"], r["to_id"]) for r in survivors}
-    assert ("validates", FIRST_HELPER) in pairs
+    assert ("depends_on", FIRST_HELPER) in pairs
     assert ("composes", SECOND_HELPER) in pairs
 
 

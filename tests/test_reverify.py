@@ -24,18 +24,22 @@ from axiom_graph.index.mark_clean import (
 from axiom_graph.index.staleness import (
     _get_linked_stale_ids,
     already_reverified_offenders,
+    composes_ancestors,
     expand_composes_subtree,
     resolve_root_offenders,
 )
 from axiom_graph.lifecycle.api import (
+    REVERIFY_MARKED_CLEAN_NOTE,
     REVERIFY_SKIP_HINT,
     build_index,
     compute_check_summary,
     fetch_history,
     mark_clean_nodes,
     reverify_node,
+    reverify_nodes,
 )
 from axiom_graph.lifecycle.mcp_tools import axiom_graph_reverify
+from axiom_graph.query.api import compute_drift_query
 
 
 # ---------------------------------------------------------------------------
@@ -110,8 +114,8 @@ def _doc_payload(section_id: str, link_node_id: str) -> dict:
     }
 
 
-TWO_OFFENDER_SECTION = "proj::docs.both::combined"
-TWO_OFFENDER_ENVELOPE = "proj::docs.both"
+TWO_OFFENDER_SECTION = "proj::docs/both::combined"
+TWO_OFFENDER_ENVELOPE = "proj::docs/both"
 OFFENDER_A = "proj::src.xmod::foo"
 OFFENDER_B = "proj::src.ymod::bar"
 
@@ -148,6 +152,52 @@ def _build_two_offender_project(project: Path) -> Path:
     build_index(db_p, project, project_id="proj", discovery_only=False)
     assert TWO_OFFENDER_SECTION in _get_linked_stale_ids(db_p)
     return db_p
+
+
+def _build_staggered_offender_project(project: Path, *, verify_between: bool) -> Path:
+    """Build the two-offender section, but drift its offenders one at a time.
+
+    :data:`OFFENDER_A` drifts first; when *verify_between* is set the
+    section is then marked clean (its prose re-read against that change);
+    finally :data:`OFFENDER_B` drifts.  Returns the project's DB path.
+    """
+    db_p = project / ".axiom_graph" / "graph.db"
+    code_x = _write_code(project, "xmod", "def foo():\n    return 0\n")
+    code_y = _write_code(project, "ymod", "def bar():\n    return 0\n")
+    _write_doc(
+        project,
+        "both.json",
+        {
+            "title": "Both",
+            "sections": [
+                {
+                    "id": "combined",
+                    "heading": "Combined",
+                    "content": "Documents foo and bar together.",
+                    "links": [{"node_id": OFFENDER_A}, {"node_id": OFFENDER_B}],
+                },
+            ],
+        },
+    )
+    build_index(db_p, project, project_id="proj", discovery_only=False)
+    time.sleep(0.05)
+    code_x.write_text("def foo():\n    return 1\n", encoding="utf-8")
+    build_index(db_p, project, project_id="proj", discovery_only=False)
+    if verify_between:
+        time.sleep(0.05)
+        mark_clean_nodes(db_p, project, [TWO_OFFENDER_SECTION], "Re-read against foo.", verified_by="agent")
+    time.sleep(0.05)
+    code_y.write_text("def bar():\n    return 1\n", encoding="utf-8")
+    build_index(db_p, project, project_id="proj", discovery_only=False)
+    return db_p
+
+
+def _drift_query_row(db_path: Path, project: Path, node_id: str) -> str:
+    """The ``drift_query`` full-format row for *node_id*."""
+    out = compute_drift_query(db_path, project, filter="LINKED_STALE", format="full")
+    rows = [line for line in out.splitlines() if line.startswith(f"id={node_id} ")]
+    assert len(rows) == 1, out
+    return rows[0]
 
 
 def _dependent_state(db_path: Path, project: Path) -> dict[str, tuple[str, str]]:
@@ -206,8 +256,8 @@ def test_reverify_clears_only_source_rooted_dependents(mini_project: Path, db_pa
     code_y.write_text("def bar():\n    return 1\n", encoding="utf-8")
     build_index(db_path, mini_project, project_id="proj", discovery_only=False)
 
-    x_section = "proj::docs.xdoc::overview"
-    y_section = "proj::docs.ydoc::intro"
+    x_section = "proj::docs/xdoc::overview"
+    y_section = "proj::docs/ydoc::intro"
     stale_map = _get_linked_stale_ids(db_path)
     assert x_section in stale_map
     assert y_section in stale_map
@@ -222,6 +272,7 @@ def test_reverify_clears_only_source_rooted_dependents(mini_project: Path, db_pa
     )
     time.sleep(0.05)
     out = axiom_graph_reverify(
+        verbose=True,
         project_root=str(mini_project),
         node_id="proj::src.xmod",
         reason="foo change is internal; docs still accurate.",
@@ -230,7 +281,7 @@ def test_reverify_clears_only_source_rooted_dependents(mini_project: Path, db_pa
     cleared_ids = _cleared_block_ids(out)
     assert x_section in cleared_ids
     assert y_section not in cleared_ids
-    assert not any(nid.startswith("proj::docs.ydoc") for nid in cleared_ids)
+    assert not any(nid.startswith("proj::docs/ydoc") for nid in cleared_ids)
 
     口 = Step(
         step_num=4,
@@ -282,7 +333,7 @@ def test_reverify_skips_nodes_with_other_offenders(mini_project: Path, db_path: 
     code_y.write_text("def bar():\n    return 1\n", encoding="utf-8")
     build_index(db_path, mini_project, project_id="proj", discovery_only=False)
 
-    section_id = "proj::docs.both::combined"
+    section_id = "proj::docs/both::combined"
     assert section_id in _get_linked_stale_ids(db_path)
 
     time.sleep(0.05)
@@ -302,6 +353,7 @@ def test_reverify_skips_nodes_with_other_offenders(mini_project: Path, db_path: 
     # caller knows exactly which reverify would discharge the remainder.
     time.sleep(0.05)
     out = axiom_graph_reverify(
+        verbose=True,
         project_root=str(mini_project),
         node_id="proj::src.xmod::foo",
         reason="foo verified.",
@@ -344,7 +396,7 @@ def test_reverify_clears_transitive_doc_chain(mini_project: Path, db_path: Path)
                     "id": "sec",
                     "heading": "Sec",
                     "content": "Consumes base.",
-                    "links": [{"node_id": "proj::docs.base::impl"}],
+                    "links": [{"node_id": "proj::docs/base::impl"}],
                 },
             ],
         },
@@ -360,7 +412,7 @@ def test_reverify_clears_transitive_doc_chain(mini_project: Path, db_path: Path)
                     "id": "sec",
                     "heading": "Sec",
                     "content": "Consumes mid.",
-                    "links": [{"node_id": "proj::docs.mid::sec"}],
+                    "links": [{"node_id": "proj::docs/mid::sec"}],
                 },
             ],
         },
@@ -370,9 +422,9 @@ def test_reverify_clears_transitive_doc_chain(mini_project: Path, db_path: Path)
     code_x.write_text("def foo():\n    return 1\n", encoding="utf-8")
     build_index(db_path, mini_project, project_id="proj", discovery_only=False)
 
-    base_sec = "proj::docs.base::impl"
-    mid_sec = "proj::docs.mid::sec"
-    top_sec = "proj::docs.top::sec"
+    base_sec = "proj::docs/base::impl"
+    mid_sec = "proj::docs/mid::sec"
+    top_sec = "proj::docs/top::sec"
     stale_map = _get_linked_stale_ids(db_path, transitive_tags=["consumer"])
     assert {base_sec, mid_sec, top_sec} <= set(stale_map)
     # Sanity: the transitive entries carry one-hop vias, not the root.
@@ -404,12 +456,13 @@ def test_reverify_clears_transitive_doc_chain(mini_project: Path, db_path: Path)
 @workflow(
     purpose=(
         "A doc envelope that is LINKED_STALE only by inheritance from a "
-        "section caused by code node X reads as cleared in reverify(X)'s own "
-        "report — the operation ends with a recompute, so the maintainer sees "
-        "the aggregate resolve without issuing a second command"
+        "section caused by code node X resolves within reverify(X) — the "
+        "operation ends with a recompute, so no second command is needed. "
+        "The report lists only the section as cleared and counts the envelope "
+        "as settled by inheritance"
     ),
 )
-def test_reverify_report_shows_envelope_cleared_in_same_call(mini_project: Path, db_path: Path):
+def test_reverify_settles_the_envelope_in_same_call_without_listing_it_cleared(mini_project: Path, db_path: Path):
     口 = Step(
         step_num=1,
         name="Doc with one section documenting code; drift the code",
@@ -422,26 +475,31 @@ def test_reverify_report_shows_envelope_cleared_in_same_call(mini_project: Path,
     code_x.write_text("def foo():\n    return 1\n", encoding="utf-8")
     build_index(db_path, mini_project, project_id="proj", discovery_only=False)
 
-    envelope_id = "proj::docs.spec"
-    section_id = "proj::docs.spec::overview"
+    envelope_id = "proj::docs/spec"
+    section_id = "proj::docs/spec::overview"
     persisted = compute_check_summary(db_path, mini_project)
     assert persisted.statuses[envelope_id][1] == "LINKED_STALE"
 
     口 = Step(
         step_num=2,
         name="Single reverify of the code node through the MCP surface",
-        purpose="The report itself must show the envelope cleared, with before/after counts",
+        purpose=(
+            "The report lists the section, and only the section, as cleared and counts "
+            "the envelope under settled by inheritance, with before/after counts"
+        ),
     )
     time.sleep(0.05)
     out = axiom_graph_reverify(
+        verbose=True,
         project_root=str(mini_project),
         node_id="proj::src.mod::foo",
         reason="Behavior change documented elsewhere; this doc unaffected.",
     )
     assert "ERROR" not in out
-    assert section_id in out
-    assert envelope_id in out
-    assert "LINKED_STALE before:" in out
+    assert _cleared_block_ids(out) == [section_id]
+    assert f"- {envelope_id}" not in out.splitlines()
+    assert "Settled by inheritance (not listed as cleared): 1" in out.splitlines()
+    assert "LINKED_STALE before: 2 -> after: 0 (as check counts it, frozen docs excluded)" in out.splitlines()
 
     口 = Step(
         step_num=3,
@@ -475,7 +533,7 @@ def test_reverify_report_and_history_provenance(mini_project: Path, db_path: Pat
     build_index(db_path, mini_project, project_id="proj", discovery_only=False)
 
     source_id = "proj::src.mod::foo"
-    section_id = "proj::docs.spec::overview"
+    section_id = "proj::docs/spec::overview"
 
     time.sleep(0.05)
     result = reverify_node(
@@ -744,6 +802,7 @@ def test_reverify_skip_report_names_the_clearing_action(mini_project: Path, db_p
 
     time.sleep(0.05)
     out = axiom_graph_reverify(
+        verbose=True,
         project_root=str(mini_project),
         node_id=OFFENDER_A,
         reason="foo verified.",
@@ -835,5 +894,414 @@ def test_reverify_unknown_source_reports_not_found(mini_project: Path, db_path: 
     result = reverify_node(db_path, mini_project, "proj::nope", "x", verified_by="agent")
     assert result.not_found is True
 
-    out = axiom_graph_reverify(project_root=str(mini_project), node_id="proj::nope", reason="x")
+    out = axiom_graph_reverify(verbose=True, project_root=str(mini_project), node_id="proj::nope", reason="x")
     assert out == "ERROR: Node 'proj::nope' not found."
+
+
+# ---------------------------------------------------------------------------
+# Tier 3: a verification settles the offenders it saw
+# ---------------------------------------------------------------------------
+
+
+@workflow(
+    purpose=(
+        "A doc section verified after one linked function changed stays settled "
+        "about that change: when a second linked function changes later, check, "
+        "drift_query and reverify all name only the newer offender, and "
+        "reverifying it clears the section"
+    ),
+)
+def test_verified_dependent_reports_only_offenders_newer_than_its_verification(mini_project: Path, db_path: Path):
+    口 = Step(
+        step_num=1,
+        name="foo changes, the section is re-read and marked clean, then bar changes",
+        purpose="The section's verification post-dates foo's change but not bar's",
+    )
+    _build_staggered_offender_project(mini_project, verify_between=True)
+
+    口 = Step(
+        step_num=2,
+        name="Every surface names bar alone",
+        purpose="foo's change was already accounted for by the verification, so it is not an offender",
+        outputs="via list [bar] in the stale map, check and drift_query",
+    )
+    assert _get_linked_stale_ids(db_path)[TWO_OFFENDER_SECTION] == [OFFENDER_B]
+    _own, link, via = compute_check_summary(db_path, mini_project).statuses[TWO_OFFENDER_SECTION]
+    assert link == "LINKED_STALE"
+    assert via == [OFFENDER_B]
+    row = _drift_query_row(db_path, mini_project, TWO_OFFENDER_SECTION)
+    assert OFFENDER_B in row
+    assert OFFENDER_A not in row
+
+    口 = Step(
+        step_num=3,
+        name="Reverify bar",
+        purpose="bar is the only outstanding offender, so the section clears in this one call",
+    )
+    time.sleep(0.05)
+    result = reverify_node(db_path, mini_project, OFFENDER_B, "bar change is internal.", verified_by="agent")
+    assert TWO_OFFENDER_SECTION in result.cleared
+    assert result.skipped == {}
+    assert compute_check_summary(db_path, mini_project).statuses[TWO_OFFENDER_SECTION][1] == "VERIFIED"
+
+
+@workflow(
+    purpose=(
+        "A doc section that was never verified keeps every linked function that "
+        "changed as an offender, however the changes were spaced out"
+    ),
+)
+def test_unverified_dependent_keeps_every_offender(mini_project: Path, db_path: Path):
+    _build_staggered_offender_project(mini_project, verify_between=False)
+
+    assert sorted(_get_linked_stale_ids(db_path)[TWO_OFFENDER_SECTION]) == [OFFENDER_A, OFFENDER_B]
+    _own, _link, via = compute_check_summary(db_path, mini_project).statuses[TWO_OFFENDER_SECTION]
+    assert sorted(via) == [OFFENDER_A, OFFENDER_B]
+
+
+# ---------------------------------------------------------------------------
+# Tier 3: reverify names the real blocker
+# ---------------------------------------------------------------------------
+
+
+@workflow(
+    purpose=(
+        "An agent marks one offender clean and reverifies the other: the "
+        "dependent is still skipped, and the reverify output says the first "
+        "offender was marked clean, not reverified, and to reverify it — instead "
+        "of claiming nothing was rooted at the reverified node"
+    ),
+)
+def test_reverify_names_an_offender_that_was_only_marked_clean(mini_project: Path, db_path: Path):
+    口 = Step(
+        step_num=1,
+        name="A section stale via foo and bar; foo is marked clean",
+        purpose="mark_clean is a single-node claim, so it does not settle foo for the section",
+    )
+    _build_two_offender_project(mini_project)
+    time.sleep(0.05)
+    mark_clean_nodes(db_path, mini_project, [OFFENDER_A], "foo re-read.", verified_by="agent")
+
+    口 = Step(
+        step_num=2,
+        name="Reverify bar through the MCP surface",
+        purpose="The section is skipped; the output must explain that foo blocks it and which verb clears it",
+    )
+    time.sleep(0.05)
+    out = axiom_graph_reverify(verbose=True, project_root=str(mini_project), node_id=OFFENDER_B, reason="bar verified.")
+    assert f"- {TWO_OFFENDER_SECTION} (other offenders: {OFFENDER_A})" in out.splitlines()
+    assert REVERIFY_MARKED_CLEAN_NOTE.format(offender=OFFENDER_A) in out
+    assert "Nothing to clear — no LINKED_STALE rooted at this node" not in out
+
+    口 = Step(
+        step_num=3,
+        name="mark_clean semantics are unchanged",
+        purpose="The section is still LINKED_STALE; only a reverify of foo clears it",
+    )
+    assert compute_check_summary(db_path, mini_project).statuses[TWO_OFFENDER_SECTION][1] == "LINKED_STALE"
+    time.sleep(0.05)
+    result = reverify_node(db_path, mini_project, OFFENDER_A, "foo verified.", verified_by="agent")
+    assert TWO_OFFENDER_SECTION in result.cleared
+
+
+# ---------------------------------------------------------------------------
+# Tier 3: reverifying a module counts for its functions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("module_first", [True, False], ids=["module-then-bar", "bar-then-module"])
+@workflow(
+    purpose=(
+        "Reverifying a module counts as reverifying each of its functions: a "
+        "section stale via a function of that module and an unrelated function "
+        "clears once both the module and the unrelated function are reverified, "
+        "in either order — and a later change to the module's function re-opens it"
+    ),
+)
+def test_reverifying_a_module_counts_for_its_functions(mini_project: Path, db_path: Path, module_first: bool):
+    口 = Step(
+        step_num=1,
+        name="A section documents foo (in module xmod) and bar (elsewhere); both change",
+        purpose="The section roots at foo and bar",
+    )
+    _build_two_offender_project(mini_project)
+    module_id = "proj::src.xmod"
+
+    口 = Step(
+        step_num=2,
+        name="Reverify the first of module xmod and bar",
+        purpose="The section is skipped, naming only the offender not yet covered",
+    )
+    first, second = (module_id, OFFENDER_B) if module_first else (OFFENDER_B, module_id)
+    time.sleep(0.05)
+    partial = reverify_node(db_path, mini_project, first, "First reviewed.", verified_by="agent")
+    assert partial.skipped == {TWO_OFFENDER_SECTION: [OFFENDER_B if module_first else OFFENDER_A]}
+
+    口 = Step(
+        step_num=3,
+        name="Reverify the other one",
+        purpose="foo counts as reverified through its module, so the section clears",
+    )
+    time.sleep(0.05)
+    completed = reverify_node(db_path, mini_project, second, "Second reviewed.", verified_by="agent")
+    assert TWO_OFFENDER_SECTION in completed.cleared
+    assert completed.skipped == {}
+
+    口 = Step(
+        step_num=4,
+        name="Change foo and bar again, then reverify bar",
+        purpose="The module's reverify predates foo's new change, so foo is outstanding again",
+    )
+    time.sleep(0.05)
+    (mini_project / "src" / "xmod.py").write_text("def foo():\n    return 2\n", encoding="utf-8")
+    (mini_project / "src" / "ymod.py").write_text("def bar():\n    return 2\n", encoding="utf-8")
+    build_index(db_path, mini_project, project_id="proj", discovery_only=False)
+    time.sleep(0.05)
+    reopened = reverify_node(db_path, mini_project, OFFENDER_B, "bar re-reviewed.", verified_by="agent")
+    assert reopened.skipped == {TWO_OFFENDER_SECTION: [OFFENDER_A]}
+
+
+class TestComposesAncestors:
+    """The upward composes walk behind composite reverify settlement."""
+
+    def test_walks_the_full_chain(self):
+        children_map = {"doc": ["sec"], "sec": ["child"], "mod": ["f"]}
+        assert composes_ancestors(["child", "f", "doc"], children_map) == {
+            "child": {"sec", "doc"},
+            "f": {"mod"},
+            "doc": set(),
+        }
+
+    def test_cycles_terminate_and_exclude_the_node_itself(self):
+        children_map = {"a": ["b"], "b": ["c"], "c": ["a"]}
+        assert composes_ancestors(["a"], children_map) == {"a": {"b", "c"}}
+
+    def test_an_ancestor_reverify_settles_only_changes_it_postdates(self):
+        ops = {"mod": [(20, VERIFICATION_OP_REVERIFY)]}
+        ancestors = {"f": {"mod"}}
+        settled = already_reverified_offenders(
+            ["f"], latest_change_ids={"f": 10}, verification_ops=ops, ancestors=ancestors
+        )
+        reopened = already_reverified_offenders(
+            ["f"], latest_change_ids={"f": 30}, verification_ops=ops, ancestors=ancestors
+        )
+        no_change_row = already_reverified_offenders(
+            ["f"], latest_change_ids={}, verification_ops=ops, ancestors=ancestors
+        )
+        assert (settled, reopened, no_change_row) == ({"f"}, set(), set())
+
+
+# ---------------------------------------------------------------------------
+# Batch reverify: several sources asserted in one call
+# ---------------------------------------------------------------------------
+
+OFFENDER_C = "proj::src.zmod::baz"
+BATCH_ONLY_FOO = "proj::docs/batch::only-foo"
+BATCH_ONLY_BAR = "proj::docs/batch::only-bar"
+BATCH_SHARED = "proj::docs/batch::shared"
+BATCH_FOO_AND_BAZ = "proj::docs/batch::foo-and-baz"
+BATCH_DEPENDENTS = (BATCH_ONLY_FOO, BATCH_ONLY_BAR, BATCH_SHARED, BATCH_FOO_AND_BAZ)
+
+
+def _build_batch_project(project: Path) -> Path:
+    """Build three changed functions and four doc sections that depend on them.
+
+    ``only-foo`` documents :data:`OFFENDER_A`, ``only-bar`` documents
+    :data:`OFFENDER_B`, ``shared`` documents both, and ``foo-and-baz``
+    documents :data:`OFFENDER_A` and :data:`OFFENDER_C`.  All three
+    functions change after the first build.  Returns the project's DB path.
+    """
+    db_p = project / ".axiom_graph" / "graph.db"
+    codes = {
+        name: _write_code(project, mod, f"def {name}():\n    return 0\n")
+        for mod, name in (("xmod", "foo"), ("ymod", "bar"), ("zmod", "baz"))
+    }
+
+    def _section(sid: str, *links: str) -> dict:
+        return {
+            "id": sid,
+            "heading": sid.title(),
+            "content": f"Documents {', '.join(links)}.",
+            "links": [{"node_id": link} for link in links],
+        }
+
+    _write_doc(
+        project,
+        "batch.json",
+        {
+            "title": "Batch",
+            "sections": [
+                _section("only-foo", OFFENDER_A),
+                _section("only-bar", OFFENDER_B),
+                _section("shared", OFFENDER_A, OFFENDER_B),
+                _section("foo-and-baz", OFFENDER_A, OFFENDER_C),
+            ],
+        },
+    )
+    build_index(db_p, project, project_id="proj", discovery_only=False)
+    time.sleep(0.05)
+    for name, path in codes.items():
+        path.write_text(f"def {name}():\n    return 1\n", encoding="utf-8")
+    build_index(db_p, project, project_id="proj", discovery_only=False)
+    stale = _get_linked_stale_ids(db_p)
+    assert all(dep in stale for dep in BATCH_DEPENDENTS)
+    return db_p
+
+
+def _batch_state(db_path: Path, project: Path) -> dict[str, tuple[str, str]]:
+    """The (own, link) status of every batch-fixture dependent and the doc envelope."""
+    cs = compute_check_summary(db_path, project)
+    return {nid: cs.statuses[nid][:2] for nid in (*BATCH_DEPENDENTS, "proj::docs/batch")}
+
+
+@workflow(
+    purpose=(
+        "A maintainer who reviewed two changed functions reverifies both in one "
+        "batch call. The batch ends in the same state as two single reverifies in "
+        "either order, and the section documenting both functions is reported "
+        "cleared in that one call rather than skipped"
+    ),
+)
+def test_batch_reverify_equals_the_sequence(
+    mini_project: Path, db_path: Path, tmp_path_factory: pytest.TempPathFactory
+):
+    口 = Step(
+        step_num=1,
+        name="Reverify foo and bar together",
+        purpose="Each function's own dependents and the shared section clear in one call",
+    )
+    _build_batch_project(mini_project)
+    time.sleep(0.05)
+    batch = reverify_nodes(db_path, mini_project, [OFFENDER_A, OFFENDER_B], "Both reviewed.", verified_by="agent")
+    assert batch.sources == [OFFENDER_A, OFFENDER_B]
+    assert batch.not_found == []
+    assert {BATCH_ONLY_FOO, BATCH_ONLY_BAR, BATCH_SHARED} <= set(batch.cleared)
+    assert BATCH_SHARED not in batch.skipped
+
+    口 = Step(
+        step_num=2,
+        name="Each cleared dependent names the source(s) that held it",
+        purpose="Provenance stays per source: one source, or the list of batch sources",
+    )
+    expected_tags = {
+        BATCH_ONLY_FOO: f"[reverify:{OFFENDER_A}]",
+        BATCH_ONLY_BAR: f"[reverify:{OFFENDER_B}]",
+        BATCH_SHARED: f"[reverify:{OFFENDER_A}, {OFFENDER_B}]",
+    }
+    for dep, tag in expected_tags.items():
+        hist = fetch_history(db_path, dep, max_results=20)
+        reasons = [json.loads(r.meta)["reason"] for r in hist.rows if r.change_type == "AGENT_VERIFIED" and r.meta]
+        assert any(m.startswith(tag) for m in reasons), (dep, reasons)
+
+    口 = Step(
+        step_num=3,
+        name="Run the same review as two single reverifies, in both orders",
+        purpose="The batch is the same assertion as the sequence, so the end states match",
+    )
+    batch_state = _batch_state(db_path, mini_project)
+    for order in ((OFFENDER_A, OFFENDER_B), (OFFENDER_B, OFFENDER_A)):
+        seq_project = tmp_path_factory.mktemp("sequence")
+        seq_db = _build_batch_project(seq_project)
+        for source in order:
+            time.sleep(0.05)
+            reverify_node(seq_db, seq_project, source, "Reviewed.", verified_by="agent")
+        assert _batch_state(seq_db, seq_project) == batch_state, order
+
+
+@workflow(
+    purpose=(
+        "Batch reverify keeps the skip rule: a section documenting a batch source "
+        "and a function outside the batch stays LINKED_STALE and is reported "
+        "skipped, naming only the function outside the batch"
+    ),
+)
+def test_batch_reverify_skips_dependents_held_outside_the_batch(mini_project: Path, db_path: Path):
+    _build_batch_project(mini_project)
+    time.sleep(0.05)
+    batch = reverify_nodes(db_path, mini_project, [OFFENDER_A, OFFENDER_B], "Both reviewed.", verified_by="agent")
+    assert batch.skipped == {BATCH_FOO_AND_BAZ: [OFFENDER_C]}
+    assert BATCH_FOO_AND_BAZ not in batch.cleared
+    assert compute_check_summary(db_path, mini_project).statuses[BATCH_FOO_AND_BAZ][1] == "LINKED_STALE"
+
+
+@workflow(
+    purpose=(
+        "A batch naming an unknown node still reverifies the sources it can find, "
+        "clears their dependents, and lists the unknown id under not-found"
+    ),
+)
+def test_batch_reverify_reports_not_found_per_source(mini_project: Path, db_path: Path):
+    _build_batch_project(mini_project)
+    time.sleep(0.05)
+    batch = reverify_nodes(
+        db_path, mini_project, [OFFENDER_A, "proj::nope", OFFENDER_B], "Both reviewed.", verified_by="agent"
+    )
+    assert batch.not_found == ["proj::nope"]
+    assert batch.sources == [OFFENDER_A, OFFENDER_B]
+    assert {BATCH_ONLY_FOO, BATCH_ONLY_BAR, BATCH_SHARED} <= set(batch.cleared)
+
+
+def test_batch_reverify_recomputes_staleness_once(mini_project: Path, db_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Three sources, one entry refresh and one final staleness recompute, never one per source."""
+    import axiom_graph.lifecycle.api as lifecycle_api
+
+    _build_batch_project(mini_project)
+    calls: list[int] = []
+    real = lifecycle_api.compute_check_summary
+
+    def _counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(lifecycle_api, "compute_check_summary", _counting)
+    time.sleep(0.05)
+    reverify_nodes(db_path, mini_project, [OFFENDER_A, OFFENDER_B, OFFENDER_C], "All reviewed.", verified_by="agent")
+    assert len(calls) == 2
+
+
+def test_batch_reverify_mcp_report(mini_project: Path, db_path: Path):
+    """The MCP tool's node_ids form prints one report covering every source."""
+    from axiom_graph.mcp.server import axiom_graph_reverify as server_reverify
+
+    _build_batch_project(mini_project)
+    time.sleep(0.05)
+    out = server_reverify(
+        verbose=True,
+        project_root=str(mini_project),
+        reason="Both reviewed.",
+        node_ids=[OFFENDER_A, "proj::nope", OFFENDER_B],
+    )
+    assert out.count("LINKED_STALE before:") == 1
+    assert f"- {OFFENDER_A}" in out
+    assert f"- {OFFENDER_B}" in out
+    assert set(_cleared_block_ids(out)) >= {BATCH_ONLY_FOO, BATCH_ONLY_BAR, BATCH_SHARED}
+    assert f"- {BATCH_FOO_AND_BAZ} (other offenders: {OFFENDER_C})" in out
+    assert "Not found (1):\n- proj::nope" in out
+    assert out.rstrip().endswith("Reason: Both reviewed.")
+
+
+@workflow(
+    purpose=(
+        "A maintainer marks baz clean, then batch-reverifies foo and bar: the "
+        "section documenting foo and baz stays skipped, and both the batch result "
+        "and the MCP batch report name baz as marked clean, not reverified"
+    ),
+)
+def test_batch_reverify_names_an_offender_that_was_only_marked_clean(mini_project: Path, db_path: Path):
+    from axiom_graph.mcp.server import axiom_graph_reverify as server_reverify
+
+    _build_batch_project(mini_project)
+    time.sleep(0.05)
+    mark_clean_nodes(db_path, mini_project, [OFFENDER_C], "baz re-read.", verified_by="agent")
+    time.sleep(0.05)
+    batch = reverify_nodes(db_path, mini_project, [OFFENDER_A, OFFENDER_B], "Both reviewed.", verified_by="agent")
+    assert batch.skipped == {BATCH_FOO_AND_BAZ: [OFFENDER_C]}
+    assert batch.marked_clean_offenders == [OFFENDER_C]
+
+    time.sleep(0.05)
+    out = server_reverify(
+        verbose=True, project_root=str(mini_project), reason="Both reviewed.", node_ids=[OFFENDER_A, OFFENDER_B]
+    )
+    assert f"- {BATCH_FOO_AND_BAZ} (other offenders: {OFFENDER_C})" in out.splitlines()
+    assert REVERIFY_MARKED_CLEAN_NOTE.format(offender=OFFENDER_C) in out
+    assert "Nothing to clear — no LINKED_STALE rooted at this node" not in out

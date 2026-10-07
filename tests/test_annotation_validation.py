@@ -340,41 +340,74 @@ def test_a_group_valid_and_invalid_cases():
 # -------------------------------------------------------------------------
 
 
+@_wf(
+    purpose="B4 compares a scanner's bare target id with the envelope id a decorator mints: a decorated target is clean, an undecorated one is flagged"
+)
 def test_b4_undecorated_target():
-    """AutoStep followed by call to indexed-but-undecorated function."""
-    rec = AutoStepRecord(
+    """B4 sees the id shapes the scanners really produce.
+
+    The scanner records a target's bare function id; the ``@task`` /
+    ``@workflow`` envelope carries ``envelope_id_for(function_id)``.  The
+    envelope set here is the live-node set a build or check passes, so the
+    bare ids of both functions are in it as well.
+    """
+    from axiom_graph.scanners._step_helpers import envelope_id_for
+
+    decorated = AutoStepRecord(
         module="x.py",
         function="f",
         line=10,
         step_num=1,
+        target_name="do_task",
+        target_node_id="proj::mod::do_task",
+        has_next_call=True,
+    )
+    undecorated = AutoStepRecord(
+        module="x.py",
+        function="f",
+        line=12,
+        step_num=2,
         target_name="helper",
         target_node_id="proj::mod::helper",
         has_next_call=True,
     )
-    findings = validate_autostep_targets(
-        [rec],
-        envelope_node_ids=set(),  # helper has no envelope
-    )
+    live_ids = {"proj::mod::do_task", envelope_id_for("proj::mod::do_task"), "proj::mod::helper"}
+    findings = validate_autostep_targets([decorated, undecorated], envelope_node_ids=live_ids)
     assert len(findings) == 1
     assert findings[0].rule_id == "B4"
+    assert findings[0].line == 12
     assert "undecorated" in findings[0].message.lower()
 
 
-def test_b4_decorated_target_ok():
-    rec = AutoStepRecord(
+def test_b4_target_resolver_maps_or_rejects_recorded_ids():
+    """A resolver can retarget a recorded id, or report it as naming nothing."""
+    from axiom_graph.scanners._step_helpers import envelope_id_for
+
+    via_reexport = AutoStepRecord(
         module="x.py",
         function="f",
         line=10,
         step_num=1,
-        target_name="helper",
-        target_node_id="proj::mod::helper@task",
+        target_name="do_task",
+        target_node_id="proj::pkg::do_task",
         has_next_call=True,
     )
-    findings = validate_autostep_targets(
-        [rec],
-        envelope_node_ids={"proj::mod::helper@task"},
+    gone = AutoStepRecord(
+        module="x.py",
+        function="f",
+        line=11,
+        step_num=2,
+        target_name="removed",
+        target_node_id="proj::mod::removed",
+        has_next_call=True,
     )
-    assert findings == []
+    resolved = {"proj::pkg::do_task": "proj::pkg.impl::do_task"}
+    findings = validate_autostep_targets(
+        [via_reexport, gone],
+        envelope_node_ids={envelope_id_for("proj::pkg.impl::do_task")},
+        resolve_target=resolved.get,
+    )
+    assert [(f.line, "unresolved" in f.message) for f in findings] == [(11, True)]
 
 
 def test_b4_unresolved_target():

@@ -1,0 +1,83 @@
+{
+  "title": "Template: PEV Instance Checkin",
+  "tags": [
+    "pev-instance"
+  ],
+  "meta": {
+    "template_version": "1.2.0"
+  },
+  "sections": [
+    {
+      "id": "meta",
+      "heading": "Meta",
+      "content": "Date: YYYY-MM-DD\nStatus: planned | in review | merging | done | continuing | escalated | blocked\nDuration (mins): {approx}\nWorktree: {absolute path of the task's worktree}\nBranch: {the worktree's branch, e.g. worktree-pev-instance-YYYY-MM-DD-slug}\nBaseline SHA: {main's HEAD when the worktree was created}\nMain branch: {the branch the main checkout has checked out}\nMain repo: {absolute path of the main checkout}\nMain failing tests: {test ids, or none}\nResume at: {the next step and what is left; rewritten at every gate and before any stop}"
+    },
+    {
+      "id": "baseline",
+      "heading": "Baseline",
+      "content": "**Filled by:** the instance: the entry lines in the clone call, the pre-merge lines by the merge step (step 4).\n\nThe instance's staleness by node id. The entry check runs in the worktree after `axiom_graph_checkout` and the build, before any edit; an id stale at entry is never charged to the change. Main's stale ids just before the merge are the merge target: only an id the merge adds is residue.\n\n**Example:**\n```\nEntry baseline (worktree): 0 CONTENT_UPDATED / 0 NOT_FOUND / 2 LINKED_STALE. Main context: 2 LINKED_STALE, matched.\nEntry stale ids (worktree): {project_id}::docs/features/history/prd::filters, {project_id}::docs/features/history/prd::api\nPre-merge (main): 0 CONTENT_UPDATED / 0 NOT_FOUND / 2 LINKED_STALE\nPre-merge stale ids (main): {project_id}::docs/features/history/prd::filters, {project_id}::docs/features/history/prd::api\n```\n\n**Instructions:** Entry ids come from `axiom_graph_drift_query(project_root=\"{worktree_path}\", format=\"ids\")`, paged while its header says more rows remain. Residue at entry is recorded here, not gated. Write ids in full, comma-separated, or `none`. Append later lines with `axiom_graph_patch_section(anchor=\"$\")`; never rewrite an earlier one."
+    },
+    {
+      "id": "problem",
+      "heading": "Problem",
+      "content": "..."
+    },
+    {
+      "id": "user-stories",
+      "heading": "User Stories",
+      "content": "As a {user type}, I want {outcome} so that {benefit}."
+    },
+    {
+      "id": "acceptance",
+      "heading": "Acceptance",
+      "content": "- Criterion 1\n- Criterion 2"
+    },
+    {
+      "id": "plan",
+      "heading": "Plan",
+      "content": "**Filled by:** the instance at the plan gate; the user approves both lists there.\n\n**Will touch:**\n- path/to/file.py: {what changes}\n\n**May touch:**\n- path/to/other.py: {why it might need to change}\n\n**Writers:** {when the change alters what data a rule reads: every place that writes that data, or 'none'}\n\n**Tests:** {N} test(s) at Tier {X}, proving {acceptance criterion}\n\n**Added during the run:** (one line per code file outside both lists)\n- added: `path/to/file.py`, because {reason}"
+    },
+    {
+      "id": "changes",
+      "heading": "Changes",
+      "content": "- path/to/file.py: {what changed}\n- path/to/test_file.py: added N tests (Tier {X})"
+    },
+    {
+      "id": "doc-updates",
+      "heading": "Doc Updates",
+      "content": "(the doc work done in Step 6; empty only if the change genuinely affected no docs)\n- {doc-id}::{section}: {what changed to match the code}\n- Marked clean: {node-ids}\n- Links fixed: {any add_link/delete_link for links the change moved, or 'none'}\n- Links proposed (link audit): {each add/repoint/drop proposal with the user's approve/reject decision, or 'none'}"
+    },
+    {
+      "id": "review",
+      "heading": "Review",
+      "content": "**Filled by:** Reviewer (`pev:pev-reviewer`). Only the Reviewer writes this section and its subsections.\n\nThe Reviewer writes its final verdict here: `status` (PASS / PASS_WITH_CONCERNS / FAIL), `test_coverage` (user story -> test mapping), `reverse_mapping`, `deviation_tribunal`, `env_gaps` and `concerns`. It adds one `pass-N` subsection per review pass, and its friction entries under a `friction` subsection.\n\n(Empty until the Reviewer writes its verdict.)"
+    },
+    {
+      "id": "doc-review",
+      "heading": "Doc Review",
+      "content": "**Filled by:** Doc Reviewer (`pev:pev-doc-reviewer`) (`progress`, `findings`); the verdict goes here. Only the Doc Reviewer writes this section and its subsections; its friction entries go under a `friction` subsection.\n\n**Example verdict:**\n```json\n{\n  \"status\": \"PASS\",\n  \"prd_accuracy\": [],\n  \"interface_completeness\": [],\n  \"summary\": \"All doc changes verified against the instance's diff.\"\n}\n```",
+      "sections": [
+        {
+          "id": "progress",
+          "heading": "Progress",
+          "content": "(Doc Reviewer records which doc categories it will scan vs skip, with reasons, and per-doc progress here.)"
+        },
+        {
+          "id": "findings",
+          "heading": "Findings",
+          "content": "(Doc Reviewer records per-doc findings here as it scans each applicable category.)"
+        }
+      ]
+    },
+    {
+      "id": "escalation",
+      "heading": "Escalation",
+      "content": "(only filled when the run stops at the hard line or escalates)\nReason: {why this outgrew /pev-instance}\nWIP state: {what's done, what's not}\nQuestion for the user: continue as an instance, or make it a cycle?"
+    },
+    {
+      "id": "friction",
+      "heading": "Friction",
+      "content": "(the instance's own friction observations; see the skill's Friction log section; empty is fine)"
+    }
+  ]
+}

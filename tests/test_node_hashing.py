@@ -96,7 +96,7 @@ def test_docjson_composite_returns_whole_file_hash(tmp_path: Path) -> None:
     (docs_dir / "x.json").write_text(json_text, encoding="utf-8")
 
     node = _make_node(
-        "proj::docs.x",
+        "proj::docs/x",
         node_type="composite_process",
         subtype="docjson",
         location="docs/x.json",
@@ -124,7 +124,7 @@ def test_docjson_section_lookup(tmp_path: Path) -> None:
     (docs_dir / "y.json").write_text(json.dumps(doc), encoding="utf-8")
 
     node = _make_node(
-        "proj::docs.y::intro",
+        "proj::docs/y::intro",
         node_type="atomic_process",
         subtype="docjson",
         location="docs/y.json",
@@ -146,7 +146,7 @@ def test_docjson_section_miss_returns_stored(tmp_path: Path) -> None:
     )
 
     node = _make_node(
-        "proj::docs.y::missing-section",
+        "proj::docs/y::missing-section",
         node_type="atomic_process",
         subtype="docjson",
         location="docs/y.json",

@@ -15,18 +15,27 @@ Public surface:
     ``ExpandedStep``            -- single entry in an expanded-step sequence
     ``workflow_expanded_steps`` -- expand a workflow's composed + delegated
                                    step tree with transitive renumbering
+    ``workflow_export_bundle``  -- assemble workflows and every file they reach
+    ``select_export_bundle``    -- resolve export ids and files, refusing misses
+    ``write_workflow_export``   -- select, render and write a workflow export
+                                   (the path the CLI and MCP export share)
 """
 
 from __future__ import annotations
 
+import json
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
+
+from axiom_annotations import Step, workflow
 
 from axiom_graph.config import AxiomGraphConfig
 from axiom_graph.index import db
 from axiom_graph.index.paths import db_path as _db_path
 from axiom_graph.scanners.node_hashing import parse_node_title
+from axiom_graph.workflows.export import export_label, render_export_html
 
 __all__ = [
     "WorkflowGraph",
@@ -45,6 +54,15 @@ __all__ = [
     "WorkflowBundle",
     "workflow_export_bundle",
     "workflow_bundle_to_dict",
+    "EXPORT_FORMATS",
+    "select_export_bundle",
+    "write_workflow_export",
+    "WorkflowExportSummary",
+    "WorkflowExportError",
+    "EmptyExportSelectionError",
+    "UnknownWorkflowError",
+    "UnsupportedExportFormatError",
+    "ExportIndexMissingError",
     "Transition",
     "StateRow",
     "StateMachineDetail",
@@ -1063,10 +1081,15 @@ class WorkflowBundle:
         sources: Project-relative file path to that file's full text.
             Deduplicated — a file shared by several workflows appears
             once.
+        unresolved: Requested IDs that matched no envelope, in request
+            order.  Not serialized: :func:`workflow_bundle_to_dict` leaves
+            it out, so the JSON bundle is unchanged; callers that must
+            refuse an unknown ID read it here.
     """
 
     workflows: list = field(default_factory=list)
     sources: dict[str, str] = field(default_factory=dict)
+    unresolved: list[str] = field(default_factory=list)
 
 
 def _bundle_source_paths(details: list) -> list[str]:
@@ -1112,7 +1135,8 @@ def workflow_export_bundle(
         project_root: Path to the indexed project.
         workflow_ids: Envelope node IDs, annotated-function node IDs, or
             plain function names.  Unknown IDs are skipped rather than
-            raising; repeated IDs are collapsed.
+            raising and listed in ``unresolved``; repeated IDs are
+            collapsed.
 
     Returns:
         A :class:`WorkflowBundle`.  Files that cannot be read are omitted
@@ -1122,10 +1146,13 @@ def workflow_export_bundle(
     graph = load_workflow_graph(root)
 
     details: list = []
+    unresolved: list[str] = []
     seen: set = set()
     for workflow_id in workflow_ids:
         detail = workflow_detail(root, workflow_id, graph=graph)
         if detail is None:
+            if workflow_id not in unresolved:
+                unresolved.append(workflow_id)
             continue
         identity = (detail.name, detail.file, detail.line)
         if identity in seen:
@@ -1141,7 +1168,7 @@ def workflow_export_bundle(
         except OSError:
             continue
 
-    return WorkflowBundle(workflows=details, sources=sources)
+    return WorkflowBundle(workflows=details, sources=sources, unresolved=unresolved)
 
 
 def workflow_bundle_to_dict(bundle: WorkflowBundle) -> dict:
@@ -1161,3 +1188,206 @@ def workflow_bundle_to_dict(bundle: WorkflowBundle) -> dict:
         "workflows": [workflow_detail_to_dict(detail) for detail in bundle.workflows],
         "sources": dict(bundle.sources),
     }
+
+
+# ---------------------------------------------------------------------------
+# Export: selection and writing
+# ---------------------------------------------------------------------------
+
+
+EXPORT_FORMATS = ("html", "json")
+"""Formats a workflow export can be written in."""
+
+_EXPORT_FILE_ROLES = frozenset({"workflow", "task"})
+"""Envelope roles a ``files`` selection picks up: the ones the export page renders."""
+
+
+class WorkflowExportError(Exception):
+    """An export was refused before anything was written."""
+
+
+class EmptyExportSelectionError(WorkflowExportError, ValueError):
+    """The export named no workflows, tasks or files."""
+
+
+class UnsupportedExportFormatError(WorkflowExportError, ValueError):
+    """The export asked for a format other than those in :data:`EXPORT_FORMATS`."""
+
+
+class ExportIndexMissingError(WorkflowExportError, FileNotFoundError):
+    """The project has no index to export from."""
+
+
+class UnknownWorkflowError(WorkflowExportError, LookupError):
+    """The export named ids or files that match no workflow or task.
+
+    Attributes:
+        ids: Requested ids that resolved to nothing, in request order.
+        files: Requested files that define no workflow or task.
+    """
+
+    def __init__(self, ids: Iterable[str] = (), files: Iterable[str] = ()) -> None:
+        self.ids = list(ids)
+        self.files = list(files)
+        parts = []
+        if self.ids:
+            parts.append("No workflow or task matches " + ", ".join(self.ids))
+        if self.files:
+            parts.append("No workflow or task is defined in " + ", ".join(self.files))
+        super().__init__("; ".join(parts))
+
+
+@dataclass(frozen=True)
+class WorkflowExportSummary:
+    """What :func:`write_workflow_export` wrote.
+
+    Attributes:
+        path: The file written.
+        workflows: Workflows and tasks the file holds.
+        files: Source files the file carries.
+    """
+
+    path: Path
+    workflows: int
+    files: int
+
+    @property
+    def label(self) -> str:
+        """The ``N workflows · M files`` summary for this export."""
+        return export_label(self.workflows, self.files)
+
+
+def _project_relative(root: Path, path: str | Path) -> str:
+    """Return *path* in the forward-slash, project-relative form the index stores.
+
+    A path outside the project comes back as written, so it matches nothing
+    and the refusal names it the way the caller spelled it.
+    """
+    candidate = Path(str(path))
+    if candidate.is_absolute():
+        try:
+            return candidate.resolve().relative_to(root).as_posix()
+        except ValueError:
+            return str(path)
+    return candidate.as_posix()
+
+
+def select_export_bundle(
+    project_root: str | Path,
+    workflow_ids: Iterable[str] = (),
+    files: Iterable[str | Path] = (),
+) -> dict:
+    """Resolve a selection of workflows and files into a serialized export bundle.
+
+    Args:
+        project_root: Path to the indexed project.
+        workflow_ids: Envelope node IDs, annotated-function node IDs, or
+            plain function names.  Workflows and tasks can be mixed.
+        files: Source files whose every workflow and task is selected,
+            relative to the project root or absolute inside it.
+
+    Returns:
+        ``{"workflows": [...], "sources": {path: text}}``, as
+        :func:`~axiom_graph.workflows.api.workflow_bundle_to_dict`
+        serializes it.
+
+    Raises:
+        EmptyExportSelectionError: When neither ids nor files are given.
+        UnknownWorkflowError: When an id resolves to nothing or a file
+            defines no workflow or task.  Every unmatched id and file is
+            named, not only the first.
+    """
+    root = Path(str(project_root)).resolve()
+    ids = [part.strip() for part in workflow_ids if part and part.strip()]
+    wanted = [_project_relative(root, path) for path in files]
+    if not ids and not wanted:
+        raise EmptyExportSelectionError("No workflows selected: name at least one workflow, task or file.")
+
+    empty_files: list[str] = []
+    if wanted:
+        rows = workflow_list(root, scope="all")
+        for rel_path in wanted:
+            in_file = [
+                row.node_id or row.name for row in rows if row.file == rel_path and row.role in _EXPORT_FILE_ROLES
+            ]
+            if not in_file:
+                empty_files.append(rel_path)
+            ids.extend(in_file)
+
+    bundle = workflow_export_bundle(root, ids)
+    if bundle.unresolved or empty_files:
+        raise UnknownWorkflowError(bundle.unresolved, empty_files)
+    return workflow_bundle_to_dict(bundle)
+
+
+@workflow(
+    purpose="Write the selected workflows and every source file they reach to one self-contained export file",
+    inputs="project root, output path, workflow ids and/or source files, format (html or json)",
+    outputs="a WorkflowExportSummary naming the file written and its workflow and file counts",
+    critical="Refuses before writing anything when an id or file matches nothing, so a typo never ships an empty page",
+)
+def write_workflow_export(
+    project_root: str | Path,
+    output_path: str | Path,
+    *,
+    workflow_ids: Iterable[str] = (),
+    files: Iterable[str | Path] = (),
+    format: str = "html",
+) -> WorkflowExportSummary:
+    """Select, render and write a workflow export, refusing before writing on any miss.
+
+    The CLI command and the MCP tool both export through here.  The file is
+    written with ``\\n`` line endings on every platform, so an HTML export is
+    byte-identical to what the dashboard route serves for the same selection.
+
+    Args:
+        project_root: Path to the indexed project.
+        output_path: File to write.  A relative path resolves against the
+            current directory, so callers anchor it first when they need a
+            different base.  Missing folders are created.
+        workflow_ids: Envelope node IDs, annotated-function node IDs, or
+            plain function names.  Workflows and tasks can be mixed.
+        files: Source files whose every workflow and task is selected.
+        format: ``"html"`` for the self-contained page, ``"json"`` for the
+            bundle.
+
+    Returns:
+        A :class:`WorkflowExportSummary`.
+
+    Raises:
+        ExportIndexMissingError: When the project has not been indexed.
+        UnsupportedExportFormatError: When *format* is not in
+            :data:`EXPORT_FORMATS`.
+        EmptyExportSelectionError: When nothing is selected.
+        UnknownWorkflowError: When an id or file matches nothing.
+    """
+    口 = Step(
+        step_num=1,
+        name="Resolve the selection",
+        purpose="Turn ids and files into one serialized bundle, refusing a missing index, an unknown format, id or file first",
+    )
+    index = _db_path(project_root)
+    if not index.exists():
+        raise ExportIndexMissingError(
+            f"No index found at {index}. Index the project first: axiom-graph init {project_root}"
+        )
+    if format not in EXPORT_FORMATS:
+        raise UnsupportedExportFormatError(f"Unknown export format '{format}': use one of {', '.join(EXPORT_FORMATS)}.")
+    bundle = select_export_bundle(project_root, workflow_ids, files)
+
+    口 = Step(
+        step_num=2,
+        name="Render the export",
+        purpose="Render the bundle as the self-contained HTML page, or as indented JSON",
+    )
+    content = render_export_html(bundle) if format == "html" else json.dumps(bundle, indent=2) + "\n"
+
+    口 = Step(
+        step_num=3,
+        name="Write the file",
+        purpose="Write the export with LF line endings, creating its folder, and report what it holds",
+    )
+    path = Path(str(output_path))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8", newline="")
+    return WorkflowExportSummary(path=path, workflows=len(bundle["workflows"]), files=len(bundle["sources"]))

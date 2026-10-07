@@ -1,0 +1,43 @@
+{
+  "title": "Template: PEV Cycle Audit",
+  "tags": [
+    "pev-cycle"
+  ],
+  "meta": {
+    "template_version": "1.1.0"
+  },
+  "sections": [
+    {
+      "id": "impact-report",
+      "heading": "Impact Report",
+      "content": "**Filled by:** Auditor — the Auditor's narrative (`findings`, `needs_fix`, advisory `counts`, `skipped_nodes`, `summary`). Inside the cycle directory the Auditor writes only this doc (and its `friction` group); outside it, it updates the project's live docs as before.\n\n**Example:**\n```json\n{\n  \"status\": \"DONE\",\n  \"findings\": [\n    {\n      \"area\": \"History tool params\",\n      \"nodes\": [\"{project_id}::axiom_graph.history::get_history_since\"],\n      \"disposition\": \"clean\",\n      \"narrative\": \"New params added per spec; capabilities table updated to Done.\"\n    }\n  ],\n  \"needs_fix\": [],\n  \"skipped_nodes\": [],\n  \"counts\": {\"nodes_reviewed\": 5, \"nodes_marked_clean\": 5, \"nodes_skipped\": 0},\n  \"summary\": \"5 stale nodes reviewed, all marked clean. PRD capabilities updated.\"\n}\n```\n\n**Instructions:** `counts` is advisory only — the authoritative record is `changes-summary`. `needs_fix` categories: `code_bug`, `needs_new_tests`."
+    },
+    {
+      "id": "progress",
+      "heading": "Progress",
+      "content": "**Filled by:** Auditor — partial progress when it returns `CONTINUING`: nodes reviewed, needs_fix so far, remaining stale nodes, post-implementation updates done. Already-marked-clean nodes won't appear stale on the next `axiom_graph_check`, so the fresh incarnation naturally skips them."
+    },
+    {
+      "id": "changes-summary",
+      "heading": "Changes Summary",
+      "content": "**Filled by:** Orchestrator after the Auditor returns and before the Doc Review (again at Phase 8 if anything was written since), from `axiom_graph_report(since_sha=baseline, detail=\"condensed\")`: one capped report per root, each under a `### {root}` heading. The authoritative, mechanically-derived list of every doc section update, `mark_clean`, link addition/removal and `AGENT_VERIFIED` event during the audit. The Auditor does NOT hand-write a change ledger."
+    },
+    {
+      "id": "doc-review",
+      "heading": "Doc Review",
+      "content": "**Filled by:** Doc Reviewer (`progress`, `findings`); the verdict goes here.\n\n**Example verdict:**\n```json\n{\n  \"status\": \"PASS\",\n  \"prd_accuracy\": [{\"doc_id\": \"{project_id}::docs/features/history/sub_features/filtering/prd\", \"verdict\": \"PASS\", \"note\": \"All capabilities correctly marked Done\"}],\n  \"interface_completeness\": [{\"doc_id\": \"{project_id}::docs/features/history/interfaces/data-model\", \"verdict\": \"PASS\", \"note\": null, \"missing\": []}],\n  \"summary\": \"All doc changes verified against implementation and templates.\"\n}\n```\n\n**Instructions:** If the Doc Reviewer returns FAIL, the orchestrator redispatches the Auditor with targeted fix instructions, then re-dispatches the Doc Reviewer. Max 2 loops before escalating to the user.",
+      "sections": [
+        {
+          "id": "progress",
+          "heading": "Progress",
+          "content": "(Doc Reviewer records which doc categories it will scan vs skip — with reasons — and per-doc progress here.)"
+        },
+        {
+          "id": "findings",
+          "heading": "Findings",
+          "content": "(Doc Reviewer records per-doc findings here as it scans each applicable category.)"
+        }
+      ]
+    }
+  ]
+}

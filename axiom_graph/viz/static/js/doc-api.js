@@ -215,21 +215,22 @@ export function destroyRawMonaco() {
 }
 // ── Doc directory helper ────────────────────────────────────────────────────
 export function docDir(doc) {
-    // Prefer the doc's real path: "docs/adrs/015.json" -> "docs/adrs".  This is
-    // the only source that preserves which configured docs root the doc came
-    // from — the id cannot, because every root flattens into the same "docs."
-    // namespace (".pev/test-policy.json" -> "{project}::docs.test-policy", which
-    // is indistinguishable from a doc sitting at the top of the primary root).
+    // Prefer the doc's real path: "docs/adrs/015.docjson" -> "docs/adrs".  It is
+    // the authoritative answer, and the only one available for a doc whose id
+    // the caller has not seen.
     if (doc.file_path) {
         const norm = doc.file_path.replace(/\\/g, '/');
         const cut = norm.lastIndexOf('/');
         return cut === -1 ? '' : norm.slice(0, cut);
     }
-    // Fallback for entries with no path: derive from the doc ID dotpath.
+    // Fallback for entries with no path: the id body is the doc's path within
+    // the project, root included — "{project}::.pev/test-policy" -> ".pev".
+    // Splitting it on "." would cut a dotted filename in half and lose the
+    // root; the body is joined by "/", so that is what it is split on.
     const idParts = doc.id.split('::');
-    const dotPath = idParts.length >= 2 ? idParts[1] : doc.id;
-    const segments = dotPath.split('.');
-    if (segments.length <= 1)
+    const body = idParts.length >= 2 ? idParts[1] : doc.id;
+    const cut = body.lastIndexOf('/');
+    if (cut === -1)
         return _primaryDocsDir;
-    return segments.slice(0, -1).join('/');
+    return body.slice(0, cut);
 }

@@ -1,78 +1,82 @@
 {
   "concepts/annotations.md": {
-    "doc_id": "axiom_graph::docs.consumer.concepts.annotations",
-    "hash": "19bc2fd4c752"
+    "doc_id": "axiom_graph::docs/consumer/concepts/annotations",
+    "hash": "9a0b7435b94a"
   },
   "concepts/docjson.md": {
-    "doc_id": "axiom_graph::docs.consumer.concepts.docjson",
-    "hash": "35c65fb44be5"
+    "doc_id": "axiom_graph::docs/consumer/concepts/docjson",
+    "hash": "d37736aba121"
   },
   "concepts/history.md": {
-    "doc_id": "axiom_graph::docs.consumer.concepts.history",
-    "hash": "c4bdd98e97cb"
+    "doc_id": "axiom_graph::docs/consumer/concepts/history",
+    "hash": "0dc80010a27f"
   },
   "concepts/index.md": {
-    "doc_id": "axiom_graph::docs.consumer.concepts",
+    "doc_id": "axiom_graph::docs/consumer/concepts",
     "hash": "23fb03c63e9f"
   },
   "concepts/ontology.md": {
-    "doc_id": "axiom_graph::docs.consumer.concepts.ontology",
-    "hash": "24dfde617563"
+    "doc_id": "axiom_graph::docs/consumer/concepts/ontology",
+    "hash": "751540b69193"
   },
   "concepts/staleness.md": {
-    "doc_id": "axiom_graph::docs.consumer.concepts.staleness",
-    "hash": "82e61794978c"
+    "doc_id": "axiom_graph::docs/consumer/concepts/staleness",
+    "hash": "395af2934dee"
   },
   "concepts/the-mesh.md": {
-    "doc_id": "axiom_graph::docs.consumer.concepts.the-mesh",
-    "hash": "95d0f753b7d7"
+    "doc_id": "axiom_graph::docs/consumer/concepts/the-mesh",
+    "hash": "d83206c8fbfa"
   },
   "examples/docs-honesty-loop.md": {
-    "doc_id": "axiom_graph::docs.consumer.examples.docs-honesty-loop",
-    "hash": "4b6969d300cf"
+    "doc_id": "axiom_graph::docs/consumer/examples/docs-honesty-loop",
+    "hash": "360e20d5c376"
   },
   "examples/index.md": {
-    "doc_id": "axiom_graph::docs.consumer.examples",
-    "hash": "e904d660e42d"
+    "doc_id": "axiom_graph::docs/consumer/examples",
+    "hash": "1fa07ded4691"
   },
   "examples/multi-target-rendering.md": {
-    "doc_id": "axiom_graph::docs.consumer.examples.multi-target-rendering",
-    "hash": "f24404bffe8f"
+    "doc_id": "axiom_graph::docs/consumer/examples/multi-target-rendering",
+    "hash": "336fac5e7511"
   },
   "examples/reporting-pipeline.md": {
-    "doc_id": "axiom_graph::docs.consumer.examples.reporting-pipeline",
-    "hash": "580da6d3e2ce"
+    "doc_id": "axiom_graph::docs/consumer/examples/reporting-pipeline",
+    "hash": "179038708077"
+  },
+  "examples/share-a-workflow.md": {
+    "doc_id": "axiom_graph::docs/consumer/examples/share-a-workflow",
+    "hash": "151c94c53253"
   },
   "get-started/configuration.md": {
-    "doc_id": "axiom_graph::docs.consumer.get-started.configuration",
-    "hash": "90402c392b59"
+    "doc_id": "axiom_graph::docs/consumer/get-started/configuration",
+    "hash": "74bc00ade0e0"
   },
   "get-started/connect-your-agent.md": {
-    "doc_id": "axiom_graph::docs.consumer.get-started.connect-your-agent",
-    "hash": "e5667b6f3b71"
+    "doc_id": "axiom_graph::docs/consumer/get-started/connect-your-agent",
+    "hash": "0ff4c84fa946"
   },
   "get-started/index.md": {
-    "doc_id": "axiom_graph::docs.consumer.get-started",
+    "doc_id": "axiom_graph::docs/consumer/get-started",
     "hash": "83fbe087a72d"
   },
   "get-started/use-the-cli.md": {
-    "doc_id": "axiom_graph::docs.consumer.get-started.use-the-cli",
-    "hash": "da98399ae7a1"
+    "doc_id": "axiom_graph::docs/consumer/get-started/use-the-cli",
+    "hash": "3c17f5fd0082"
   },
   "index.md": {
-    "doc_id": "axiom_graph::docs.consumer.index",
-    "hash": "484b4c7773cc"
+    "doc_id": "axiom_graph::docs/consumer/index",
+    "hash": "150a4aff0b7f"
   },
   "pev/index.md": {
-    "doc_id": "axiom_graph::docs.consumer.pev",
+    "doc_id": "axiom_graph::docs/consumer/pev",
     "hash": "794564d6e266"
   },
   "pev/overview.md": {
-    "doc_id": "axiom_graph::docs.consumer.pev.overview",
-    "hash": "a482f1d215df"
+    "doc_id": "axiom_graph::docs/consumer/pev/overview",
+    "hash": "19b3c6b0e21f"
   },
   "viz.md": {
-    "doc_id": "axiom_graph::docs.consumer.viz",
-    "hash": "f73300a2980b"
+    "doc_id": "axiom_graph::docs/consumer/viz",
+    "hash": "6ad4a8c3b485"
   }
 }

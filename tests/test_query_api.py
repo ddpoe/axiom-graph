@@ -108,10 +108,9 @@ def test_mcp_server_resolves_to_query_mcp_tools():
 
 
 def test_helpers_module_shrunk():
-    """``_semantic_search_handler`` / ``_db_path`` / ``_require_db`` removed."""
+    """``_db_path`` / ``_require_db`` removed."""
     import axiom_graph.mcp._helpers as helpers
 
-    assert not hasattr(helpers, "_semantic_search_handler"), "Should have moved to axiom_graph.query.api"
     assert not hasattr(helpers, "_db_path"), "Wrapper should be removed -- import db_path from axiom_graph.index.paths"
     assert not hasattr(helpers, "_require_db"), (
         "Wrapper should be removed -- import require_db from axiom_graph.index.paths"
@@ -163,30 +162,6 @@ def test_layering_check_passes_clean():
 # ---------------------------------------------------------------------------
 # US-4: Behavioural identity for the load-bearing flows
 # ---------------------------------------------------------------------------
-
-
-def test_search_nodes_threads_embedder_thread_kwarg():
-    """``search_nodes`` accepts ``embedder_thread`` and forwards without raising.
-
-    Per cycle-3 O-1 relaxation: this is a Tier-2 plumbing assertion that
-    the parameter survives the refactor; the actual semantic backend is
-    out-of-scope (worktree venv lacks the ``semantic`` extras).
-    """
-    import inspect
-
-    from axiom_graph.query.api import search_nodes
-
-    sig = inspect.signature(search_nodes)
-    assert "embedder_thread" in sig.parameters, "search_nodes must accept embedder_thread for the warm-up plumbing"
-
-
-def test_server_search_passes_embedder_thread():
-    """``mcp/server.py`` still threads ``_embedder_thread`` into ``axiom_graph_search``."""
-    server_path = Path(__file__).parent.parent / "axiom_graph" / "mcp" / "server.py"
-    src = server_path.read_text(encoding="utf-8")
-    assert "_embedder_thread=_embedder_thread" in src, (
-        "mcp/server.py must continue to thread _embedder_thread to axiom_graph_search"
-    )
 
 
 def test_drift_query_compute_callable_with_invalid_filter_raises():

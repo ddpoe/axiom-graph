@@ -1,0 +1,16 @@
+{
+  "title": "Template: PEV Cycle Builder Log",
+  "tags": [
+    "pev-cycle"
+  ],
+  "meta": {
+    "template_version": "1.1.0"
+  },
+  "sections": [
+    {
+      "id": "build-plan",
+      "heading": "Build Plan",
+      "content": "**Filled by:** Builder — this whole doc is the Builder's. Only the Builder writes it.\n\nThe doc holds:\n- `build-plan` (this section): task decomposition, order and approach, persisted across incarnations.\n- one `inc-N` section per Builder incarnation, with one `task-M` child per task that incarnation touched, each holding `progress`, `manifest` and `checkpoint` children. For example `builder::inc-2.task-3.progress`. Add each with `axiom_graph_add_section` (slug ids, no dots; omit `content` rather than passing `\"\"`). The `manifest` entry is the task's implementation manifest (files changed, tests added, deviations, env gaps) and the `checkpoint` entry is the code map a continuation needs. The Builder writes both itself before it returns its control envelope.\n\n(Builder replaces this with its build plan.)"
+    }
+  ]
+}

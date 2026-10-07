@@ -10,10 +10,9 @@
   <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
   <script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
 
-  <!-- Monaco editor AMD loader -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.0/min/vs/loader.min.js"></script>
-
-  <!-- Mermaid diagram renderer -->
+  <!-- Mermaid diagram renderer.  Loaded before Monaco's AMD loader: its UMD
+       bundle registers an anonymous AMD module instead of window.mermaid
+       whenever a global define() is already installed. -->
   <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
   <script>
     mermaid.initialize({
@@ -35,6 +34,9 @@
       flowchart: { curve: 'basis', useMaxWidth: true },
     });
   </script>
+
+  <!-- Monaco editor AMD loader (installs the global define/require) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.0/min/vs/loader.min.js"></script>
 
   <!-- Tiptap rich-text editor via import map -->
   <script type="importmap">
@@ -106,14 +108,6 @@
         <button id="btn-docs-view"     class="view-btn"     title="Docs view">&#x1F4C4; Docs</button>
       </div>
       <div id="search-wrap">
-        <button id="search-mode-toggle" title="Search mode">
-          <span id="search-mode-label">Keyword</span>
-          <span class="search-mode-caret">&#x25BC;</span>
-        </button>
-        <div id="search-mode-dropdown" class="hidden">
-          <div class="search-mode-option" data-mode="keyword" title="Exact text matching (FTS)">Keyword<span class="search-mode-desc">Exact text matching</span></div>
-          <div class="search-mode-option" data-mode="semantic" title="Meaning-based similarity">Semantic<span class="search-mode-desc">Meaning-based similarity</span></div>
-        </div>
         <input type="text" id="search-input" placeholder="Search nodes..." autocomplete="off">
         <button id="search-btn" title="Search">&#x1F50D;</button>
       </div>

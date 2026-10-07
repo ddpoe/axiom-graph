@@ -89,10 +89,10 @@ def test_record_code_rename_migrates_to_id_edges(mini_project, db_path):
     """record_code_rename should update edges where old_id is the to_id (target)."""
     _upsert_code_node(db_path, "proj::mod::func_old", code_hash="hash_abc")
     _upsert_code_node(db_path, "proj::mod::func_new", code_hash="hash_abc")
-    _upsert_doc_node(db_path, "proj::docs.test::s1")
+    _upsert_doc_node(db_path, "proj::docs/test::s1")
 
     # Doc section documents the old function
-    _insert_edge(db_path, "documents", "proj::docs.test::s1", "proj::mod::func_old")
+    _insert_edge(db_path, "documents", "proj::docs/test::s1", "proj::mod::func_old")
 
     db.record_code_rename(db_path, "proj::mod::func_old", "proj::mod::func_new", "mod.py")
 
@@ -120,15 +120,15 @@ def test_record_code_rename_migrates_from_id_edges(mini_project, db_path):
 
 def test_record_doc_rename_migrates_edges(mini_project, db_path):
     """record_doc_rename should update edges for both parent and section nodes."""
-    _upsert_doc_node(db_path, "proj::docs.old::s1", location="docs/old.json")
+    _upsert_doc_node(db_path, "proj::docs/old::s1", location="docs/old.json")
     _upsert_code_node(db_path, "proj::mod::func_a")
 
     # Section documents a code node
-    _insert_edge(db_path, "documents", "proj::docs.old::s1", "proj::mod::func_a")
+    _insert_edge(db_path, "documents", "proj::docs/old::s1", "proj::mod::func_a")
     # Composes edge: parent -> section
-    _insert_edge(db_path, "composes", "proj::docs.old", "proj::docs.old::s1")
+    _insert_edge(db_path, "composes", "proj::docs/old", "proj::docs/old::s1")
 
-    db.record_doc_rename(db_path, "proj::docs.old", "proj::docs.new", "docs/new.json")
+    db.record_doc_rename(db_path, "proj::docs/old", "proj::docs/new", "docs/new.json")
 
     edges = _get_edges(db_path)
     docs_edges = [e for e in edges if e["edge_type"] == "documents"]
@@ -136,12 +136,12 @@ def test_record_doc_rename_migrates_edges(mini_project, db_path):
 
     # documents edge: from_id should be updated to new section ID
     assert len(docs_edges) == 1
-    assert docs_edges[0]["from_id"] == "proj::docs.new::s1"
+    assert docs_edges[0]["from_id"] == "proj::docs/new::s1"
 
     # composes edge: both from_id and to_id should be updated
     assert len(composes_edges) == 1
-    assert composes_edges[0]["from_id"] == "proj::docs.new"
-    assert composes_edges[0]["to_id"] == "proj::docs.new::s1"
+    assert composes_edges[0]["from_id"] == "proj::docs/new"
+    assert composes_edges[0]["to_id"] == "proj::docs/new::s1"
 
 
 # ---------------------------------------------------------------------------
@@ -172,8 +172,8 @@ def test_code_rename_patches_docjson_links(mini_project, db_path):
 
     _upsert_code_node(db_path, "proj::mod::func_old", code_hash="hash_abc")
     _upsert_code_node(db_path, "proj::mod::func_new", code_hash="hash_abc")
-    _upsert_doc_node(db_path, "proj::docs.test::s1")
-    _insert_edge(db_path, "documents", "proj::docs.test::s1", "proj::mod::func_old")
+    _upsert_doc_node(db_path, "proj::docs/test::s1")
+    _insert_edge(db_path, "documents", "proj::docs/test::s1", "proj::mod::func_old")
 
     db.record_code_rename(
         db_path,
@@ -197,8 +197,8 @@ def test_no_broken_links_after_rename(mini_project, db_path):
     """After rename with edge migration, find_broken_links should return empty."""
     _upsert_code_node(db_path, "proj::mod::func_old", code_hash="hash_abc")
     _upsert_code_node(db_path, "proj::mod::func_new", code_hash="hash_abc")
-    _upsert_doc_node(db_path, "proj::docs.test::s1")
-    _insert_edge(db_path, "documents", "proj::docs.test::s1", "proj::mod::func_old")
+    _upsert_doc_node(db_path, "proj::docs/test::s1")
+    _insert_edge(db_path, "documents", "proj::docs/test::s1", "proj::mod::func_old")
 
     # Before rename: broken link exists (old node will be purged)
     # After rename: edge should point to new node
@@ -206,4 +206,4 @@ def test_no_broken_links_after_rename(mini_project, db_path):
 
     broken = find_broken_links(db_path)
     # func_new exists, so no broken link
-    assert "proj::docs.test::s1" not in broken
+    assert "proj::docs/test::s1" not in broken

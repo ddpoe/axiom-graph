@@ -66,9 +66,12 @@ _JS_EXTENSIONS = frozenset((".js", ".jsx"))
 _TS_EXTENSIONS = frozenset((".ts", ".tsx"))
 _ALL_EXTENSIONS = _JS_EXTENSIONS | _TS_EXTENSIONS
 
+#: Every file suffix this scanner reads, for callers outside it.
+JS_TS_EXTENSIONS = _ALL_EXTENSIONS
+
 # Test-runner identifiers recognized at module top level.  Covers Playwright,
 # Vitest, Jest, and Mocha.  Member-expression callees (`test.skip`, `test.only`)
-# do NOT match -- v1 limitation, documented in docs/pev-requests/test-runner-aware-envelope-detection.json.
+# do NOT match -- v1 limitation, documented in docs/pev-requests/test-runner-aware-envelope-detection.docjson.
 _TEST_RUNNER_NAMES = frozenset(("test", "it"))
 # Grouping callee names whose arrow-function body is recursed into one level
 # deep when scanning for nested test() calls.  v1 supports
@@ -199,13 +202,12 @@ def _resolve_import_path(
 
     candidate_base = base_dir / stem
 
-    # Try in order: exact, .ts, .tsx, .js, .jsx, /index.ts, /index.js
+    # Try in order: exact, .ts, .tsx, .js, .jsx, /index.ts, /index.js.  The
+    # extension is appended to the full name, never swapped for its last
+    # suffix: './editor.machine' is 'editor.machine.ts', not 'editor.ts'.
     candidates = [
         candidate,
-        candidate_base.with_suffix(".ts"),
-        candidate_base.with_suffix(".tsx"),
-        candidate_base.with_suffix(".js"),
-        candidate_base.with_suffix(".jsx"),
+        *(candidate_base.parent / f"{candidate_base.name}{ext}" for ext in (".ts", ".tsx", ".js", ".jsx")),
         candidate_base / "index.ts",
         candidate_base / "index.js",
     ]
@@ -1627,6 +1629,30 @@ def _process_object_methods(
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+
+
+def file_has_parse_errors(file_path: Path) -> bool:
+    """Return True when tree-sitter parses a JS/TS file with errors.
+
+    tree-sitter reads past a syntax error, so :func:`scan_js_module` still
+    returns the rest of the file, but the function the error is in is
+    dropped from the scan.  This reports whether any part of the file
+    failed to parse.
+
+    Args:
+        file_path: The JS/TS file.
+
+    Returns:
+        True when the file's parse tree has an error.
+
+    Raises:
+        RuntimeError: If tree-sitter is not installed.
+        OSError: If the file cannot be read.
+    """
+    if not HAS_TREE_SITTER:
+        raise RuntimeError("tree-sitter is required for JS/TS scanning. Install with: pip install axiom-graph[js]")
+    tree = Parser(_get_language(file_path.suffix)).parse(file_path.read_bytes())
+    return bool(tree.root_node.has_error)
 
 
 def scan_js_module(

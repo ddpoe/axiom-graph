@@ -77,10 +77,10 @@ def test_scanner_nested_sections_dot_path_ids(tmp_path):
     nodes, _, _, _ = json_doc_scanner.scan_single_json_doc(f, tmp_path, "proj")
 
     ids = {n.id for n in nodes}
-    assert "proj::docs.arch::database-layer" in ids
-    assert "proj::docs.arch::database-layer.tables" in ids
-    assert "proj::docs.arch::database-layer.migrations" in ids
-    assert "proj::docs.arch::api-layer" in ids
+    assert "proj::docs/arch::database-layer" in ids
+    assert "proj::docs/arch::database-layer.tables" in ids
+    assert "proj::docs/arch::database-layer.migrations" in ids
+    assert "proj::docs/arch::api-layer" in ids
 
 
 def test_scanner_nested_composes_edges(tmp_path):
@@ -93,11 +93,11 @@ def test_scanner_nested_composes_edges(tmp_path):
 
     composes = [(e.from_id, e.to_id) for e in edges if e.edge_type == "composes"]
     # doc → top-level sections
-    assert ("proj::docs.arch", "proj::docs.arch::database-layer") in composes
-    assert ("proj::docs.arch", "proj::docs.arch::api-layer") in composes
+    assert ("proj::docs/arch", "proj::docs/arch::database-layer") in composes
+    assert ("proj::docs/arch", "proj::docs/arch::api-layer") in composes
     # parent section → child sections
-    assert ("proj::docs.arch::database-layer", "proj::docs.arch::database-layer.tables") in composes
-    assert ("proj::docs.arch::database-layer", "proj::docs.arch::database-layer.migrations") in composes
+    assert ("proj::docs/arch::database-layer", "proj::docs/arch::database-layer.tables") in composes
+    assert ("proj::docs/arch::database-layer", "proj::docs/arch::database-layer.migrations") in composes
 
 
 def test_scanner_nested_sec_recs_parent_id_and_depth(tmp_path):
@@ -110,12 +110,12 @@ def test_scanner_nested_sec_recs_parent_id_and_depth(tmp_path):
 
     by_id = {r["id"]: r for r in sec_recs}
 
-    parent = by_id["proj::docs.arch::database-layer"]
+    parent = by_id["proj::docs/arch::database-layer"]
     assert parent["parent_id"] is None
     assert parent["depth"] == 0
 
-    child = by_id["proj::docs.arch::database-layer.tables"]
-    assert child["parent_id"] == "proj::docs.arch::database-layer"
+    child = by_id["proj::docs/arch::database-layer.tables"]
+    assert child["parent_id"] == "proj::docs/arch::database-layer"
     assert child["depth"] == 1
 
 
@@ -130,12 +130,12 @@ def test_scanner_position_scoped_to_siblings(tmp_path):
     by_id = {r["id"]: r for r in sec_recs}
 
     # Top-level positions
-    assert by_id["proj::docs.arch::database-layer"]["position"] == 0
-    assert by_id["proj::docs.arch::api-layer"]["position"] == 1
+    assert by_id["proj::docs/arch::database-layer"]["position"] == 0
+    assert by_id["proj::docs/arch::api-layer"]["position"] == 1
 
     # Child positions (scoped to parent)
-    assert by_id["proj::docs.arch::database-layer.tables"]["position"] == 0
-    assert by_id["proj::docs.arch::database-layer.migrations"]["position"] == 1
+    assert by_id["proj::docs/arch::database-layer.tables"]["position"] == 0
+    assert by_id["proj::docs/arch::database-layer.migrations"]["position"] == 1
 
 
 def test_scanner_depth_limit_warns_and_skips(tmp_path):
@@ -175,8 +175,53 @@ def test_scanner_depth_limit_warns_and_skips(tmp_path):
         nodes, _, _, _ = json_doc_scanner.scan_single_json_doc(f, tmp_path, "proj")
 
     ids = {n.id for n in nodes}
-    assert "proj::docs.deep::l0.l1.l2" in ids
-    assert "proj::docs.deep::l0.l1.l2.l3" not in ids  # skipped
+    assert "proj::docs/deep::l0.l1.l2" in ids
+    assert "proj::docs/deep::l0.l1.l2.l3" not in ids  # skipped
+
+
+@workflow(
+    purpose="A DocJSON file in which two sections spell one dot-path still builds: the build warns once per "
+    "dot-path naming the file, indexes the first section in document order and skips the later one"
+)
+def test_build_warns_on_section_dot_path_collision_and_keeps_the_first(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "mod.py").write_text("def foo():\n    return 0\n", encoding="utf-8")
+    _write_doc(
+        tmp_path / "docs",
+        "clash.docjson",
+        "Clash",
+        [
+            {
+                "id": "a",
+                "heading": "A",
+                "content": "Parent.",
+                "sections": [{"id": "b", "heading": "Nested", "content": "Nested first."}],
+            },
+            {"id": "ok", "heading": "Ok", "content": "Unaffected."},
+            {
+                "id": "a.b",
+                "heading": "Flat",
+                "content": "Flat later.",
+                "links": [{"node_id": "proj::src.mod::foo"}],
+                "sections": [{"id": "c", "heading": "Under flat", "content": "Child of the skipped one."}],
+            },
+            {"id": "ok", "heading": "Ok again", "content": "Duplicate sibling."},
+            {"id": "a.b", "heading": "Flat again", "content": "Third spelling."},
+        ],
+    )
+
+    result = _build_full(tmp_path)
+
+    clash = [w for w in result["warnings"] if "docs/clash.docjson" in w]
+    assert len(clash) == 2, result["warnings"]
+    assert sum("'a.b'" in w for w in clash) == 1 and sum("'ok'" in w for w in clash) == 1, clash
+    dbp = tmp_path / ".axiom_graph" / "graph.db"
+    nested = db.get_node(dbp, "proj::docs/clash::a.b")
+    assert (nested.title, nested.level_2) == ("Nested", "Nested first.")
+    assert db.get_node(dbp, "proj::docs/clash::ok").level_2 == "Unaffected."
+    assert db.get_node(dbp, "proj::docs/clash::a.b.c") is None
+    documents = [e for e in db.query_edges(dbp, "proj::docs/clash::a.b") if e.edge_type == "documents"]
+    assert documents == []
 
 
 def test_scanner_child_section_node_type_atomic(tmp_path):
@@ -201,8 +246,8 @@ def test_scanner_heading_level_auto_derives_from_depth(tmp_path):
     _, _, _, sec_recs = json_doc_scanner.scan_single_json_doc(f, tmp_path, "proj")
 
     by_id = {r["id"]: r for r in sec_recs}
-    assert by_id["proj::docs.arch::database-layer"]["level"] == 2  # depth 0 → level 2
-    assert by_id["proj::docs.arch::database-layer.tables"]["level"] == 3  # depth 1 → level 3
+    assert by_id["proj::docs/arch::database-layer"]["level"] == 2  # depth 0 → level 2
+    assert by_id["proj::docs/arch::database-layer.tables"]["level"] == 3  # depth 1 → level 3
 
 
 # ---------------------------------------------------------------------------
@@ -216,15 +261,15 @@ def test_nested_sections_round_trip_through_db(mini_project: Path, db_path: Path
     _write_doc(docs_dir, "arch.json", "Architecture", NESTED_DOC["sections"])
     _build_full(mini_project)
 
-    sections = db.get_doc_sections(db_path, "proj::docs.arch")
+    sections = db.get_doc_sections(db_path, "proj::docs/arch")
     by_id = {s["id"]: s for s in sections}
 
-    parent = by_id["proj::docs.arch::database-layer"]
+    parent = by_id["proj::docs/arch::database-layer"]
     assert parent["parent_id"] is None
     assert parent["depth"] == 0
 
-    child = by_id["proj::docs.arch::database-layer.tables"]
-    assert child["parent_id"] == "proj::docs.arch::database-layer"
+    child = by_id["proj::docs/arch::database-layer.tables"]
+    assert child["parent_id"] == "proj::docs/arch::database-layer"
     assert child["depth"] == 1
 
 
@@ -234,15 +279,15 @@ def test_get_doc_sections_returns_depth_first_order(mini_project: Path, db_path:
     _write_doc(docs_dir, "arch.json", "Architecture", NESTED_DOC["sections"])
     _build_full(mini_project)
 
-    sections = db.get_doc_sections(db_path, "proj::docs.arch")
+    sections = db.get_doc_sections(db_path, "proj::docs/arch")
     ids = [s["id"] for s in sections]
 
     # Depth-first: parent, then children, then next sibling
     assert ids == [
-        "proj::docs.arch::database-layer",
-        "proj::docs.arch::database-layer.tables",
-        "proj::docs.arch::database-layer.migrations",
-        "proj::docs.arch::api-layer",
+        "proj::docs/arch::database-layer",
+        "proj::docs/arch::database-layer.tables",
+        "proj::docs/arch::database-layer.migrations",
+        "proj::docs/arch::api-layer",
     ]
 
 
@@ -294,11 +339,11 @@ def test_nested_child_stale_parent_linked_stale(mini_project: Path, db_path: Pat
         name="Assert staleness chain",
         purpose="Child=CONTENT_UPDATED, parent section=LINKED_STALE, doc file=LINKED_STALE",
     )
-    assert statuses.get("proj::docs.arch::database-layer.tables")[0] == "CONTENT_UPDATED"
-    assert statuses.get("proj::docs.arch::database-layer")[1] == "LINKED_STALE", (
-        f"Expected parent section LINKED_STALE, got {statuses.get('proj::docs.arch::database-layer')}"
+    assert statuses.get("proj::docs/arch::database-layer.tables")[0] == "CONTENT_UPDATED"
+    assert statuses.get("proj::docs/arch::database-layer")[1] == "LINKED_STALE", (
+        f"Expected parent section LINKED_STALE, got {statuses.get('proj::docs/arch::database-layer')}"
     )
-    doc_status = statuses.get("proj::docs.arch")
+    doc_status = statuses.get("proj::docs/arch")
     own, link = doc_status[0], doc_status[1]
     assert own in ("CONTENT_UPDATED",) or link in ("LINKED_STALE",), (
         f"Expected doc file to inherit staleness, got {doc_status}"
@@ -323,7 +368,7 @@ def test_nested_parent_own_stale_preserved_over_linked(mini_project: Path, db_pa
     statuses = compute_staleness(db_path, mini_project, nodes)
 
     # Parent's own CONTENT_UPDATED (severity 3) > LINKED_STALE (severity 2)
-    assert statuses.get("proj::docs.arch::database-layer")[0] == "CONTENT_UPDATED"
+    assert statuses.get("proj::docs/arch::database-layer")[0] == "CONTENT_UPDATED"
 
 
 def test_nested_all_children_clean_parent_clean(mini_project: Path, db_path: Path):
@@ -336,8 +381,8 @@ def test_nested_all_children_clean_parent_clean(mini_project: Path, db_path: Pat
     nodes = db.all_nodes(db_path)
     statuses = compute_staleness(db_path, mini_project, nodes)
 
-    assert statuses.get("proj::docs.arch::database-layer") == ("VERIFIED", "VERIFIED", [])
-    assert statuses.get("proj::docs.arch::database-layer.tables") == ("VERIFIED", "VERIFIED", [])
+    assert statuses.get("proj::docs/arch::database-layer") == ("VERIFIED", "VERIFIED", [])
+    assert statuses.get("proj::docs/arch::database-layer.tables") == ("VERIFIED", "VERIFIED", [])
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +400,7 @@ def test_update_section_dot_path(mini_project: Path, db_path: Path):
 
     result = axiom_graph_update_section(
         str(mini_project),
-        "proj::docs.arch::database-layer.tables",
+        "proj::docs/arch::database-layer.tables",
         content="Updated tables content.",
     )
     assert "Updated content" in result
@@ -382,7 +427,7 @@ def test_add_section_top_level(mini_project: Path, db_path: Path):
 
     result = axiom_graph_add_section(
         str(mini_project),
-        "proj::docs.arch",
+        "proj::docs/arch",
         "new-section",
         "New Section",
         content="New content.",
@@ -404,7 +449,7 @@ def test_add_section_nested_under_parent(mini_project: Path, db_path: Path):
 
     result = axiom_graph_add_section(
         str(mini_project),
-        "proj::docs.arch",
+        "proj::docs/arch",
         "indexes",
         "Indexes",
         content="Index details.",
@@ -445,13 +490,28 @@ def test_add_section_rejects_excessive_depth(mini_project: Path, db_path: Path):
 
     result = axiom_graph_add_section(
         str(mini_project),
-        "proj::docs.deep",
+        "proj::docs/deep",
         "l3",
         "L3 Too Deep",
         parent_id="l0.l1.l2",
     )
     assert "ERROR" in result
     assert "depth" in result.lower()
+
+
+def test_add_section_accepts_a_child_under_a_depth_one_parent(mini_project: Path, db_path: Path):
+    """A section added under a depth-1 parent is the third nesting level, which the format allows."""
+    from axiom_graph.docjson.api import axiom_graph_add_section
+
+    sections = [{"id": "l0", "heading": "L0", "sections": [{"id": "l1", "heading": "L1"}]}]
+    _write_doc(mini_project / "docs", "two.json", "Two Levels", sections)
+    _build_full(mini_project)
+
+    result = axiom_graph_add_section(str(mini_project), "proj::docs/two", "l2", "L2", parent_id="l0.l1")
+
+    assert result.startswith("Added section"), result
+    depths = {s["id"]: s["depth"] for s in db.get_doc_sections(db_path, "proj::docs/two")}
+    assert depths["proj::docs/two::l0.l1.l2"] == 2
 
 
 def test_write_doc_rejects_excessive_depth(mini_project: Path, db_path: Path):
@@ -510,7 +570,7 @@ def test_add_link_dot_path(mini_project: Path, db_path: Path):
 
     result = axiom_graph_add_link(
         str(mini_project),
-        "proj::docs.arch::database-layer.tables",
+        "proj::docs/arch::database-layer.tables",
         "proj::some.module::func",
     )
     assert "Added 1 link" in result
@@ -540,18 +600,18 @@ def test_render_doc_api_includes_parent_id_and_depth(mini_project: Path, db_path
     original_db = viz_mod._db
     viz_mod._db = lambda: db_path
     try:
-        result = render_doc_api("proj::docs.arch")
+        result = render_doc_api("proj::docs/arch")
     finally:
         viz_mod._db = original_db
 
     secs_by_id = {s["id"]: s for s in result["sections"]}
 
-    parent = secs_by_id["proj::docs.arch::database-layer"]
+    parent = secs_by_id["proj::docs/arch::database-layer"]
     assert parent["parent_id"] is None
     assert parent["depth"] == 0
 
-    child = secs_by_id["proj::docs.arch::database-layer.tables"]
-    assert child["parent_id"] == "proj::docs.arch::database-layer"
+    child = secs_by_id["proj::docs/arch::database-layer.tables"]
+    assert child["parent_id"] == "proj::docs/arch::database-layer"
     assert child["depth"] == 1
 
 
@@ -577,8 +637,8 @@ def test_flat_doc_unchanged_behavior(tmp_path):
 
     # Same IDs as before
     ids = {n.id for n in nodes}
-    assert "proj::docs.flat::intro" in ids
-    assert "proj::docs.flat::usage" in ids
+    assert "proj::docs/flat::intro" in ids
+    assert "proj::docs/flat::usage" in ids
 
     # All top-level: parent_id=None, depth=0
     for rec in sec_recs:
@@ -601,7 +661,7 @@ def test_rename_section_updates_file_and_db(mini_project: Path, db_path: Path):
 
     result = axiom_graph_update_section(
         str(mini_project),
-        "proj::docs.arch::api-layer",
+        "proj::docs/arch::api-layer",
         new_id="rest-api",
     )
     assert "id (api-layer → rest-api)" in result
@@ -613,10 +673,10 @@ def test_rename_section_updates_file_and_db(mini_project: Path, db_path: Path):
     assert "api-layer" not in top_ids
 
     # Verify DB section was renamed
-    secs = db.get_doc_sections(db_path, "proj::docs.arch")
+    secs = db.get_doc_sections(db_path, "proj::docs/arch")
     sec_ids = {s["id"] for s in secs}
-    assert "proj::docs.arch::rest-api" in sec_ids
-    assert "proj::docs.arch::api-layer" not in sec_ids
+    assert "proj::docs/arch::rest-api" in sec_ids
+    assert "proj::docs/arch::api-layer" not in sec_ids
 
 
 def test_rename_section_rejects_invalid_id_and_collision(mini_project: Path, db_path: Path):
@@ -630,7 +690,7 @@ def test_rename_section_rejects_invalid_id_and_collision(mini_project: Path, db_
     # Invalid format
     result = axiom_graph_update_section(
         str(mini_project),
-        "proj::docs.arch::api-layer",
+        "proj::docs/arch::api-layer",
         new_id="Bad ID!",
     )
     assert "ERROR" in result
@@ -638,7 +698,7 @@ def test_rename_section_rejects_invalid_id_and_collision(mini_project: Path, db_
     # Collision with existing sibling
     result = axiom_graph_update_section(
         str(mini_project),
-        "proj::docs.arch::api-layer",
+        "proj::docs/arch::api-layer",
         new_id="database-layer",
     )
     assert "ERROR" in result
@@ -655,17 +715,17 @@ def test_rename_parent_cascades_children(mini_project: Path, db_path: Path):
 
     result = axiom_graph_update_section(
         str(mini_project),
-        "proj::docs.arch::database-layer",
+        "proj::docs/arch::database-layer",
         new_id="db",
     )
     assert "id (database-layer → db)" in result
 
     # Children should now have db.tables and db.migrations
-    secs = db.get_doc_sections(db_path, "proj::docs.arch")
+    secs = db.get_doc_sections(db_path, "proj::docs/arch")
     sec_ids = {s["id"] for s in secs}
-    assert "proj::docs.arch::db" in sec_ids
-    assert "proj::docs.arch::db.tables" in sec_ids
-    assert "proj::docs.arch::db.migrations" in sec_ids
+    assert "proj::docs/arch::db" in sec_ids
+    assert "proj::docs/arch::db.tables" in sec_ids
+    assert "proj::docs/arch::db.migrations" in sec_ids
     # Old IDs gone
-    assert "proj::docs.arch::database-layer" not in sec_ids
-    assert "proj::docs.arch::database-layer.tables" not in sec_ids
+    assert "proj::docs/arch::database-layer" not in sec_ids
+    assert "proj::docs/arch::database-layer.tables" not in sec_ids

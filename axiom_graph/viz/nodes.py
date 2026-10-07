@@ -16,7 +16,14 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from axiom_annotations import workflow, AutoStep, Step
-from axiom_graph.lifecycle.api import compute_net_diff, get_node_diff, recover_deleted_source
+from axiom_graph.lifecycle.api import (
+    compute_net_diff,
+    get_node_diff,
+    read_neighborhood,
+    recover_deleted_source,
+    verify_nodes_checked,
+)
+from axiom_graph.query.api import node_tags
 from axiom_graph.index import builder, db
 from axiom_graph.index.status import (
     VERIFIED,
@@ -81,17 +88,9 @@ def get_neighborhood(node_id: str, depth: int = 1, direction: str = "both") -> d
     """Ego-graph: all nodes and edges reachable from node_id within `depth` hops."""
     from axiom_graph.viz import server
 
-    edges = db.query_edges(server._db(), node_id, direction=direction, depth=depth)
-
-    node_ids: set[str] = {node_id}
-    for e in edges:
-        node_ids.add(e.from_id)
-        node_ids.add(e.to_id)
-
-    nodes = [db.get_node(server._db(), nid) for nid in node_ids]
-    nodes = [n for n in nodes if n is not None]
-    server._hydrate_tags(nodes)
-    staleness = server._compute_staleness_for_viz(nodes)
+    edges, nodes, staleness = read_neighborhood(
+        server._db(), server._PROJECT_ROOT, node_id, direction=direction, depth=depth
+    )
 
     return {
         "nodes": [_node_to_dict(n) for n in nodes],
@@ -168,28 +167,29 @@ def get_node(node_id: str) -> dict:
     node = db.get_node(server._db(), node_id)
     if node is None:
         raise HTTPException(status_code=404, detail=f"Node not found: {node_id!r}")
-    node.tags = server._get_tags_bulk([node.id]).get(node.id, [])
+    node.tags = node_tags(server._db(), [node.id]).get(node.id, [])
     return _node_to_dict(node)
 
 
 @nodes_router.post("/api/nodes/{node_id}/verify")
 @workflow(
-    purpose="Validate node and dispatch to mark_node_clean",
+    purpose="Refuse a missing node (404) or one with no code hash (422), else verify it through the mark_clean "
+    "funnel (lifecycle.api.verify_nodes_checked -> mark_clean_nodes), which records the verification and its "
+    "dependency pairs and refreshes the statuses it moves, on one connection",
     inputs="node_id path param, VerifyRequest body (reason, verified_by)",
-    outputs="dict with node_id, status, previous own_status/link_status",
+    outputs="dict with ok, node_id, verified_by",
 )
 def verify_node(node_id: str, body: _VerifyRequest) -> dict:
     """Mark a node as verified."""
     from axiom_graph.viz import server
 
-    node = db.get_node(server._db(), node_id)
-    if node is None:
+    outcome = verify_nodes_checked(
+        server._db(), server._PROJECT_ROOT, [node_id], body.reason or "", verified_by=body.verified_by
+    )[node_id]
+    if outcome == "not_found":
         raise HTTPException(status_code=404, detail=f"Node not found: {node_id!r}")
-    if not node.code_hash:
+    if outcome == "no_code_hash":
         raise HTTPException(status_code=422, detail="Node has no code_hash — cannot verify")
-    from axiom_graph.index.mark_clean import mark_node_clean
-
-    mark_node_clean(server._db(), server._PROJECT_ROOT, node, body.reason or "", body.verified_by)
     return {"ok": True, "node_id": node_id, "verified_by": body.verified_by}
 
 
@@ -283,19 +283,17 @@ def bulk_verify(body: _BulkVerifyRequest) -> dict:
     """Batch-verify multiple nodes in one request."""
     from axiom_graph.viz import server
 
+    # One call through the mark_clean funnel for the whole request.
+    outcome = verify_nodes_checked(
+        server._db(), server._PROJECT_ROOT, list(body.node_ids), body.reason or "", verified_by=body.verified_by
+    )
+    errors = {"not_found": "Node not found", "no_code_hash": "Node has no code_hash"}
     results: list[dict] = []
     for nid in body.node_ids:
-        node = db.get_node(server._db(), nid)
-        if node is None:
-            results.append({"node_id": nid, "ok": False, "error": "Node not found"})
-            continue
-        if not node.code_hash:
-            results.append({"node_id": nid, "ok": False, "error": "Node has no code_hash"})
-            continue
-        from axiom_graph.index.mark_clean import mark_node_clean
-
-        mark_node_clean(server._db(), server._PROJECT_ROOT, node, body.reason or "", body.verified_by)
-        results.append({"node_id": nid, "ok": True})
+        if outcome[nid] in errors:
+            results.append({"node_id": nid, "ok": False, "error": errors[outcome[nid]]})
+        else:
+            results.append({"node_id": nid, "ok": True})
     return {"results": results}
 
 
@@ -388,42 +386,55 @@ def get_history_since_endpoint(
     )
 
     口 = AutoStep(step_num=2, name="Resolve reference point")
-    cutoff_ts, baseline_sha = db.resolve_since_cutoff(server._db(), since_sha=sha, since_timestamp=timestamp)
+    resolution = db.resolve_since_cutoff(
+        server._db(),
+        since_sha=sha,
+        since_timestamp=timestamp,
+        project_root=server._PROJECT_ROOT,
+    )
+    cutoff_ts, baseline_sha = resolution.cutoff, resolution.sha
 
     resolved_until_ts: str | None = until_timestamp
-    until_resolved = True
+    until_resolution = None
     if until_sha and not resolved_until_ts:
-        until_cutoff_ts, _ = db.resolve_since_cutoff(
+        口 = AutoStep(step_num=3, name="Resolve the until reference point")
+        until_resolution = db.resolve_since_cutoff(
             server._db(),
             since_sha=until_sha,
+            project_root=server._PROJECT_ROOT,
         )
-        if until_cutoff_ts:
-            resolved_until_ts = until_cutoff_ts
-        else:
-            until_resolved = False
+        if until_resolution.resolved:
+            resolved_until_ts = until_resolution.cutoff
 
     口 = Step(
-        step_num=3,
-        name="Fail loud on an explicitly-requested SHA that is not indexed",
-        purpose="An explicit sha/until_sha absent from node_history returns resolved:false "
+        step_num=4,
+        name="Fail loud on an explicitly-requested SHA nobody can resolve",
+        purpose="An explicit sha/until_sha that neither the index nor git can resolve returns resolved:false "
         "instead of a count against a different baseline — never report 'changed since X' "
-        "against the wrong reference point",
+        "against the wrong reference point. A SHA git knows but the index never recorded "
+        "resolves to its commit time and is answered normally",
     )
-    sha_missing = bool(sha) and baseline_sha is None and cutoff_ts is None
-    if sha_missing or (until_sha and not until_resolved):
+    failed = (
+        resolution
+        if not resolution.resolved
+        else until_resolution
+        if until_resolution is not None and not until_resolution.resolved
+        else None
+    )
+    if failed is not None:
         return {
             "resolved": False,
-            "requested_sha": sha if sha_missing else until_sha,
-            "reason": "not in index",
+            "requested_sha": failed.requested_sha,
+            "reason": failed.reason,
             "index_head_sha": index_head_sha,
             "commits_behind_head": commits_behind_head,
         }
 
     口 = Step(
-        step_num=4,
+        step_num=5,
         name="Query DELETED history rows after cutoff (for ghost synthesis)",
         purpose="Fetch node_history rows with scanned_at > cutoff_timestamp so DELETED ghosts can be "
-        "reconstructed — the live-node membership is computed by the net diff (step 7), not these rows",
+        "reconstructed — the live-node membership is computed by the net diff (step 8), not these rows",
     )
     if cutoff_ts:
         rows = db.get_history_since(
@@ -435,7 +446,7 @@ def get_history_since_endpoint(
         rows = db.get_history_since(server._db(), until_timestamp=resolved_until_ts)
 
     口 = Step(
-        step_num=5,
+        step_num=6,
         name="Resolve baseline SHA for timestamp-only cutoffs",
         purpose="When cutoff came from a timestamp (no SHA), find the nearest git commit for the net diff",
     )
@@ -454,7 +465,7 @@ def get_history_since_endpoint(
             logger.debug("git rev-list for baseline resolution failed: %s", exc)
 
     口 = Step(
-        step_num=6,
+        step_num=7,
         name="Synthesize ghost nodes from DELETED rows (with preserved span + recovered source)",
         purpose="Reconstruct phantom entries for purged nodes so the viz can show them as dimmed strikethrough "
         "rows, carrying the preserved level_3_location span and the git-recovered baseline source",
@@ -496,7 +507,7 @@ def get_history_since_endpoint(
             )
 
     口 = Step(
-        step_num=7,
+        step_num=8,
         name="Compute the net state-diff vs the baseline (live-node membership + change kinds)",
         purpose="Replace the event-log replay with a true net diff: edit-then-revert cancels, and each "
         "changed node is labelled by kind (added/content/desc/content+desc/renamed). Thin caller — all "

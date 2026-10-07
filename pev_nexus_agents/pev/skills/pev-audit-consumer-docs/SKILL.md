@@ -14,15 +14,12 @@ You orchestrate a backlog audit of consumer-facing documentation. The skill runs
 
 `${CLAUDE_PROJECT_DIR}` is the consumer project root. `${CLAUDE_PLUGIN_ROOT}` is the PEV plugin's install directory.
 
-**Reference docs (read before first use):**
-
-- Design spec: `axiom_graph::docs.features.pev-agent-nexus.sub_features.audit-skills.design`
-- Sub-feature PRD: `axiom_graph::docs.features.pev-agent-nexus.sub_features.audit-skills.prd`
+**Reference docs (when the project has them):** the audit-skills design spec and sub-feature PRD, `{project_id}::docs/features/pev-agent-nexus/sub_features/audit-skills/design` and `.../prd`, exist only in the project that develops PEV. Read them before first use when `axiom_graph_read_doc` finds them; otherwise this skill is the whole reference.
 
 **v1 posture (key constraints):**
 
 - **Sequential dispatch (D-20).** All discovery and verification dispatches run one-at-a-time. 3 discovery + N verification = `3 + N` sequential dispatches. First-ever run is heaviest (no since-window narrows Phase 2).
-- **Trust assumption: dev docs are correct (D-6).** Consumer-docs uses dev-doc capability tables, design specs, ADR records, and source-code summaries as ground truth. Pre-flight check warns and offers to bail if `axiom_graph_check` shows incomplete state in `docs.features.*`.
+- **Trust assumption: dev docs are correct (D-6).** Consumer-docs uses dev-doc capability tables, design specs, ADR records, and source-code summaries as ground truth. Pre-flight check warns and offers to bail if `axiom_graph_check` shows incomplete state in `docs/features/*`.
 - **Orchestrator has full `Bash` (D-15 revised).** Same trust posture as the pev-cycle skill body. Used narrowly for `git diff` / `git log` / `git show` at run-start. Subagents have no Bash. Earlier design proposed a `git-command-allowlist` PreToolUse hook; that hook is dropped (D-19). Use Bash narrowly; the user can interrupt if it goes off-piste.
 - **No worktree.** Audit work mutates the graph DB and DocJSON in the main working tree; the auto-reindex divergence between worktree and main has no clean merge story. There is no `--worktree` override (`worktree-posture` section).
 - **Zero audit-specific hooks (D-19).** Tool allowlists live in agent frontmatter. The tag-mutex check, since-window resolution, dev-docs cleanliness pre-flight, and resume detection live INLINE in this skill body — not as separate helpers, not as hooks.
@@ -32,13 +29,19 @@ You orchestrate a backlog audit of consumer-facing documentation. The skill runs
 
 ### 1. Intake
 
+**Project facts: call `axiom_graph_info(project_root)` first, before any other axiom-graph call.** This session already has `axiom_graph_guide`'s text as the server's instructions; `info` adds the project's facts. Take the project id (`{project_id}` in every id below), the docs roots (`docs_dirs`) and the doc file extensions (`docs_extensions`) from its answer, and every other doc id and path from tool results; never hard-code a project id, a docs folder or a doc extension.
+
 Parse the user's `/pev-audit-consumer-docs` request. The request may include:
 
-- A path to an audit-request doc in `docs/pev/audit-requests/{slug}.json` (optional) — narrows scope, sets goal, supplies user-authored constraints (e.g., a specific consumer doc to focus on, a `constraints.since` override).
+- A path to an audit-request doc in `docs/pev/audit-requests/{slug}.docjson` (optional) — narrows scope, sets goal, supplies user-authored constraints (e.g., a specific consumer doc to focus on, a `constraints.since` override).
 - Free-text scope hints (e.g., "skip ADR mode this run", "focus on getting-started.md").
 - No argument — defaults to a full sweep (all three discovery modes, all consumer docs).
 
-Read `axiom-graph.toml` in the project root to get the `project_id` value. The audit manifest doc ID is `{project_id}::docs.pev.audits.pev-audit-consumer-docs-YYYY-MM-DD-{slug}` — do NOT hardcode the prefix; it varies per project.
+Each audit run is a directory, `docs/pev/audits/{audit-id}/`, with the audit id `pev-audit-consumer-docs-YYYY-MM-DD-{slug}`. Its manifest is the `audit` doc in it, `{project_id}::docs/pev/audits/{audit-id}/audit`. Once the manifest is cloned, take the exact id from the `axiom_graph_clone_doc` result rather than building it by hand.
+
+**Id collision check.** Refuse an audit id, and pick another slug, when the file `docs/pev/audits/{audit-id}<ext>`, for any `<ext>` in `info`'s `docs_extensions`, or the directory `docs/pev/audits/{audit-id}/` already exists.
+
+**Old runs.** Audits made before plugin 3.0 are single docs, `{project_id}::docs/pev/audits/{audit-id}`. Every lookup below (the tag-mutex check, resume, the since-window search) accepts both shapes, and skips any `efficiency` doc.
 
 **Slug generation.** If the user supplied an audit-request, reuse its slug. Otherwise generate a short descriptive slug from the scope hints (e.g., `pre-release-sweep`, `getting-started-only`, `full-sweep`). Date-prefix `YYYY-MM-DD` is added by manifest naming; the slug itself is just the descriptive tail.
 
@@ -69,7 +72,7 @@ axiom_graph_list_tags(project_root="${CLAUDE_PROJECT_DIR}")
 
   ```
   PEV Audit (consumer-docs): pev-audit-consumer-docs-{date}-{slug}
-  Manifest doc ID: {project_id}::docs.pev.audits.pev-audit-consumer-docs-{date}-{slug}
+  Manifest: docs/pev/audits/pev-audit-consumer-docs-{date}-{slug}/audit
   Audit-request: {linked-request-doc-id-or-none}
   Scope hints: {hints-or-"full-sweep"}
   Proceed? (or suggest a different slug)
@@ -83,10 +86,10 @@ axiom_graph_list_tags(project_root="${CLAUDE_PROJECT_DIR}")
 axiom_graph_drift_query(project_root="${CLAUDE_PROJECT_DIR}", filter="staleness", group_by="status", format="counts")
 ```
 
-If any `NOT_FOUND` or `LINKED_STALE` exists in the `docs.features.*` subtree, warn the user:
+If any `NOT_FOUND` or `LINKED_STALE` exists in the `docs/features/*` subtree, warn the user:
 
 ```
-Dev docs show {N} stale events in docs.features.* — consumer-docs assumes
+Dev docs show {N} stale events in docs/features/* — consumer-docs assumes
 dev docs are truth (D-6). Running this audit now risks propagating dev-side
 staleness into consumer prose.
 
@@ -104,7 +107,7 @@ This is informational, not enforced. The user can override.
 axiom_graph_search(project_root, "", scope="docs", tag="pev-audit-consumer-docs", max_results=20)
 ```
 
-For each result, read `meta.audit-commit-sha`. The most recent (by `meta.completed-at` or `meta.started-at`) is the since-commit reference. **First-ever run → `meta.since-commit: null`** (full-history scan; expect heavier work shape on first run, especially Phase 2).
+A result is either a run's manifest, `{project_id}::docs/pev/audits/{audit-id}/audit`, or an older single-file audit, `{project_id}::docs/pev/audits/{audit-id}`; use both. Efficiency reports carry only the `pev-efficiency` tag, so the search never returns them; skip any `efficiency` doc that does show up. For each result, read `meta.audit-commit-sha`. The most recent (by `meta.completed-at` or `meta.started-at`) is the since-commit reference. **First-ever run → `meta.since-commit: null`** (full-history scan; expect heavier work shape on first run, especially Phase 2).
 
 The user may override via the audit-request's `constraints.since` field. If set, use that instead and record it in `meta.since-commit-overridden: true`.
 
@@ -134,15 +137,32 @@ Subagents read `meta.git-diff-summary` in their dispatch payload — they don't 
 
 Once intake completes:
 
-1. Create the audit manifest via `axiom_graph_write_doc`. The `id` field is path-slug form (`pev/audits/pev-audit-consumer-docs-{date}-{slug}`), NOT the full node-id. Tags: `pev-audit-active`, `pev-audit-consumer-docs`. Initial sections (placeholders pre-created so subagents can use `update_section` instead of `add_section`):
-   - `meta`
-   - `request` (pointer or copy of audit-request)
-   - `orchestrator.discovery` (placeholder for pre-dispatch summary)
-   - `discovery.findings.cycles` (empty placeholder for cycles-mode discovery agent)
-   - `discovery.findings.features` (empty placeholder for features-mode discovery agent)
-   - `discovery.findings.adrs` (empty placeholder for adrs-mode discovery agent)
-   - `orchestrator.handoff.recommended-requests` (empty list)
-   - `friction` (empty)
+1. **Clone the manifest** from the seeded template `{project_id}::.pev/templates/audit-consumer-docs` (the project id is `info`'s project id). The template already holds the placeholders the subagents write with `update_section`: `meta`, `request`, `orchestrator.discovery`, `discovery.findings.cycles`, `discovery.findings.features`, `discovery.findings.adrs`, `orchestrator.handoff.recommended-requests` and `friction`. The template carries no tags; the clone call passes them, and `set_sections` carries the intake values:
+
+   ```
+   axiom_graph_clone_doc(
+     project_root="${CLAUDE_PROJECT_DIR}",
+     source_doc_id="{project_id}::.pev/templates/audit-consumer-docs",
+     new_id="pev/audits/pev-audit-consumer-docs-{date}-{slug}/audit",
+     title="PEV Audit (consumer-docs): {date} {slug}",
+     tags=["pev-audit-active", "pev-audit-consumer-docs"],
+     set_sections={"meta": "{status: active, audit-type: consumer-docs, started-at, since-commit, audit-commit-sha, git-diff-summary, as resolved above}",
+                   "request": "{pointer to or copy of the audit-request, or the user's scope hints}"}
+   )
+   ```
+
+2. **Missing template: halt.** If `info`'s `docs_dirs` lacks `.pev`, or `{project_id}::.pev/templates/audit-consumer-docs` is not in the index, stop before creating anything and tell the user:
+
+   ```
+   The PEV audit templates are not seeded in this project (missing: audit-consumer-docs).
+   Run: bash "${CLAUDE_PLUGIN_ROOT}/scripts/pev-seed.sh" --project-root {project root} --axiom-graph "{commands.axiom_graph}"
+   If it prints an axiom-graph.toml edit (.pev missing from docs_dirs), make it and re-run the script.
+   It builds the index when it is done. Then commit axiom-graph.toml and .pev/, and re-run /pev-audit-consumer-docs.
+   ```
+
+   `{commands.axiom_graph}` is the `axiom_graph` key of the `[commands]` table in `.pev/sops.toml`; when the file or key is missing, use the command that runs axiom-graph in this project (`axiom-graph` when it is on PATH).
+
+   There is no fallback: never hand-write the manifest with `axiom_graph_write_doc`, and never copy the template file on disk.
 2. `meta` content includes: `status: active`, `audit-type: consumer-docs`, `started-at: {ISO timestamp}`, `dispatcher: pev-audit-consumer-docs`, `request-link: {audit-request-doc-id or null}`, `audit-commit-sha: {HEAD-sha}`, `since-commit: {resolved-sha or null}`, `since-commit-overridden: {true if user override else false}`, `git-diff-summary: {summary block from above}`, `current-phase: intake-complete`.
 
 ### 2. Phase 1 — Discovery (sequential)
@@ -214,7 +234,7 @@ axiom_graph_read_doc(project_root, {consumer-doc-id})
 
 **The `< 500 chars` threshold is a starting heuristic** (see design's open-questions section). Tune after the first run; record observed batch shapes in `friction`.
 
-**Pre-create per-doc verification sections.** For every consumer doc to be verified (whether solo or batched), pre-create `verification.findings.{consumer-doc-id-tail}` via `axiom_graph_add_section`. The tail is the last `::`-separated segment of the consumer doc-id, slug-safe-ified. Subagents only need `update_section`.
+**Pre-create per-doc verification sections.** For every consumer doc to be verified (whether solo or batched), pre-create `verification.findings.{consumer-doc-id-tail}` via `axiom_graph_add_section`. The tail is the last path segment of the consumer doc id (after the last `/`), with `.` replaced by `-` so it stays one section-path segment — `{project_id}::docs/consumer/concepts/annotations` gives `annotations`, `{project_id}::docs/consumer/README.md` gives `README-md`. Subagents only need `update_section`.
 
 **Per-verifier dispatch prompt template:**
 
@@ -363,11 +383,23 @@ Write a per-patch record to `applied.{consumer-doc-id-tail}`:
   applied-at: {ISO timestamp}
 ```
 
-**Step 2 — Write approved spawn requests.** For each approved spawn-request draft, write the actual `docs/pev-requests/{slug}.json` doc:
+**Step 2 — Write approved spawn requests.** For each approved spawn-request draft, write the actual `docs/pev-requests/{slug}.docjson` doc:
 
-1. Slug collision-check: search `docs/pev-requests/*.json` (via `axiom_graph_search` with `tag="request"` or by reading the directory if simpler). If collision, append numeric suffix.
-2. Compose the request DocJSON with sections `meta` (including `meta.source-audit` = the audit manifest doc-id), `problem`, `proposed-approach`, `scope`, `notes`. Tag: `["pev", "request", "audit-spawned"]`.
-3. `axiom_graph_write_doc` with `id` field in path-slug form (`pev-requests/{slug}`).
+1. Slug collision-check: search `docs/pev-requests/` (any extension in `info`'s `docs_extensions`) (via `axiom_graph_search` with `tag="pev-request"` or by reading the directory if simpler). A tag search also returns the seeded template under `.pev/templates/`; skip it. If collision, append numeric suffix.
+2. Clone it from the seeded template `{project_id}::.pev/templates/request` (a request stays a single doc). If the template is missing, halt with the seed-step message from Intake, naming `request`.
+3. The clone call:
+
+   ```
+   axiom_graph_clone_doc(
+     project_root="${CLAUDE_PROJECT_DIR}",
+     source_doc_id="{project_id}::.pev/templates/request",
+     new_id="pev-requests/{slug}",
+     title="{short human-readable title}",
+     tags=["pev-request", "not-started", "audit-spawned"],
+     set_sections={"meta": "source-audit: {the audit manifest doc ID}", "problem": "...",
+                   "proposed-approach": "...", "scope": "...", "notes": "..."}
+   )
+   ```
 4. Append the spawned request's doc-ID to `orchestrator.handoff.recommended-requests`.
 
 ### 6. Phase 5 — Consolidate & close
@@ -378,6 +410,14 @@ Update the manifest:
 - `meta.completed-at` with ISO timestamp.
 - `meta.current-phase: completed`.
 - Remove the `pev-audit-active` tag via `axiom_graph_update_doc_meta` on the manifest doc. (The `pev-audit-consumer-docs` tag stays — that's how future audits resolve their since-window.)
+
+**Efficiency report.** Run the analysis for this audit:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/analyze_pev_session.py" --find-run {audit-id} --docjson --summary
+```
+
+`--find-run` reports only the sessions that worked this audit (dispatched its agents or wrote its docs), and only their calls for it. The script stages the report in the system temp folder; it never writes into `docs/` itself. For each `Staged DocJSON:` line it prints, write the report with the call it prints, `axiom_graph_write_doc(project_root="${CLAUDE_PROJECT_DIR}", doc_file="<staged path>")`. The report lands in the audit's directory as `docs/pev/audits/{audit-id}/efficiency` (`efficiency-s2`, `-s3`… when the audit spanned several sessions), indexed and verified. Its only tag is `pev-efficiency`, so the audit-type tag searches never find it. Present its summary with yours. The script reads Claude Code's private session-log format; if it warns that a session came from a newer Claude Code version than it was checked against, mention it: empty per-agent tool lists then mean the log format changed, not that the agents did nothing.
 
 Run a final `axiom_graph_check` to confirm post-state is reasonable (consumer-docs audits don't directly resolve graph staleness — that's dev-docs' job — so post-`check` should be roughly identical to pre, modulo any incidental graph rewiring from `update_section` calls).
 
@@ -413,20 +453,23 @@ Phase 4 — Applied:
 
 Status: completed | partial
 Manifest: {audit-manifest-doc-id}
+Efficiency: {efficiency doc id(s)}
 ```
 
 If spawn-requests were created, end with: "Run `/pev-cycle <doc-id>` or `/pev-instance <doc-id>` to address each spawned request."
 
 ## Friction log
 
-Capture friction as you work — discovery missed an obvious source, verification's three layers fired in confusing combinations, the batching threshold produced bad batches, the dev-docs cleanliness pre-flight bit when it shouldn't have, the user gate's chunking confused review, etc. Append to `{audit-manifest-doc-id}::friction` as you notice it. Read the existing section first so you don't overwrite prior entries, then `axiom_graph_update_section` with existing + new.
+Capture friction as you work — discovery missed an obvious source, verification's three layers fired in confusing combinations, the batching threshold produced bad batches, the dev-docs cleanliness pre-flight bit when it shouldn't have, the user gate's chunking confused review, etc. Add each entry under `{audit-manifest-doc-id}::friction` as you notice it, as its own subsection: `axiom_graph_add_section(doc_id="{audit-manifest-doc-id}", parent_id="friction", section_id="<short-tag-slug>", heading="<short tag>", content=...)`. Entry ids are slugs with no dots. Omit `content` rather than passing `""`. After two identical failures, change approach instead of retrying. Never rewrite the section with `update_section` or `patch_section`: a new subsection can't clobber entries other agents wrote meanwhile.
 
-Entry format:
+**Log every script read.** If you read a document or index data with a script (Python, Node, `jq`, `grep` … over DocJSON files, or raw SQL) instead of an axiom-graph tool, add a friction entry tagged `script-read`. Name the tool you would have used and why it fell short: output too large, no way to select part of a section, search missed it, not in the index, output hard to reuse. Reading this way is allowed. Writing a document this way is not. These entries are how gaps in the tools get found and fixed.
+
+Entry format (the subsection's heading is the short tag; its content is):
 
 ```
-- **{short tag}** — {one line: what felt off}
-  Context: {raw paste — tool call, output, error, user exchange}
-  Wish: {optional — what would've made this easier}
+{one line: what felt off}
+Context: {raw paste — tool call, output, error, user exchange}
+Wish: {optional — what would've made this easier}
 ```
 
 Empty is fine. Honest emptiness beats invented friction.

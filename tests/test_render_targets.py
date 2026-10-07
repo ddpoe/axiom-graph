@@ -59,7 +59,7 @@ nav = "site-nav.yml"
 name = "readme"
 output = "README.md"
 format = "plain"
-doc = "demo::docs.consumer.readme"
+doc = "demo::docs/consumer/readme"
 overwrite = true
 
 [[axiom_graph.site.targets]]
@@ -73,7 +73,7 @@ nav = "docs/consumer/plugins/pev/nav.yml"
         assert [t.name for t in cfg.site.targets] == ["guide", "readme", "plugin-pev"]
         guide, readme, plugin = cfg.site.targets
         assert guide.format == "sphinx" and guide.nav == "site-nav.yml" and guide.doc is None
-        assert readme.format == "plain" and readme.doc == "demo::docs.consumer.readme" and readme.overwrite is True
+        assert readme.format == "plain" and readme.doc == "demo::docs/consumer/readme" and readme.overwrite is True
         assert plugin.nav == "docs/consumer/plugins/pev/nav.yml" and plugin.overwrite is False
 
     def test_both_nav_and_doc_rejected(self, tmp_path: Path):
@@ -182,7 +182,7 @@ project_id = "test"
 [[axiom_graph.site.targets]]
 name = "readme"
 output = "README.md"
-doc = "test::docs.consumer.readme"
+doc = "test::docs/consumer/readme"
 """,
             encoding="utf-8",
         )
@@ -271,7 +271,7 @@ class TestRenderDocToFile:
                     "id": "intro",
                     "heading": "Intro",
                     "level": 2,
-                    "content": "See [internal](test::docs.foo) and [staleness](staleness.md).",
+                    "content": "See [internal](test::docs/foo) and [staleness](staleness.md).",
                 }
             ],
         )
@@ -281,7 +281,7 @@ class TestRenderDocToFile:
         text = out.read_text(encoding="utf-8")
         assert text.startswith("<!-- generated from")  # provenance stamp
         assert "{toctree}" not in text
-        assert "test::docs.foo" not in text  # internal doc-id link stripped
+        assert "test::docs/foo" not in text  # internal doc-id link stripped
         assert "internal" in text
         assert "[staleness](staleness.md)" in text  # relative link preserved
 
@@ -289,7 +289,7 @@ class TestRenderDocToFile:
         """A doc-id not in the index warns and skips — no crash, no file."""
         _project(mini_project)
         out = mini_project / "README.md"
-        result = render_doc_to_file(mini_project, "test::docs.consumer.nope", out)
+        result = render_doc_to_file(mini_project, "test::docs/consumer/nope", out)
         assert result.pages_rendered == 0
         assert any("not found" in w.lower() for w in result.warnings)
         assert not out.exists()
@@ -329,14 +329,14 @@ class TestPathSafetyAndManifest:
     def test_never_writes_outside_root(self, mini_project: Path):
         _project(mini_project)
         with pytest.raises(ValueError, match="escapes project root"):
-            render_doc_to_file(mini_project, "test::docs.consumer.readme", "../escape.md")
+            render_doc_to_file(mini_project, "test::docs/consumer/readme", "../escape.md")
 
     def test_hybrid_manifest_central_for_single_file(self, mini_project: Path):
         """Single-file targets land in the central .axiom_graph manifest; subtree targets co-located."""
         _project_with_targets(
             mini_project,
             [
-                {"name": "readme", "output": "README.md", "doc": "test::docs.consumer.readme", "overwrite": True},
+                {"name": "readme", "output": "README.md", "doc": "test::docs/consumer/readme", "overwrite": True},
                 {"name": "guide", "output": "guide", "format": "sphinx", "nav": "site-nav.yml"},
             ],
         )
@@ -348,7 +348,7 @@ class TestPathSafetyAndManifest:
 
         central = json.loads((mini_project / ".axiom_graph" / "render-manifest.json").read_text(encoding="utf-8"))
         assert "README.md" in central
-        assert central["README.md"]["doc_id"] == "test::docs.consumer.readme"
+        assert central["README.md"]["doc_id"] == "test::docs/consumer/readme"
         assert central["README.md"]["target"] == "readme"
         assert central["README.md"]["fmt"] == "plain"
         # subtree target keeps its co-located manifest
@@ -361,7 +361,7 @@ class TestPathSafetyAndManifest:
         """A corrupt central manifest is logged (ADR-014) then reset, not silently dropped."""
         _project_with_targets(
             mini_project,
-            [{"name": "readme", "output": "README.md", "doc": "test::docs.consumer.readme", "overwrite": True}],
+            [{"name": "readme", "output": "README.md", "doc": "test::docs/consumer/readme", "overwrite": True}],
         )
         _seed_doc(mini_project, "readme", "axiom-graph", [{"id": "i", "heading": "I", "content": "b", "level": 2}])
 
@@ -378,7 +378,7 @@ class TestPathSafetyAndManifest:
         # Recovery unchanged: corrupt file reset to {} then this run's entry written.
         central = json.loads(manifest_path.read_text(encoding="utf-8"))
         assert "README.md" in central
-        assert central["README.md"]["doc_id"] == "test::docs.consumer.readme"
+        assert central["README.md"]["doc_id"] == "test::docs/consumer/readme"
 
 
 # ---------------------------------------------------------------------------
@@ -418,7 +418,7 @@ class TestRenderTargets:
                     "name": "readme",
                     "output": "README.md",
                     "format": "plain",
-                    "doc": "test::docs.consumer.readme",
+                    "doc": "test::docs/consumer/readme",
                     "overwrite": True,
                 },
                 {
@@ -480,7 +480,7 @@ class TestRenderTargets:
                     "name": "readme",
                     "output": "README.md",
                     "format": "plain",
-                    "doc": "test::docs.consumer.readme",
+                    "doc": "test::docs/consumer/readme",
                     "overwrite": True,
                 },
             ],
@@ -522,7 +522,7 @@ class TestCLIAndMCPTargets:
                     "name": "readme",
                     "output": "README.md",
                     "format": "plain",
-                    "doc": "test::docs.consumer.readme",
+                    "doc": "test::docs/consumer/readme",
                     "overwrite": True,
                 },
             ],
@@ -547,7 +547,7 @@ class TestCLIAndMCPTargets:
         # targets configured, but --nav/--output must bypass the target list
         _project_with_targets(
             mini_project,
-            [{"name": "readme", "output": "README.md", "format": "plain", "doc": "test::docs.consumer.readme"}],
+            [{"name": "readme", "output": "README.md", "format": "plain", "doc": "test::docs/consumer/readme"}],
         )
         _seed_doc(mini_project, "getting-started", "GS", [{"id": "w", "heading": "W", "content": "hi", "level": 2}])
         nav_file = _slim_nav(mini_project, ["getting-started"])
@@ -573,7 +573,7 @@ class TestCLIAndMCPTargets:
                     "name": "readme",
                     "output": "README.md",
                     "format": "plain",
-                    "doc": "test::docs.consumer.readme",
+                    "doc": "test::docs/consumer/readme",
                     "overwrite": True,
                 },
             ],

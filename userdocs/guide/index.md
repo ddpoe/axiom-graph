@@ -1,87 +1,98 @@
-<!-- generated from axiom_graph::docs.consumer.index @ 484b4c7773cc; do not edit -->
+<!-- generated from axiom_graph::docs/consumer/index @ 150a4aff0b7f; do not edit -->
 
 # What is axiom-graph
 
-## A code intelligence layer built for agents
+## What it does
 
-AI agents now write code faster than anyone can read it. The bottleneck moved from *writing* to *comprehension* — and the casualty is everything that's supposed to explain the code: docs go stale the moment they're written, tests lag behind new behavior, and the reasoning behind a change lives in a chat transcript nobody will ever re-open.
+axiom-graph indexes a project's code, docs and tests into one graph, and when the code changes it tells you which docs and tests are now out of date. It is meant for projects where AI agents write much of the code and the docs have to keep up.
 
-axiom-graph attacks that gap. It is a **local-first code intelligence layer designed for AI agents**. It scans your Python and TypeScript source, weaves your docs, tests, and workflows into a single **typed mesh** over the code, and keeps that mesh honest as the code changes. An agent reads the mesh instead of re-reading your whole repository — and the same mesh tells it the moment any of those threads has drifted out of sync.
+Agents use it through an MCP server. The `axiom_graph_*` tools let an agent search the project, read one function or one doc section at a time, follow the links between code, docs and tests, and update the docs a change made stale. A CLI and a browser dashboard give people the same view.
 
-The payoff is **context reduction**. Instead of loading a whole file to understand one function, an agent asks the mesh for that function and gets back exactly what a careful human would pull up to review the change: the function body, the design-spec section that describes it, the tests that validate it, and the workflow that calls it. One focused bundle of context — not a file dump, not a wall of grep matches.
+It runs locally. You install it with pip, there is no account, and the index is a SQLite file at `.axiom_graph/graph.db` in your project.
 
-## See it work: install to drift signal
+## Quick start
 
-axiom-graph is `pip install`, no SaaS and no account. Four commands take an unindexed repo to a live drift signal:
+axiom-graph needs Python 3.10 or later. From your project's root:
 
 ```bash
 pip install axiom-graph
-axiom-graph init .     # one-time: full first index
-# ...edit a function that docs and tests describe...
-axiom-graph build .    # incremental re-index
-axiom-graph check .    # what fell out of sync?
+axiom-graph init .
 ```
 
-`check` answers with exactly what drifted and why — the function you changed, the doc sections that document it, the tests that validate it, and any downstream consumer page riding the chain, each tagged with the symbol that moved:
+`init` scans the project and builds the index. Now change the body of a function that one of your tests calls, and run `check`:
+
+```bash
+axiom-graph check .
+```
 
 ```
-own: 1 CONTENT_UPDATED / 0 DESC_UPDATED / 0 RENAMED / 0 NOT_FOUND · link: 2 LINKED_STALE / 0 BROKEN_LINK · 47 VERIFIED
+own: 2 CONTENT_UPDATED / 0 DESC_UPDATED / 0 RENAMED / 0 NOT_FOUND · link: 2 LINKED_STALE / 0 BROKEN_LINK · 0 VERIFIED
+
+NODE                                              OWN_STATUS       LINK_STATUS
+----------------------------------------------------------------------------------------
+myproject::reports                                CONTENT_UPDATED  VERIFIED
+myproject::reports::build_report                  CONTENT_UPDATED  VERIFIED
+myproject::tests.test_reports                     VERIFIED         LINKED_STALE
+myproject::tests.test_reports::test_build_report  VERIFIED         LINKED_STALE  via myproject::reports::build_report
 ```
 
-That one line is the whole product: change code, and the mesh tells you what it knocked out of date. The rest of this page is *why* that works; the [reporting pipeline](examples/reporting-pipeline.md) walks the full loop on a real module.
+The function you edited is `CONTENT_UPDATED`, and its module shows the same status. The test that calls it is `LINKED_STALE`: code it depends on changed and nobody has reviewed the test since. Once you have checked that the test still fits the new code, mark both as verified and the list clears:
 
-## The typed mesh is the product
+```bash
+axiom-graph mark-clean myproject::reports::build_report .
+axiom-graph mark-clean myproject::tests.test_reports::test_build_report .
+```
 
-Most tools treat code, docs, and tests as separate worlds joined by prose references. axiom-graph treats them as one graph of **nodes** joined by **intent-typed edges**. A doc section *documents* a function. A test *validates* it. A `@workflow` decorator *annotates* it. An orchestration step *delegates_to* a task. The edge carries meaning, not just a pointer.
+A node id is `<project>::<module>::<function>`. The project id defaults to the directory name, and `init` records it as `project_id` in `axiom-graph.toml`. `axiom-graph list .` prints every id.
 
-That single design choice gives you two capabilities for the price of one — they are two reads against the same mesh:
+Docs work the same way: a doc section that links to the function goes `LINKED_STALE` when the function changes. Docs are DocJSON files under `docs/`, one node per section. The easiest way to write and link them is to [connect your agent](get-started/connect-your-agent.md) and let it use the `axiom_graph_*` doc tools. You can also do it in the [dashboard](viz.md)'s Docs tab.
 
-- **Intent-scoped retrieval** — traverse the typed edges out from a node and you land on exactly the linked docs, tests, and workflows. No grep, no guessing which file matters.
-- **Drift detection** — when a code body or docstring changes, axiom-graph hashes them separately and propagates the change *along the same edges* to every linked doc section, test, and workflow, marking them for re-verification.
+`check` sees edits to anything already indexed. After you add files, run `axiom-graph build .` so new functions, tests and docs join the index.
 
-Crucially, propagation follows the *semantics* of each edge rather than firing on every caller. A full call graph would mark thousands of nodes stale on one change and create a backlog nobody reviews. axiom-graph propagates `validates` one hop, chains `documents` transitively, and guards `delegates_to` against cycles — so [staleness](concepts/staleness.md) stays a trustworthy signal instead of noise. The mesh isn't a feature on the side; it *is* the product.
+The [reporting pipeline tutorial](examples/reporting-pipeline.md) runs the same loop on a project with linked docs.
 
-## What makes it different
+## What gets indexed
 
-A few choices set axiom-graph apart from "a search index" or "a doc linter":
+Each thing axiom-graph indexes becomes a **node**, and the relationships between nodes are typed **edges**.
 
-- **Atomic, modular docs.** Documentation is written in DocJSON, where every *section* is its own addressable node with stable links. You document at function and section granularity, and an agent can read one section instead of a whole document — context reduction applied to the docs themselves. See [DocJSON](concepts/docjson.md).
-- **An annotated semantic layer, not a full call graph.** Lightweight `@workflow`/`@task` decorators and `Step`/`AutoStep` markers annotate the *orchestration highways* of your system with step names and intent. You get a readable map of what runs in what order and why — without the noise of every helper call. See [annotations](concepts/annotations.md).
-- **Staleness as a read on the mesh.** Drift isn't bolted on; it's the engine that keeps the mesh trustworthy. When code changes, the affected nodes light up, and a verification snapshot clears them once a human or agent confirms they're back in sync.
-- **Agent-native via MCP.** The MCP server is the primary integration surface — search, graph traversal, source retrieval, staleness checks, and doc editing all exposed as tools an agent can call directly. The human [CLI](get-started/use-the-cli.md) and the [visualization dashboard](viz.md) are the secondary, human-facing path onto the same mesh.
+| Source | Nodes | Edges |
+|---|---|---|
+| Python files | modules, classes, functions | a module `composes` its functions; imports become `depends_on` |
+| Tests (the `test*` functions pytest collects from `test_*.py` and `*_test.py` files) | test functions | a test `validates` each function it calls, found automatically |
+| Docs under `docs/` (DocJSON and Markdown) | each document and each section | a section `documents` the code its links name |
+| `@workflow` / `@task` markers | workflows, tasks and their steps | a marker `annotates` its function; an `AutoStep` step `delegates_to` the function it calls |
+| Files under `.claude/` | one node per file | none |
 
-The storage is a single local SQLite database (`.axiom_graph/graph.db`). It's free, open-source, and there's no SaaS to sign up for — the mesh lives in your repo.
+JavaScript and TypeScript need the `js` extra (`pip install "axiom-graph[js]"`) and a `js_paths` list in `axiom-graph.toml` naming the files to scan. See [configuration](get-started/configuration.md).
 
-## The middle layer between reference and prose
+The `@workflow`, `@task`, `Step` and `AutoStep` markers come from the `axiom-annotations` package. You add them to your main pipelines so the graph shows what runs in what order, without recording every function call. See [annotations](concepts/annotations.md). [The mesh](concepts/the-mesh.md) covers nodes, edges and ids, and the [ontology](concepts/ontology.md) lists every node and edge type.
 
-Two kinds of documentation already wrap every codebase, and both miss the part that matters. **API reference** is autogenerated from signatures — complete at the symbol level, but it never says *why* anything exists or how the pieces fit. **Product prose** describes capabilities for a reader, but it drifts from the code the moment either one changes. The layer in between — *how these functions actually work together, and the intent behind each hop* — normally lives nowhere but a senior developer's head, and walks out the door when they do.
+## How drift is detected
 
-axiom-graph **materializes that middle layer** and anchors it to the code. Its scaffolding is the **axiom-annotations** schema — the `@workflow` / `@task` / `Step` / `AutoStep` markers (a purpose-built, structured intent surface, *not* docstrings or scraped comments) that emit graph nodes and edges narrating the orchestration highways of your system. `documents` edges then aggregate that scaffolding into capability-level prose, so the middle layer is annotation-anchored rather than comment-mined. See [the semantic layer](concepts/annotations.md) for the markers and [the mesh](concepts/the-mesh.md) for how the edges bind it to code.
+`check` compares each node with the version that was last verified.
 
-**One layer, two audiences — with the same need.** An AI agent traverses the middle layer over [MCP](get-started/connect-your-agent.md) to plan against the codebase without re-reading it. A human newcomer has the *identical* need, and reads the same layer by eye in the [viz dashboard](viz.md): browse the annotated highways in the Workflows tab, open a function and read the section that documents it — then **extend the layer yourself**, attaching provenance links with the link picker and editing sections right in the Docs tab. You see the veins through the codebase without a developer walking you through it.
+- A function whose body changed is `CONTENT_UPDATED`, and one whose docstring changed is `DESC_UPDATED`. For a doc section, a text change is `CONTENT_UPDATED` and a heading change is `DESC_UPDATED`.
+- A node linked to a changed node becomes `LINKED_STALE`: a test that `validates` it, a doc section that `documents` it, a workflow that `annotates` it. The `via` column names the change.
+- `LINKED_STALE` stays until you verify the node or the changed code goes back to the version it was verified against. Verify it with `axiom-graph mark-clean`. When an agent edits a doc section with `axiom_graph_update_section` or `axiom_graph_patch_section`, it can verify the section in the same call by naming the changed code in `addresses`. Saving the text alone, editing the file by hand or running `check` again does not clear it.
 
-And because every thread is anchored to code, the middle layer **rides the drift signal** instead of rotting the way a wiki does: when the code moves, the sections that describe it light up [stale](concepts/staleness.md) until someone re-verifies them. A materialized middle layer is only worth having if it stays honest — so honesty lives in the same mesh that holds it.
+Drift travels only along these edges, not to every caller, so a change flags the docs and tests that describe or cover it. In CI, `axiom-graph check --fail-on stale .` exits 1 while anything is stale. [Staleness](concepts/staleness.md) has every status and clearing rule, and [history](concepts/history.md) covers the change log behind diffs and time travel.
 
-## Agents consume the mesh — the PEV proof
+## Ways to use it
 
-The clearest evidence that this works is the **PEV Agent Nexus**: a Plan–Execute–Validate workflow where a chain of agents (Architect, Builder, Reviewer, Auditor) build real changes by reading and writing the mesh through MCP. They pull intent-scoped context to plan, traverse the graph to check callers before refactoring, and — after merging — let the Auditor update the affected docs and record a verification snapshot so staleness clears cleanly.
+- **MCP server, for agents.** Connect Claude Code, Cursor or any other MCP client and the agent gets the `axiom_graph_*` tools: `axiom_graph_search` to find nodes, `axiom_graph_source` and `axiom_graph_read_doc` to read one function or doc section, `axiom_graph_graph` to follow edges, `axiom_graph_check` and `axiom_graph_drift_query` for drift, and tools to write and link docs. `axiom_graph_clone_doc` starts a new doc as a copy of an existing one, and `axiom_graph_workflow_export` writes workflows and their code to one page you can share. See [connect your agent](get-started/connect-your-agent.md).
+- **CLI, for people and CI.** `init`, `build`, `check` and `mark-clean`, plus commands to list and render nodes, walk the graph, show history and diffs, and render docs to a site or README. `axiom-graph workflows export` writes workflows and their code to one HTML page, and `axiom-graph carry-forward` copies the verifications made in a merged git worktree into your main checkout's index. See [use the CLI](get-started/use-the-cli.md).
+- **Dashboard, for browsing.** Install the `viz` extra (`pip install "axiom-graph[viz]"`) and run `axiom-graph viz .` to open a browser UI with Graph, List, Docs, Workflows and Tests tabs. You can edit doc sections and add links in the Docs tab. See [the dashboard](viz.md).
 
-It's the flagship demonstration of the thesis end to end: agents doing real work *because* the mesh gives them the right context and an honest drift signal, not despite the absence of one. See [PEV](pev/overview.md) for the full picture.
+## The PEV Agent Nexus
 
-## Docs that stay honest (this site, dogfooded)
-
-The page you're reading is itself a node in the mesh. Consumer docs link *through* a [dev-doc proxy](examples/docs-honesty-loop.md#the-proxy-linking-architecture) to the code they describe, so they ride that chain and stay stable even when symbols get renamed. Because `consumer` is a transitive tag, these published pages **inherit a stale signal whenever the underlying code drifts**.
-
-That staleness is the cue to revisit the prose; a verification pass clears it; re-rendering the site republishes the corrected page. The documentation you're reading is maintained by the same drift-and-verify loop it describes — the honesty loop, dogfooded.
+The PEV Agent Nexus (PEV) is a Claude Code plugin that runs a code change through Plan, Execute and Validate phases. Separate agents plan the change (Architect), implement it with tests (Builder), review it (Reviewer) and update the docs it made stale (Auditor), with a human approval gate between phases. The agents read and write the project through the axiom-graph MCP tools. You start a cycle with `/pev-cycle <task>`, or `/pev-instance <task>` for a small change done by one agent. See [PEV Agent Nexus](pev/overview.md).
 
 ## Where to go next
 
-Pick your entry point:
-
-- **Understand the model.** Start with [the mesh](concepts/the-mesh.md), then the [ontology](concepts/ontology.md) of node and edge types, [DocJSON](concepts/docjson.md) for the doc format, [annotations](concepts/annotations.md) for the semantic layer, and [staleness](concepts/staleness.md) for the drift engine.
-- **Get an agent on it.** [Connect your agent](get-started/connect-your-agent.md) to the MCP server, or drive the mesh yourself with the [CLI](get-started/use-the-cli.md). Tune behavior in [configuration](get-started/configuration.md).
-- **See it work.** Read the [PEV overview](pev/overview.md) for agents building on the mesh, then the worked [reporting pipeline](examples/reporting-pipeline.md) and the [docs honesty loop](examples/docs-honesty-loop.md) examples.
-- **Look at it.** Explore the graph visually in the [dashboard](viz.md).
+- **Concepts:** [the mesh](concepts/the-mesh.md) (nodes, edges, ids), the [ontology](concepts/ontology.md) (every node and edge type), [DocJSON](concepts/docjson.md) (the doc format and linking), [annotations](concepts/annotations.md) (the workflow markers), [staleness](concepts/staleness.md) (drift statuses and clearing) and [history](concepts/history.md).
+- **Setup:** [connect your agent](get-started/connect-your-agent.md), [use the CLI](get-started/use-the-cli.md) and [configuration](get-started/configuration.md).
+- **Tutorials:** the [reporting pipeline](examples/reporting-pipeline.md) (the full drift loop), the [docs honesty loop](examples/docs-honesty-loop.md) (keeping user-facing docs in step with the code, as this guide does), [multi-target rendering](examples/multi-target-rendering.md) (one set of docs rendered to a site, a README and plugin docs) and [share a workflow](examples/share-a-workflow.md) (export a workflow and its code to one page).
+- **Tools:** the [dashboard](viz.md) and [PEV](pev/overview.md).
 
 ```{toctree}
 :maxdepth: 2

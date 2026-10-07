@@ -3,9 +3,10 @@
 ``axiom-graph build`` and the ``axiom_graph_build`` MCP tool print the same
 report in two different formats.  Its file counts cover Python files only, so
 an unlabelled ``0`` reads as "no documentation was scanned" when it means
-nothing of the sort; and the count of documentation files skipped by the mtime
-fast pass, which is the number that answers that question, was carried on the
-summary and printed nowhere.
+nothing of the sort.  The count of documentation files skipped as unchanged
+answers that question, so both surfaces print it, with the rule a skip
+follows: a file is skipped only when its content and its mtime both match the
+last parse.
 """
 
 from __future__ import annotations
@@ -33,13 +34,13 @@ def _project_with_docs(root: Path) -> None:
             json.dumps({"title": slug.title(), "sections": [{"id": "body", "heading": "Body", "content": "Body."}]}),
             encoding="utf-8",
         )
-    # First build stamps the file mtimes the fast pass compares against.
+    # The first build records what the next build compares each file against.
     builder.build(root)
 
 
 @workflow(
-    purpose="Both the CLI and the MCP build summary report how many documentation files the mtime fast pass skipped, "
-    "and label their file counts as Python-only",
+    purpose="Both the CLI and the MCP build summary report how many documentation files were skipped because their "
+    "content and mtime were unchanged, and label their file counts as Python-only",
 )
 def test_build_summary_reports_skipped_docs_on_both_surfaces(tmp_path: Path) -> None:
     from axiom_graph.lifecycle.mcp_tools import axiom_graph_build
@@ -47,17 +48,17 @@ def test_build_summary_reports_skipped_docs_on_both_surfaces(tmp_path: Path) -> 
     _project_with_docs(tmp_path)
 
     mcp_output = axiom_graph_build(str(tmp_path))
-    assert "docs skipped    : 2 (markdown + DocJSON, mtime unchanged)" in mcp_output
+    assert "docs skipped    : 2 (markdown + DocJSON, content and mtime unchanged)" in mcp_output
     assert "files scanned   : " in mcp_output
     assert "(Python)" in mcp_output
-    assert "(Python, mtime unchanged)" in mcp_output
+    assert "(Python, content and mtime unchanged)" in mcp_output
 
     result = CliRunner().invoke(main, ["build", str(tmp_path)])
     assert result.exit_code == 0, result.output
-    assert "docs skipped  : 2 (markdown + DocJSON, mtime unchanged)" in result.output
+    assert "docs skipped  : 2 (markdown + DocJSON, content and mtime unchanged)" in result.output
     assert "files scanned : " in result.output
     assert "(Python)" in result.output
-    assert "(Python, mtime unchanged)" in result.output
+    assert "(Python, content and mtime unchanged)" in result.output
     assert "Done." in result.output
 
 
@@ -78,6 +79,6 @@ def test_build_summary_reads_docs_skipped_from_a_raw_dict(capsys) -> None:
         }
     )
     out = capsys.readouterr().out
-    assert "docs skipped  : 7 (markdown + DocJSON, mtime unchanged)" in out
+    assert "docs skipped  : 7 (markdown + DocJSON, content and mtime unchanged)" in out
     assert "files scanned : 3 (Python)" in out
-    assert "files skipped : 1 (Python, mtime unchanged)" in out
+    assert "files skipped : 1 (Python, content and mtime unchanged)" in out

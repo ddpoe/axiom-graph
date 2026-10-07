@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from axiom_graph.index import builder
 from axiom_graph.viz import server
-from axiom_graph.workflows.api import workflow_detail
+from axiom_graph.workflows.api import workflow_bundle_to_dict, workflow_detail, workflow_export_bundle
 
 
 def _write(path: Path, content: str) -> Path:
@@ -83,6 +83,62 @@ def test_workflow_steps_expand_returns_nested_tree(tmp_path):
     steps = resp.json()["steps"]
     assert [s["step_number"] for s in steps] == ["1", "2", "2.1", "2.2", "3"]
     assert [s["depth"] for s in steps] == [0, 0, 1, 1, 0]
+
+
+@workflow(
+    purpose="The live workflow outline and the export bundle give every step the same depth, minor steps included"
+)
+def test_live_outline_and_export_agree_on_minor_step_depth(tmp_path):
+    _write(
+        tmp_path / "tasks.py",
+        """\
+from axiom_annotations import task, Step, AutoStep
+
+
+def clean_one(row):
+    return row
+
+
+@task(purpose="Prepare the rows")
+def prep(rows):
+    _ = Step(step_num=1, name='load rows', purpose='read the input')
+    for row in rows:
+        _ = AutoStep(step_num=1.1, name='clean one row')
+        clean_one(row)
+""",
+    )
+    _write(
+        tmp_path / "pipe.py",
+        """\
+from axiom_annotations import workflow, Step, AutoStep
+
+from tasks import prep
+
+
+def check_one(x):
+    return x
+
+
+@workflow(purpose="Run the pipeline")
+def run(rows):
+    _ = Step(step_num=1, name='validate', purpose='check inputs')
+    for x in rows:
+        _ = AutoStep(step_num=1.1, name='check one input')
+        check_one(x)
+    _ = AutoStep(step_num=2, name='prepare')
+    prep(rows)
+""",
+    )
+    builder.build(tmp_path, project_id="proj", discovery_only=False)
+    envelope_id = "proj::pipe::run@workflow"
+    client = _setup_server(tmp_path)
+
+    live = client.get(f"/api/workflow/{envelope_id}/steps", params={"expand": "true"}).json()["steps"]
+    exported = workflow_bundle_to_dict(workflow_export_bundle(tmp_path, [envelope_id]))["workflows"][0]["steps"]
+
+    live_depths = {s["step_number"]: s["depth"] for s in live}
+    assert live_depths == {"1": 0, "1.1": 1, "2": 0, "2.1": 1, "2.1.1": 2}
+    assert live_depths == {s["step_num"]: s["depth"] for s in exported}
 
 
 def test_workflow_steps_default_returns_only_direct_children(tmp_path):

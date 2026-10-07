@@ -154,14 +154,6 @@ def test_mark_clean_nodes_signature_requires_verified_by():
     assert "node_ids" in params
 
 
-def test_build_index_signature_takes_embedder_thread():
-    """``build_index`` accepts an embedder_thread keyword for test injection."""
-    sig = inspect.signature(build_index)
-    params = sig.parameters
-    assert "embedder_thread" in params
-    assert params["embedder_thread"].kind == inspect.Parameter.KEYWORD_ONLY
-
-
 def test_compute_check_summary_returns_typed_summary():
     """``compute_check_summary`` returns CheckSummary or None."""
     sig = inspect.signature(compute_check_summary)

@@ -70,13 +70,13 @@ def _seed_doc_graph(db_path: Path, *, tags: str = '["consumer"]') -> None:
     # --- nodes ---
     code_fn = _node("proj::mod.fn", location="src/mod.py")
     dev_spec = _node(
-        "proj::docs.spec::overview",
+        "proj::docs/spec::overview",
         subtype="docjson",
         code_hash="spechash",
         location="docs/spec.json",
     )
     consumer = _node(
-        "proj::docs.guide::intro",
+        "proj::docs/guide::intro",
         subtype="docjson",
         code_hash="guidehash",
         location="docs/guide.json",
@@ -89,13 +89,13 @@ def _seed_doc_graph(db_path: Path, *, tags: str = '["consumer"]') -> None:
         # --- doc_sections + docs ---
         conn.execute(
             "INSERT OR REPLACE INTO docs (id, title, tags, file_path, desc_hash, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-            ("proj::docs.spec", "Spec", "[]", "docs/spec.json", None, now),
+            ("proj::docs/spec", "Spec", "[]", "docs/spec.json", None, now),
         )
         seed_section_tuple(
             conn,
             (
-                "proj::docs.spec::overview",
-                "proj::docs.spec",
+                "proj::docs/spec::overview",
+                "proj::docs/spec",
                 "Overview",
                 2,
                 None,
@@ -109,23 +109,23 @@ def _seed_doc_graph(db_path: Path, *, tags: str = '["consumer"]') -> None:
         )
         conn.execute(
             "INSERT OR REPLACE INTO docs (id, title, tags, file_path, desc_hash, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-            ("proj::docs.guide", "Guide", tags, "docs/guide.json", None, now),
+            ("proj::docs/guide", "Guide", tags, "docs/guide.json", None, now),
         )
         seed_section_tuple(
             conn,
-            ("proj::docs.guide::intro", "proj::docs.guide", "Intro", 2, None, "guide content", None, None, 0, 0, now),
+            ("proj::docs/guide::intro", "proj::docs/guide", "Intro", 2, None, "guide content", None, None, 0, 0, now),
         )
 
         # --- edges ---
         # dev_spec -> code_fn (documents)
         db.upsert_edge_conn(
             conn,
-            _edge("proj::docs.spec::overview", "documents", "proj::mod.fn"),
+            _edge("proj::docs/spec::overview", "documents", "proj::mod.fn"),
         )
         # consumer -> dev_spec (documents, doc-to-doc)
         db.upsert_edge_conn(
             conn,
-            _edge("proj::docs.guide::intro", "documents", "proj::docs.spec::overview"),
+            _edge("proj::docs/guide::intro", "documents", "proj::docs/spec::overview"),
         )
 
         # --- history: make code_fn look changed AFTER dev_spec was updated ---
@@ -153,8 +153,8 @@ class TestDirectStalenessUnchanged:
 
         result = _get_linked_stale_ids(db_path, transitive_tags=None)
 
-        assert "proj::docs.spec::overview" in result
-        assert "proj::docs.guide::intro" not in result
+        assert "proj::docs/spec::overview" in result
+        assert "proj::docs/guide::intro" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -171,8 +171,8 @@ class TestTagGating:
 
         result = _get_linked_stale_ids(db_path, transitive_tags=["consumer"])
 
-        assert "proj::docs.spec::overview" in result
-        assert "proj::docs.guide::intro" in result
+        assert "proj::docs/spec::overview" in result
+        assert "proj::docs/guide::intro" in result
 
     def test_non_matching_tag_blocks_propagation(self, db_path: Path):
         """Consumer doc with non-matching tag does NOT get LINKED_STALE."""
@@ -180,8 +180,8 @@ class TestTagGating:
 
         result = _get_linked_stale_ids(db_path, transitive_tags=["consumer"])
 
-        assert "proj::docs.spec::overview" in result
-        assert "proj::docs.guide::intro" not in result
+        assert "proj::docs/spec::overview" in result
+        assert "proj::docs/guide::intro" not in result
 
     def test_empty_tags_blocks_propagation(self, db_path: Path):
         """Empty transitive_tags list means no propagation."""
@@ -189,8 +189,8 @@ class TestTagGating:
 
         result = _get_linked_stale_ids(db_path, transitive_tags=[])
 
-        assert "proj::docs.spec::overview" in result
-        assert "proj::docs.guide::intro" not in result
+        assert "proj::docs/spec::overview" in result
+        assert "proj::docs/guide::intro" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +207,7 @@ class TestSingleHopTransitive:
 
         result = _get_linked_stale_ids(db_path, transitive_tags=["consumer"])
 
-        assert result["proj::docs.guide::intro"] == ["proj::docs.spec::overview"]
+        assert result["proj::docs/guide::intro"] == ["proj::docs/spec::overview"]
 
 
 # ---------------------------------------------------------------------------
@@ -223,8 +223,8 @@ class TestCycleDetection:
         now = db._now_utc()
 
         code_fn = _node("proj::mod.fn", location="src/mod.py")
-        doc_a = _node("proj::docs.a::sec", subtype="docjson", code_hash="ah", location="docs/a.json")
-        doc_b = _node("proj::docs.b::sec", subtype="docjson", code_hash="bh", location="docs/b.json")
+        doc_a = _node("proj::docs/a::sec", subtype="docjson", code_hash="ah", location="docs/a.json")
+        doc_b = _node("proj::docs/b::sec", subtype="docjson", code_hash="bh", location="docs/b.json")
 
         with db._connect(db_path) as conn:
             for n in (code_fn, doc_a, doc_b):
@@ -234,26 +234,26 @@ class TestCycleDetection:
             conn.execute(
                 "INSERT OR REPLACE INTO docs (id, title, tags, file_path, desc_hash, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                ("proj::docs.a", "Doc A", '["consumer"]', "docs/a.json", None, now),
+                ("proj::docs/a", "Doc A", '["consumer"]', "docs/a.json", None, now),
             )
             seed_section_tuple(
-                conn, ("proj::docs.a::sec", "proj::docs.a", "Sec A", 2, None, "a", None, None, 0, 0, now)
+                conn, ("proj::docs/a::sec", "proj::docs/a", "Sec A", 2, None, "a", None, None, 0, 0, now)
             )
             conn.execute(
                 "INSERT OR REPLACE INTO docs (id, title, tags, file_path, desc_hash, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                ("proj::docs.b", "Doc B", '["consumer"]', "docs/b.json", None, now),
+                ("proj::docs/b", "Doc B", '["consumer"]', "docs/b.json", None, now),
             )
             seed_section_tuple(
-                conn, ("proj::docs.b::sec", "proj::docs.b", "Sec B", 2, None, "b", None, None, 0, 0, now)
+                conn, ("proj::docs/b::sec", "proj::docs/b", "Sec B", 2, None, "b", None, None, 0, 0, now)
             )
 
             # doc_a -> code_fn (direct)
-            db.upsert_edge_conn(conn, _edge("proj::docs.a::sec", "documents", "proj::mod.fn"))
+            db.upsert_edge_conn(conn, _edge("proj::docs/a::sec", "documents", "proj::mod.fn"))
             # doc_b -> doc_a (doc-to-doc)
-            db.upsert_edge_conn(conn, _edge("proj::docs.b::sec", "documents", "proj::docs.a::sec"))
+            db.upsert_edge_conn(conn, _edge("proj::docs/b::sec", "documents", "proj::docs/a::sec"))
             # doc_a -> doc_b (cycle!)
-            db.upsert_edge_conn(conn, _edge("proj::docs.a::sec", "documents", "proj::docs.b::sec"))
+            db.upsert_edge_conn(conn, _edge("proj::docs/a::sec", "documents", "proj::docs/b::sec"))
 
             # Make code_fn stale
             time.sleep(0.05)
@@ -267,8 +267,8 @@ class TestCycleDetection:
         result = _get_linked_stale_ids(db_path, transitive_tags=["consumer"])
 
         # Both should be stale (no infinite loop)
-        assert "proj::docs.a::sec" in result
-        assert "proj::docs.b::sec" in result
+        assert "proj::docs/a::sec" in result
+        assert "proj::docs/b::sec" in result
 
 
 # ---------------------------------------------------------------------------
@@ -285,9 +285,9 @@ class TestMultipleCauses:
 
         code_fn1 = _node("proj::mod.fn1", location="src/mod.py", code_hash="h1")
         code_fn2 = _node("proj::mod.fn2", location="src/mod.py", code_hash="h2")
-        spec1 = _node("proj::docs.spec1::sec", subtype="docjson", code_hash="s1h", location="docs/spec1.json")
-        spec2 = _node("proj::docs.spec2::sec", subtype="docjson", code_hash="s2h", location="docs/spec2.json")
-        consumer = _node("proj::docs.guide::sec", subtype="docjson", code_hash="gh", location="docs/guide.json")
+        spec1 = _node("proj::docs/spec1::sec", subtype="docjson", code_hash="s1h", location="docs/spec1.json")
+        spec2 = _node("proj::docs/spec2::sec", subtype="docjson", code_hash="s2h", location="docs/spec2.json")
+        consumer = _node("proj::docs/guide::sec", subtype="docjson", code_hash="gh", location="docs/guide.json")
 
         with db._connect(db_path) as conn:
             for n in (code_fn1, code_fn2, spec1, spec2, consumer):
@@ -295,8 +295,8 @@ class TestMultipleCauses:
 
             # docs + sections
             for doc_id, title, fp in [
-                ("proj::docs.spec1", "Spec1", "docs/spec1.json"),
-                ("proj::docs.spec2", "Spec2", "docs/spec2.json"),
+                ("proj::docs/spec1", "Spec1", "docs/spec1.json"),
+                ("proj::docs/spec2", "Spec2", "docs/spec2.json"),
             ]:
                 conn.execute(
                     "INSERT OR REPLACE INTO docs (id, title, tags, file_path, desc_hash, updated_at) "
@@ -304,26 +304,26 @@ class TestMultipleCauses:
                     (doc_id, title, "[]", fp, None, now),
                 )
             for sec_id, doc_id in [
-                ("proj::docs.spec1::sec", "proj::docs.spec1"),
-                ("proj::docs.spec2::sec", "proj::docs.spec2"),
+                ("proj::docs/spec1::sec", "proj::docs/spec1"),
+                ("proj::docs/spec2::sec", "proj::docs/spec2"),
             ]:
                 seed_section_tuple(conn, (sec_id, doc_id, "Sec", 2, None, "x", None, None, 0, 0, now))
 
             conn.execute(
                 "INSERT OR REPLACE INTO docs (id, title, tags, file_path, desc_hash, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                ("proj::docs.guide", "Guide", '["consumer"]', "docs/guide.json", None, now),
+                ("proj::docs/guide", "Guide", '["consumer"]', "docs/guide.json", None, now),
             )
             seed_section_tuple(
-                conn, ("proj::docs.guide::sec", "proj::docs.guide", "Sec", 2, None, "guide", None, None, 0, 0, now)
+                conn, ("proj::docs/guide::sec", "proj::docs/guide", "Sec", 2, None, "guide", None, None, 0, 0, now)
             )
 
             # edges: spec1 -> code_fn1, spec2 -> code_fn2
-            db.upsert_edge_conn(conn, _edge("proj::docs.spec1::sec", "documents", "proj::mod.fn1"))
-            db.upsert_edge_conn(conn, _edge("proj::docs.spec2::sec", "documents", "proj::mod.fn2"))
+            db.upsert_edge_conn(conn, _edge("proj::docs/spec1::sec", "documents", "proj::mod.fn1"))
+            db.upsert_edge_conn(conn, _edge("proj::docs/spec2::sec", "documents", "proj::mod.fn2"))
             # consumer -> spec1, consumer -> spec2
-            db.upsert_edge_conn(conn, _edge("proj::docs.guide::sec", "documents", "proj::docs.spec1::sec"))
-            db.upsert_edge_conn(conn, _edge("proj::docs.guide::sec", "documents", "proj::docs.spec2::sec"))
+            db.upsert_edge_conn(conn, _edge("proj::docs/guide::sec", "documents", "proj::docs/spec1::sec"))
+            db.upsert_edge_conn(conn, _edge("proj::docs/guide::sec", "documents", "proj::docs/spec2::sec"))
 
             # Make both code functions stale
             time.sleep(0.05)
@@ -337,9 +337,9 @@ class TestMultipleCauses:
 
         result = _get_linked_stale_ids(db_path, transitive_tags=["consumer"])
 
-        via = result["proj::docs.guide::sec"]
-        assert "proj::docs.spec1::sec" in via
-        assert "proj::docs.spec2::sec" in via
+        via = result["proj::docs/guide::sec"]
+        assert "proj::docs/spec1::sec" in via
+        assert "proj::docs/spec2::sec" in via
         assert len(via) == 2
 
 
@@ -356,8 +356,8 @@ class TestNoFalsePositives:
         now = db._now_utc()
 
         code_fn = _node("proj::mod.fn", location="src/mod.py")
-        spec = _node("proj::docs.spec::sec", subtype="docjson", code_hash="sh", location="docs/spec.json")
-        consumer = _node("proj::docs.guide::sec", subtype="docjson", code_hash="gh", location="docs/guide.json")
+        spec = _node("proj::docs/spec::sec", subtype="docjson", code_hash="sh", location="docs/spec.json")
+        consumer = _node("proj::docs/guide::sec", subtype="docjson", code_hash="gh", location="docs/guide.json")
 
         with db._connect(db_path) as conn:
             for n in (code_fn, spec, consumer):
@@ -365,30 +365,30 @@ class TestNoFalsePositives:
 
             conn.execute(
                 "INSERT OR REPLACE INTO docs (id, title, tags, file_path, desc_hash, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-                ("proj::docs.spec", "Spec", "[]", "docs/spec.json", None, now),
+                ("proj::docs/spec", "Spec", "[]", "docs/spec.json", None, now),
             )
             seed_section_tuple(
-                conn, ("proj::docs.spec::sec", "proj::docs.spec", "Sec", 2, None, "x", None, None, 0, 0, now)
+                conn, ("proj::docs/spec::sec", "proj::docs/spec", "Sec", 2, None, "x", None, None, 0, 0, now)
             )
             conn.execute(
                 "INSERT OR REPLACE INTO docs (id, title, tags, file_path, desc_hash, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-                ("proj::docs.guide", "Guide", '["consumer"]', "docs/guide.json", None, now),
+                ("proj::docs/guide", "Guide", '["consumer"]', "docs/guide.json", None, now),
             )
             seed_section_tuple(
-                conn, ("proj::docs.guide::sec", "proj::docs.guide", "Sec", 2, None, "guide", None, None, 0, 0, now)
+                conn, ("proj::docs/guide::sec", "proj::docs/guide", "Sec", 2, None, "guide", None, None, 0, 0, now)
             )
 
             # spec -> code (documents), consumer -> spec (documents)
-            db.upsert_edge_conn(conn, _edge("proj::docs.spec::sec", "documents", "proj::mod.fn"))
-            db.upsert_edge_conn(conn, _edge("proj::docs.guide::sec", "documents", "proj::docs.spec::sec"))
+            db.upsert_edge_conn(conn, _edge("proj::docs/spec::sec", "documents", "proj::mod.fn"))
+            db.upsert_edge_conn(conn, _edge("proj::docs/guide::sec", "documents", "proj::docs/spec::sec"))
 
             # NO history row making code stale — everything is clean.
 
         result = _get_linked_stale_ids(db_path, transitive_tags=["consumer"])
 
         # Neither should be stale
-        assert "proj::docs.spec::sec" not in result
-        assert "proj::docs.guide::sec" not in result
+        assert "proj::docs/spec::sec" not in result
+        assert "proj::docs/guide::sec" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -419,8 +419,8 @@ class TestViaInCliOutput:
         runner = CliRunner()
         result = runner.invoke(cmd_check, [str(mini_project), "--all"])
 
-        # The consumer doc should show 'via proj::docs.spec::overview'
-        assert "via proj::docs.spec::overview" in result.output
+        # The consumer doc should show 'via proj::docs/spec::overview'
+        assert "via proj::docs/spec::overview" in result.output
 
     def test_via_in_json_output(self, db_path: Path, mini_project: Path):
         """JSON output includes linked_via and linked_via_count for LINKED_STALE nodes."""
@@ -441,10 +441,10 @@ class TestViaInCliOutput:
         result = runner.invoke(cmd_check, [str(mini_project), "--format", "json"])
 
         data = json.loads(result.output)
-        consumer_entry = data["statuses"].get("proj::docs.guide::intro", {})
+        consumer_entry = data["statuses"].get("proj::docs/guide::intro", {})
         assert consumer_entry.get("link_status") == "LINKED_STALE"
         assert "linked_via" in consumer_entry
-        assert "proj::docs.spec::overview" in consumer_entry["linked_via"]
+        assert "proj::docs/spec::overview" in consumer_entry["linked_via"]
         assert consumer_entry["linked_via_count"] >= 1
 
 
@@ -514,12 +514,12 @@ class TestFrozenTagsPropagation:
 
         # Baseline check: WITHOUT frozen_tags the dev_spec IS stale.
         baseline = _get_linked_stale_ids(db_path, transitive_tags=None, frozen_tags=None)
-        assert "proj::docs.spec::overview" in baseline
+        assert "proj::docs/spec::overview" in baseline
 
         # Pass 3 with transitive_tags=["adr"] would normally propagate
         # guide LINKED_STALE; with frozen_tags=["adr"] it must NOT.
         result = _get_linked_stale_ids(db_path, transitive_tags=["adr"], frozen_tags=["adr"])
-        assert "proj::docs.guide::intro" not in result
+        assert "proj::docs/guide::intro" not in result
 
     def test_pass1_skip_when_section_doc_tagged_frozen(self, db_path: Path):
         """A doc-to-code linked section under a frozen-tagged doc never enters Pass 1."""
@@ -527,7 +527,7 @@ class TestFrozenTagsPropagation:
 
         code_fn = _node("proj::mod.fn", location="src/mod.py")
         adr_section = _node(
-            "proj::docs.adr-001::ctx",
+            "proj::docs/adr-001::ctx",
             subtype="docjson",
             code_hash="adrhash",
             location="docs/adr-001.json",
@@ -540,13 +540,13 @@ class TestFrozenTagsPropagation:
             conn.execute(
                 "INSERT OR REPLACE INTO docs (id, title, tags, file_path, desc_hash, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                ("proj::docs.adr-001", "ADR-001", '["adr"]', "docs/adr-001.json", None, now),
+                ("proj::docs/adr-001", "ADR-001", '["adr"]', "docs/adr-001.json", None, now),
             )
             seed_section_tuple(
                 conn,
                 (
-                    "proj::docs.adr-001::ctx",
-                    "proj::docs.adr-001",
+                    "proj::docs/adr-001::ctx",
+                    "proj::docs/adr-001",
                     "Context",
                     2,
                     None,
@@ -558,7 +558,7 @@ class TestFrozenTagsPropagation:
                     now,
                 ),
             )
-            db.upsert_edge_conn(conn, _edge("proj::docs.adr-001::ctx", "documents", "proj::mod.fn"))
+            db.upsert_edge_conn(conn, _edge("proj::docs/adr-001::ctx", "documents", "proj::mod.fn"))
             # Make code stale.
             time.sleep(0.05)
             later = db._now_utc()
@@ -570,11 +570,11 @@ class TestFrozenTagsPropagation:
 
         # Without frozen_tags — ADR section IS stale (baseline).
         baseline = _get_linked_stale_ids(db_path, transitive_tags=None, frozen_tags=None)
-        assert "proj::docs.adr-001::ctx" in baseline
+        assert "proj::docs/adr-001::ctx" in baseline
 
         # With frozen_tags=["adr"] — ADR section is skipped.
         result = _get_linked_stale_ids(db_path, transitive_tags=None, frozen_tags=["adr"])
-        assert "proj::docs.adr-001::ctx" not in result
+        assert "proj::docs/adr-001::ctx" not in result
 
     def test_pass3_skip_for_frozen_doc(self, db_path: Path):
         """A frozen-tagged consumer doc does NOT receive transitive propagation."""
@@ -585,12 +585,12 @@ class TestFrozenTagsPropagation:
 
         # Baseline: consumer transitive propagation makes guide LINKED_STALE.
         baseline = _get_linked_stale_ids(db_path, transitive_tags=["consumer"], frozen_tags=None)
-        assert "proj::docs.guide::intro" in baseline
+        assert "proj::docs/guide::intro" in baseline
 
         # With frozen_tags=["adr"]: guide is now frozen, must not propagate.
         result = _get_linked_stale_ids(db_path, transitive_tags=["consumer"], frozen_tags=["adr"])
-        assert "proj::docs.spec::overview" in result  # spec still stale at Pass 1
-        assert "proj::docs.guide::intro" not in result
+        assert "proj::docs/spec::overview" in result  # spec still stale at Pass 1
+        assert "proj::docs/guide::intro" not in result
 
     def test_empty_frozen_tags_matches_baseline(self, db_path: Path):
         """frozen_tags=[] or None yields identical stale_map to baseline.
@@ -632,7 +632,7 @@ class TestFrozenTagsPropagation:
 
         code_fn = _node("proj::mod.fn", location="src/mod.py")
         adr_section = _node(
-            "proj::docs.adr-001::ctx",
+            "proj::docs/adr-001::ctx",
             subtype="docjson",
             code_hash="adrhash",
             location="docs/adr-001.json",
@@ -644,13 +644,13 @@ class TestFrozenTagsPropagation:
             conn.execute(
                 "INSERT OR REPLACE INTO docs (id, title, tags, file_path, desc_hash, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                ("proj::docs.adr-001", "ADR-001", '["adr"]', "docs/adr-001.json", None, now),
+                ("proj::docs/adr-001", "ADR-001", '["adr"]', "docs/adr-001.json", None, now),
             )
             seed_section_tuple(
                 conn,
                 (
-                    "proj::docs.adr-001::ctx",
-                    "proj::docs.adr-001",
+                    "proj::docs/adr-001::ctx",
+                    "proj::docs/adr-001",
                     "Context",
                     2,
                     None,
@@ -662,7 +662,7 @@ class TestFrozenTagsPropagation:
                     now,
                 ),
             )
-            db.upsert_edge_conn(conn, _edge("proj::docs.adr-001::ctx", "documents", "proj::mod.fn"))
+            db.upsert_edge_conn(conn, _edge("proj::docs/adr-001::ctx", "documents", "proj::mod.fn"))
             # Mark code drifted AFTER ADR was updated.
             time.sleep(0.05)
             later = db._now_utc()
@@ -680,7 +680,7 @@ class TestFrozenTagsPropagation:
         with db._connect(db_path) as conn:
             row = conn.execute(
                 "SELECT link_status FROM nodes WHERE id = ?",
-                ("proj::docs.adr-001::ctx",),
+                ("proj::docs/adr-001::ctx",),
             ).fetchone()
         assert row["link_status"] == "LINKED_STALE", "Pre-adoption baseline: ADR section must be LINKED_STALE"
 
@@ -693,7 +693,7 @@ class TestFrozenTagsPropagation:
         with db._connect(db_path) as conn:
             row = conn.execute(
                 "SELECT link_status FROM nodes WHERE id = ?",
-                ("proj::docs.adr-001::ctx",),
+                ("proj::docs/adr-001::ctx",),
             ).fetchone()
         assert row["link_status"] == "LINKED_STALE", (
             "ADR-018 sticky invariant violated: pre-existing LINKED_STALE "

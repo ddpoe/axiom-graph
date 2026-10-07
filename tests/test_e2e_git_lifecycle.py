@@ -510,38 +510,61 @@ def test_multiple_builds_same_sha(git_project: Path, git_db_path: Path):
     assert second["change_kinds"].get(node.id) == ["content"]
 
 
-# Test 5 — SHA not in history → fail loud (no fallback to a different baseline)
-@workflow(purpose="An explicit SHA absent from history returns resolved:false instead of a fallback baseline")
-def test_sha_not_in_history_fails_loud(git_project: Path, git_db_path: Path):
+# Test 5 — SHA git knows but the index never saw → resolves by commit time
+@workflow(
+    purpose="A SHA that was committed but never built resolves to its git commit time: the report "
+    "says so, counts only what changed after that commit, and the viz answers it too"
+)
+def test_sha_not_in_history_resolves_by_git_commit_time(git_project: Path, git_db_path: Path):
+    import time
+
+    from axiom_graph.lifecycle import api as lifecycle_api
+
+    Step(step_num=1, name="Commit A and index it", purpose="Baseline build — INITIAL rows at commit A")
     (git_project / "mod.py").write_text(
         'def greet():\n    """Hello."""\n    return "hello"\n',
         encoding="utf-8",
     )
-    sha_a = _commit(git_project, "Add greet")
+    _commit(git_project, "Add greet")
     _init(git_project)
+    # Commit times have whole-second precision; keep commit B in a later second.
+    time.sleep(1.1)
 
-    # Commit B — no build, so sha_b is NOT in any history row
+    Step(step_num=2, name="Commit B without building", purpose="sha_b is in git but in no history row")
     (git_project / "mod.py").write_text(
         'def greet():\n    """Hello."""\n    return "goodbye"\n',
         encoding="utf-8",
     )
     sha_b = _commit(git_project, "Change greet")
 
-    # Commit C — build happens here
+    Step(step_num=3, name="Commit C and build", purpose="The change lands in history after commit B's time")
     (git_project / "mod.py").write_text(
         'def greet():\n    """Hello."""\n    return "hi there"\n',
         encoding="utf-8",
     )
-    sha_c = _commit(git_project, "Change greet again")
+    _commit(git_project, "Change greet again")
     _build(git_project)
 
-    # Since with sha_b — committed but never built, so absent from history.
-    # The endpoint must fail loud rather than resolve a different baseline.
+    Step(
+        step_num=4,
+        name="Report since sha_b",
+        purpose="The reference resolves via git commit time, the header says so, and only post-B rows count",
+    )
+    data = lifecycle_api.compute_report(git_db_path, since_sha=sha_b[:10], project_root=git_project)
+    assert data.resolution.source == "git-commit-time"
+    assert data.resolution.sha == sha_b
+    text = lifecycle_api.render_report_text(data, "full")
+    assert text.splitlines()[0].startswith(f"reference: {sha_b[:12]} — git commit time")
+    assert "(SHA not in index)" in text.splitlines()[0]
+    all_types = {r["change_type"] for evts in data.content_changes.values() for r in evts}
+    assert "INITIAL" not in all_types, "rows from the commit-A build predate commit B"
+    window_ids = set(data.content_changes) | {r["node_id"] for r in data.staleness_transitions}
+    assert any(nid.endswith("greet") for nid in window_ids), f"the commit-C change follows commit B: {window_ids}"
+
+    Step(step_num=5, name="Viz changed-since for sha_b", purpose="The endpoint resolves the same SHA")
     since_result = _since(git_db_path, git_project, sha=sha_b[:10])
-    assert since_result["resolved"] is False
-    assert since_result["reason"] == "not in index"
-    assert since_result.get("requested_sha") == sha_b[:10]
-    assert "node_ids" not in since_result
+    assert since_result["resolved"] is True
+    assert since_result["baseline_sha"] == sha_b
 
 
 # Test 6 — No params, no checkpoints → latest sha-bearing row
@@ -648,37 +671,42 @@ def test_ghost_nodes_deleted_file(git_project: Path, git_db_path: Path):
 
 
 # Test 10 — Line shift + real git diff
-@workflow(purpose="Adding a function above shifts line numbers; diff still returns correct content")
+@workflow(
+    purpose="Code inserted above two functions shifts their lines; the untouched one diffs as unchanged "
+    "and the edited one shows exactly its own old and new body"
+)
 def test_line_shift_real_git_diff(git_project: Path, git_db_path: Path):
-    (git_project / "mod.py").write_text(
-        'def greet():\n    """Hello."""\n    return "hello"\n',
-        encoding="utf-8",
-    )
-    _commit(git_project, "Add greet")
+    greet = 'def greet():\n    """Hello."""\n    return "hello"\n'
+    farewell_old = 'def farewell():\n    """Bye."""\n    return "bye"\n'
+    farewell_new = 'def farewell():\n    """Bye."""\n    return "goodbye for now"\n'
+
+    口 = Step(step_num=1, name="Commit the baseline", purpose="Two functions, indexed with a full build")
+    (git_project / "mod.py").write_text(greet + "\n\n" + farewell_old, encoding="utf-8")
+    baseline = _commit(git_project, "Add greet and farewell")
     _init(git_project)
 
-    # Add a function above, shifting greet's lines
-    (git_project / "mod.py").write_text(
-        "def helper():\n"
-        '    """Push greet down."""\n'
-        "    return 42\n"
-        "\n"
-        "\n"
-        "def greet():\n"
-        '    """Hello."""\n'
-        '    return "hello"\n',
-        encoding="utf-8",
+    口 = Step(
+        step_num=2,
+        name="Shift both and edit one",
+        purpose="Insert a large block above both functions and change farewell's body only; commit and build",
     )
-    _commit(git_project, "Add helper above greet")
+    helpers = "".join(f"def helper_{i}():\n    return {i}\n\n\n" for i in range(12))
+    (git_project / "mod.py").write_text(helpers + greet + "\n\n" + farewell_new, encoding="utf-8")
+    _commit(git_project, "Add helpers above, edit farewell")
     _build(git_project)
 
-    node = _find_node(git_db_path, "greet")
-    result = _diff(git_db_path, git_project, node.id)
+    口 = Step(step_num=3, name="Diff the untouched function", purpose="Old and new sides are the same text")
+    greet_diff = _diff(git_db_path, git_project, "proj::mod::greet", sha=baseline)
+    assert "error" not in greet_diff
+    assert greet_diff["old_content"] == greet_diff["new_content"] == greet.rstrip("\n")
 
-    # Should not error — the old content from git show should resolve correctly
-    # even though line numbers shifted
-    if "error" not in result:
-        assert "greet" in result.get("new_content", "")
+    口 = Step(
+        step_num=4, name="Diff the edited function", purpose="Each side is that function's own body, nothing else"
+    )
+    farewell_diff = _diff(git_db_path, git_project, "proj::mod::farewell", sha=baseline)
+    assert "error" not in farewell_diff
+    assert farewell_diff["old_content"] == farewell_old.rstrip("\n")
+    assert farewell_diff["new_content"] == farewell_new.rstrip("\n")
 
 
 # Test 13 — Recent SHAs dropdown
